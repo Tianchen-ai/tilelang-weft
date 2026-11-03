@@ -1,4 +1,5 @@
 """Typed native helper regions, including exits through ordinary control/Level."""
+
 import json
 
 from weft_core.types import shape_of, axes_of, element_type
@@ -21,14 +22,33 @@ class HelperOperations:
                 self.helper_stack.pop()
         if context["types"] is None:
             self.error("helper has no typed return path", block)
-        result_types = (*context["types"], *(incoming[key].type for key in keys))
-        results = self.emit("weft_kernel.helper", types=result_types, attrs={
-            "name": json.dumps(str(block.annotations["weft.helper"])),
-            "noinline": "true" if bool(block.annotations["weft.helper.noinline"]) else "false",
-        }, regions=(region,))
         count = len(context["types"])
+
+        def returns(body):
+            for operation in body.operations:
+                if operation.name == "weft_kernel.helper_return":
+                    yield operation
+                elif operation.name != "weft_kernel.helper":
+                    for nested in operation.regions:
+                        yield from returns(nested)
+
+        exits = tuple(returns(region))
+        changed = tuple(i for i, key in enumerate(keys) if any(exit.operands[count + i] is not incoming[key] for exit in exits))
+        for exit in exits:
+            exit.operands = (*exit.operands[:count], *(exit.operands[count + i] for i in changed))
+        result_types = (*context["types"], *(incoming[keys[i]].type for i in changed))
+        results = self.emit(
+            "weft_kernel.helper",
+            types=result_types,
+            attrs={
+                "name": json.dumps(str(block.annotations["weft.helper"])),
+                "noinline": "true" if bool(block.annotations["weft.helper.noinline"]) else "false",
+            },
+            regions=(region,),
+        )
         self.helper_results[int(block.annotations["weft.helper.id"])] = results[:count]
-        self.locals, self.env = dict(zip(keys, results[count:])), environment
+        self.locals, self.env = incoming, environment
+        self.locals.update(zip((keys[i] for i in changed), results[count:]))
         self.local_axes, self.readonly = incoming_axes, readonly
 
     def source_return(self, call):

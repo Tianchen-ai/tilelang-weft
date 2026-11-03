@@ -45,6 +45,12 @@ dependencies = [
     "z3-solver>=4.13.0,<4.15.5",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Tianchen-ai/tilelang-weft"
+Documentation = "https://tianchen-ai.github.io/tilelang-weft/"
+Repository = "https://github.com/Tianchen-ai/tilelang-weft"
+Upstream = "https://github.com/tile-ai/tilelang"
+
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
@@ -117,33 +123,44 @@ cmake.args = ["-G", "Ninja"]
 
 [tool.scikit-build.sdist]
 include = [
-    "./VERSION",
-    ".git_commit.txt",
-    "./LICENSE",
-    "THIRDPARTYNOTICES.txt",
-    "version_provider.py",
-    "requirements*.txt",
-    "tilelang/jit/adapter/cython/cython_wrapper.pyx",
-    "CMakeLists.txt",
-    "src/**",
-    "cmake/**",
+    "/VERSION",
+    "/.git_commit.txt",
+    "/LICENSE",
+    "/THIRDPARTYNOTICES.txt",
+    "/version_provider.py",
+    "/requirements*.txt",
+    "/tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "/CMakeLists.txt",
+    "/src/**",
+    "/cmake/**",
     # The vendored 3rdparty contents in sdist should be same as wheel.
     # Need full TVM to build from source.
-    "3rdparty/tvm",
+    "/3rdparty/tvm/**",
     # CUTLASS
-    "3rdparty/cutlass/include",
-    "3rdparty/cutlass/tools",
+    "/3rdparty/cutlass/include/**",
+    "/3rdparty/cutlass/tools/**",
     # Vendored HIP headers (build-time only) so source builds work on hosts
     # without a ROCm install. Not mapped into the wheel at runtime.
-    "3rdparty/hip-headers/include",
-    "testing/**",
-    "examples/**",
+    "/3rdparty/hip-headers/include/**",
+    "/testing/**",
+    "/examples/**",
+    # Explicit includes override exclusions in scikit-build-core. Remove
+    # generated files from the include set before applying sdist exclusions.
+    "!**/.git",
+    "!**/.git/**",
+    "!**/.github/**",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/build/**",
 ]
 exclude = [
     ".git",
+    ".local/**",
     ".github",
     "**/.git",
     "**/.github",
+    "**/__pycache__/**",
+    "**/*.pyc",
     "3rdparty/**",
     "build",
 ]
@@ -197,6 +214,9 @@ docstring-code-line-length = "dynamic"
 # See https://github.com/tile-ai/tilelang/issues/1079 for more information.
 "testing/**.py" = ["UP", "FA"]
 "examples/**.py" = ["UP", "FA"]
+# Nested declaration regions are semantic boundaries, analyzed as complete AST blocks.
+"tilelang/weft/kernels/**.py" = ["SIM117"]
+"examples/weft/**.py" = ["UP", "FA", "SIM117"]
 
 [tool.ruff.lint]
 select = [

@@ -40,6 +40,7 @@ class BackendModule:
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
     artifact_compiler: Callable[..., CompiledArtifact] | None = None
+    compiler_identity: Callable[[], object] | None = None
     parallel_iteration_model: Literal["simt", "independent_values"] = "simt"
 
     def __post_init__(self) -> None:

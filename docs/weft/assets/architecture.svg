@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="790" viewBox="0 0 1400 790">
+<title>TileLang and Triton share the Weft compiler</title>
+<desc>Two native frontends enter one Canonical program, which retains field mappings, typed groups, prepared values and state updates. A shared compiler constructs x86 and RISC-V native kernels; a shared runtime invokes them from JIT and C/C++ callers.</desc>
+<rect id="canvas" x="0" y="0" width="1400" height="790" fill="#FFFFFF"/>
+<g font-family="Liberation Sans" fill="#25292D" stroke="none">
+<path id="triton-frontend" d="M225 24 H585 Q595 24 595 34 V101 Q595 111 585 111 H225 Q215 111 215 101 V34 Q215 24 225 24 Z" fill="#FFFFFF" stroke="#68747C" stroke-width="1.8"/>
+<text id="triton-title" x="405" y="62" text-anchor="middle" font-size="30" font-weight="bold">Triton</text>
+<text id="triton-native" x="405" y="91" text-anchor="middle" font-size="22">native frontend</text>
+<path id="tilelang-frontend" d="M815 24 H1175 Q1185 24 1185 34 V101 Q1185 111 1175 111 H815 Q805 111 805 101 V34 Q805 24 815 24 Z" fill="#FFFFFF" stroke="#68747C" stroke-width="1.8"/>
+<text id="tilelang-title" x="995" y="62" text-anchor="middle" font-size="30" font-weight="bold">TileLang</text>
+<text id="tilelang-native" x="995" y="91" text-anchor="middle" font-size="22">native frontend</text>
+
+<path id="shared-compiler" d="M66 141 H1334 Q1350 141 1350 157 V585 Q1350 601 1334 601 H66 Q50 601 50 585 V157 Q50 141 66 141 Z" fill="#F5F7F8" stroke="#68747C" stroke-width="1.8"/>
+<text id="shared-compiler-title" x="78" y="176" font-size="28" font-weight="bold">Shared Weft compiler</text>
+<path id="canonical-boundary" d="M94 196 H1306 Q1320 196 1320 210 V415 Q1320 429 1306 429 H94 Q80 429 80 415 V210 Q80 196 94 196 Z" fill="#FFFFFF" stroke="#2E7297" stroke-width="2"/>
+<text id="canonical-title" x="700" y="233" text-anchor="middle" font-size="28" font-weight="bold">Weft Canonical IR</text>
+<path id="triton-to-canonical" d="M405 111 V184" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="triton-to-canonical-head" points="405,196 399,183 411,183" fill="#25292D"/>
+<path id="tilelang-to-canonical" d="M995 111 V184" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="tilelang-to-canonical-head" points="995,196 989,183 1001,183" fill="#25292D"/>
+
+<text id="fields-label" x="112" y="278" font-size="24">Field mapping</text>
+<rect id="fields" x="112" y="295" width="240" height="36" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.8"/>
+<path id="field-boundaries" d="M157 295 V331 M222 295 V331 M257 295 V331" fill="none" stroke="#2E7297" stroke-width="1.6"/>
+<path id="fields-to-groups" d="M352 313 H445" fill="none" stroke="#2E7297" stroke-width="2"/>
+<polygon id="fields-to-groups-head" points="457,313 444,307 444,319" fill="#2E7297"/>
+<text id="groups-label" x="462" y="278" font-size="24">Typed groups</text>
+<rect id="group-a" x="462" y="295" width="132" height="36" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.8"/>
+<path id="group-a-members" d="M506 295 V331 M550 295 V331" fill="none" stroke="#2E7297" stroke-width="1.4"/>
+<rect id="group-b" x="620" y="295" width="132" height="36" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.8"/>
+<path id="group-b-members" d="M664 295 V331 M708 295 V331" fill="none" stroke="#2E7297" stroke-width="1.4"/>
+<path id="groups-to-state" d="M752 313 H881 Q891 313 891 323 V353" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="groups-to-state-head" points="891,365 885,352 897,352" fill="#25292D"/>
+
+<text id="prepared-label" x="112" y="362" font-size="24">Prepared values</text>
+<rect id="prepared" x="112" y="379" width="240" height="28" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.8"/>
+<path id="prepared-members" d="M172 379 V407 M232 379 V407 M292 379 V407" fill="none" stroke="#2E7297" stroke-width="1.4"/>
+<path id="prepared-fanout" d="M352 393 H388 Q402 393 402 380 V371 Q402 360 415 360 H450 M388 393 H450" fill="none" stroke="#2E7297" stroke-width="2"/>
+<polygon id="prepared-first-head" points="462,360 449,354 449,366" fill="#2E7297"/>
+<polygon id="prepared-second-head" points="462,393 449,387 449,399" fill="#2E7297"/>
+<path id="consumer-a" d="M470 349 H544 Q552 349 552 357 V363 Q552 371 544 371 H470 Q462 371 462 363 V357 Q462 349 470 349 Z" fill="#EEF1F3" stroke="#68747C" stroke-width="1.6"/>
+<path id="consumer-b" d="M470 382 H544 Q552 382 552 390 V396 Q552 404 544 404 H470 Q462 404 462 396 V390 Q462 382 470 382 Z" fill="#EEF1F3" stroke="#68747C" stroke-width="1.6"/>
+<path id="consumers-to-state" d="M552 360 H585 Q598 360 598 373 V380 Q598 386 610 386 H838 M552 393 H585 Q598 393 598 386" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="consumers-to-state-head" points="850,386 837,380 837,392" fill="#25292D"/>
+<text id="state-label" x="1049" y="348" text-anchor="middle" font-size="24">State updates</text>
+<path id="state-0" d="M860 365 H922 Q932 365 932 375 V397 Q932 407 922 407 H860 Q850 407 850 397 V375 Q850 365 860 365 Z" fill="#FBECCB" stroke="#AF7B32" stroke-width="1.8"/>
+<text id="state-0-label" x="891" y="394" text-anchor="middle" font-size="24" font-style="italic">s₀</text>
+<path id="state-1" d="M1017 365 H1079 Q1089 365 1089 375 V397 Q1089 407 1079 407 H1017 Q1007 407 1007 397 V375 Q1007 365 1017 365 Z" fill="#FBECCB" stroke="#AF7B32" stroke-width="1.8"/>
+<text id="state-1-label" x="1048" y="394" text-anchor="middle" font-size="24" font-style="italic">s₁</text>
+<path id="state-2" d="M1174 365 H1236 Q1246 365 1246 375 V397 Q1246 407 1236 407 H1174 Q1164 407 1164 397 V375 Q1164 365 1174 365 Z" fill="#FBECCB" stroke="#AF7B32" stroke-width="1.8"/>
+<text id="state-2-label" x="1205" y="394" text-anchor="middle" font-size="24" font-style="italic">s₂</text>
+<path id="state-sequence" d="M932 386 H995 M1089 386 H1152" fill="none" stroke="#AF7B32" stroke-width="2.2"/>
+<polygon id="state-1-head" points="1007,386 994,380 994,392" fill="#AF7B32"/>
+<polygon id="state-2-head" points="1164,386 1151,380 1151,392" fill="#AF7B32"/>
+
+<path id="canonical-to-x86" d="M560 429 V440 Q560 451 549 451 H417 Q405 451 405 461" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="to-x86-head" points="405,473 399,460 411,460" fill="#25292D"/>
+<path id="canonical-to-riscv" d="M840 429 V440 Q840 451 851 451 H983 Q995 451 995 461" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="to-riscv-head" points="995,473 989,460 1001,460" fill="#25292D"/>
+<path id="x86" d="M180 473 H630 Q642 473 642 485 V560 Q642 572 630 572 H180 Q168 572 168 560 V485 Q168 473 180 473 Z" fill="#FFFFFF" stroke="#68747C" stroke-width="1.6"/>
+<text id="x86-title" x="190" y="509" font-size="27" font-weight="bold">x86</text>
+<text id="x86-isa" x="618" y="509" text-anchor="end" font-size="22">SIMD / AMX</text>
+<rect id="x86-vector" x="192" y="533" width="265" height="22" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.4"/>
+<path id="x86-lanes" d="M245 533 V555 M298 533 V555 M351 533 V555 M404 533 V555" fill="none" stroke="#2E7297" stroke-width="1.2"/>
+<rect id="x86-state" x="492" y="533" width="124" height="22" fill="#FBECCB" stroke="#AF7B32" stroke-width="1.4"/>
+<path id="riscv" d="M770 473 H1220 Q1232 473 1232 485 V560 Q1232 572 1220 572 H770 Q758 572 758 560 V485 Q758 473 770 473 Z" fill="#FFFFFF" stroke="#68747C" stroke-width="1.6"/>
+<text id="riscv-title" x="780" y="509" font-size="27" font-weight="bold">RISC-V</text>
+<text id="riscv-isa" x="1208" y="509" text-anchor="end" font-size="22">RVV / IME</text>
+<rect id="riscv-vector" x="782" y="533" width="265" height="22" fill="#DEEFF7" stroke="#2E7297" stroke-width="1.4"/>
+<path id="riscv-lanes" d="M835 533 V555 M888 533 V555 M941 533 V555 M994 533 V555" fill="none" stroke="#2E7297" stroke-width="1.2"/>
+<rect id="riscv-state" x="1082" y="533" width="124" height="22" fill="#FBECCB" stroke="#AF7B32" stroke-width="1.4"/>
+
+<path id="generated-kernels-arrows" d="M405 572 V627 M995 572 V627" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="x86-kernel-head" points="405,640 399,627 411,627" fill="#25292D"/>
+<polygon id="riscv-kernel-head" points="995,640 989,627 1001,627" fill="#25292D"/>
+<path id="native-kernels" d="M170 640 H1230 Q1240 640 1240 650 V677 Q1240 687 1230 687 H170 Q160 687 160 677 V650 Q160 640 170 640 Z" fill="#EEF1F3" stroke="#68747C" stroke-width="1.6"/>
+<text id="native-kernels-title" x="700" y="672" text-anchor="middle" font-size="27" font-weight="bold">Native CPU kernels</text>
+<path id="runtime-invokes-kernel" d="M700 723 V699" fill="none" stroke="#68747C" stroke-width="1.8" stroke-dasharray="5 4"/>
+<polygon id="runtime-invoke-head" points="700,687 694,700 706,700" fill="#68747C"/>
+<path id="runtime" d="M390 724 H1010 Q1020 724 1020 734 V759 Q1020 769 1010 769 H390 Q380 769 380 759 V734 Q380 724 390 724 Z" fill="#EEF1F3" stroke="#68747C" stroke-width="1.6"/>
+<text id="runtime-title" x="700" y="755" text-anchor="middle" font-size="26" font-weight="bold">Shared native runtime</text>
+<text id="jit" x="205" y="755" font-size="25">JIT calls</text>
+<path id="jit-calls-runtime" d="M306 747 H367" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="jit-call-head" points="380,747 367,741 367,753" fill="#25292D"/>
+<text id="native-call" x="1100" y="755" font-size="25">C/C++ calls</text>
+<path id="native-calls-runtime" d="M1080 747 H1033" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="native-call-head" points="1020,747 1033,741 1033,753" fill="#25292D"/>
+</g>
+</svg>

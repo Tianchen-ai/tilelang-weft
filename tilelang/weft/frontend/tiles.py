@@ -1,9 +1,9 @@
 """Semantic tile operations retained by the native TileLang builder."""
+
 import json
 
 from tvm import tirx
-from weft_core import dtypes as dt
-from weft_core.types import ScalarType, LocalValueType, axes_of, shape_of, element_type, value_type, emit_type
+from weft_core.types import ScalarType, LocalValueType, shape_of, element_type, value_type, emit_type
 
 
 class TileOperations:
@@ -21,8 +21,7 @@ class TileOperations:
 
     def region_indices(self, region, axes):
         buffer, starts, shape = region
-        return [self.binary("add", self.expr(start), self.iota(size, axis))
-                for start, size, axis in zip(starts, shape, axes)]
+        return [self.binary("add", self.expr(start), self.iota(size, axis)) for start, size, axis in zip(starts, shape, axes)]
 
     def read_region(self, region, axes):
         buffer, starts, shape = region
@@ -35,9 +34,15 @@ class TileOperations:
         if buffer in self.readonly:
             self.error(f"staged buffer {buffer.name} is an immutable snapshot")
         from .importer import dtype
+
         value = self.cast(value, dtype(buffer.dtype))
         value = self.rename(value, shape, axes)
-        if buffer in self.locals and all(self.static(start) == 0 for start in starts) and shape == shape_of(self.locals[buffer].type) and self.mask is None:
+        if (
+            buffer in self.locals
+            and all(self.static(start) == 0 for start in starts)
+            and shape == shape_of(self.locals[buffer].type)
+            and self.mask is None
+        ):
             self.locals[buffer] = self.rename(value, shape, self.local_axes[buffer])
             return
         self.store(buffer, self.region_indices(region, axes), value)
@@ -54,6 +59,7 @@ class TileOperations:
         if name == "tl.tileop.fill":
             region = self.region(call.args[0])
             from .importer import dtype
+
             value = self.cast(self.expr(call.args[1]), dtype(region[0].dtype))
             axes = tuple(self.axis() for _ in region[2])
             self.write_region(region, self.broadcast(value, region[2], axes), axes)
@@ -67,8 +73,9 @@ class TileOperations:
             with self.insertion(combine):
                 result = self.binary("add" if name.endswith("cumsum") else "max", *combine.arguments)
                 self.emit("weft_kernel.scan_yield", (result,))
-            scanned = self.emit("weft_kernel.scan", (value,), (value.type,),
-                                {"axis": str(axis), "reverse": "true" if reverse else "false"}, (combine,))[0]
+            scanned = self.emit(
+                "weft_kernel.scan", (value,), (value.type,), {"axis": str(axis), "reverse": "true" if reverse else "false"}, (combine,)
+            )[0]
             self.write_region(output, scanned, axes)
             return True
         if name == "tl.tileop.gemm":
@@ -77,8 +84,8 @@ class TileOperations:
             m, n, k = (self.static(a) for a in call.args[5:8])
             clear = bool(int(call.args[9].value))
             row, column, reduction = self.axis(), self.axis(), self.axis()
-            left_axes = ((reduction, row) if transpose_left else (row, reduction))
-            right_axes = ((column, reduction) if transpose_right else (reduction, column))
+            left_axes = (reduction, row) if transpose_left else (row, reduction)
+            right_axes = (column, reduction) if transpose_right else (reduction, column)
             if len(left[2]) != 2 or len(right[2]) != 2 or len(output[2]) != 2:
                 self.error("gemm tile operands require explicit rank-two regions")
             a, b = self.read_region(left, left_axes), self.read_region(right, right_axes)
@@ -87,12 +94,16 @@ class TileOperations:
             if transpose_right:
                 b = self.rename(b, (k, n), (reduction, column), (reduction, column))
             from .importer import dtype, integers
+
             accum = ScalarType(dtype(output[0].dtype))
             engine = call.annotations.get("weft_engine", "auto")
             engine = str(engine.value) if isinstance(engine, tirx.StringImm) else str(engine)
-            product = self.op("outer_contract", (a, b), LocalValueType(accum, (m, n), (row, column)),
-                              {"over": integers((reduction,)), "acc_type": emit_type(accum),
-                               "engine": json.dumps(engine)})
+            product = self.op(
+                "outer_contract",
+                (a, b),
+                LocalValueType(accum, (m, n), (row, column)),
+                {"over": integers((reduction,)), "acc_type": emit_type(accum), "engine": json.dumps(engine)},
+            )
             if not clear:
                 product = self.binary("add", self.read_region(output, (row, column)), product)
             self.write_region(output, product, (row, column))
@@ -112,19 +123,17 @@ class TileOperations:
             if kind in ("abssum", "absmax"):
                 value = self.op("unary", (value,), value.type, {"kind": json.dumps("abs")})
                 kind = "sum" if kind == "abssum" else "max"
-            shape = source[2][:axis] + source[2][axis + 1:]
-            result_axes = axes[:axis] + axes[axis + 1:]
+            shape = source[2][:axis] + source[2][axis + 1 :]
+            result_axes = axes[:axis] + axes[axis + 1 :]
             output_type = value_type(element_type(value.type), shape, result_axes)
             if kind.startswith("bit"):
                 region = self.builder.region((element_type(value.type),) * 2)
                 with self.insertion(region):
                     combined = self.binary(names[kind], *region.arguments)
                     self.emit("weft_kernel.reduce_yield", (combined,))
-                result = self.emit("weft_kernel.reduce_region", (value,), (output_type,),
-                                   {"axis": str(axis)}, (region,))[0]
+                result = self.emit("weft_kernel.reduce_region", (value,), (output_type,), {"axis": str(axis)}, (region,))[0]
             else:
-                result = self.op("reduce", (value,), output_type,
-                                 {"kind": json.dumps(names[kind]), "axis": str(axis)})
+                result = self.op("reduce", (value,), output_type, {"kind": json.dumps(names[kind]), "axis": str(axis)})
             if len(output[2]) == len(source[2]):
                 shape = shape[:axis] + (1,) + shape[axis:]
                 result_axes = result_axes[:axis] + (axes[axis],) + result_axes[axis:]

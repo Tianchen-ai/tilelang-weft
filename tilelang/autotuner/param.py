@@ -58,7 +58,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto"
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "weft_native"] = "auto"
     target: TargetLike = "auto"
     target_host: TargetLike | None = None
     verbose: bool = False
@@ -89,7 +89,11 @@ class CompileArgs:
             "target": str(self.target),
             "target_host": str(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
-            "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
+            "pass_configs": {
+                name: tvm.ir.save_json(value) if isinstance(value, tvm.ir.DictAttrs) else value for name, value in pass_configs.items()
+            }
+            if pass_configs
+            else None,
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
@@ -122,7 +126,7 @@ class ProfileArgs:
     warmup: int = 25
     rep: int = 100
     timeout: int = 30
-    backend: Literal["event", "cupti", "cudagraph"] = "event"
+    backend: Literal["event", "cupti", "cudagraph", "wall"] = "event"
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
@@ -551,6 +555,7 @@ class AutotuneResult:
         )
         if kernel is None:
             return None
+        kernel._tilelang_cache_path = str(path)
         kernel.update_tuner_result(
             config=config,
             latency=latency,
@@ -585,6 +590,7 @@ class AutotuneResult:
             files.append(path / KERNEL_PY_PATH)
         elif execution_backend == "weft_native":
             from weft_core.artifact import NativeArtifact
+
             files.extend(NativeArtifact.required_files(path))
         return files
 

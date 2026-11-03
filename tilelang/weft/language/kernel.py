@@ -1,4 +1,5 @@
 """CPU grid declaration; programs execute through the shared native launcher."""
+
 from tvm import tirx
 from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 

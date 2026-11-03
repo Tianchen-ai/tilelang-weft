@@ -30,6 +30,7 @@ from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
+from tilelang import tvm
 
 
 class KernelCache:
@@ -250,6 +251,7 @@ class KernelCache:
         target_host: str | Target = None,
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
+        compiler_identity: object = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -274,8 +276,10 @@ class KernelCache:
             "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
-            "pass_configs": pass_configs,
+            "pass_configs": {name: tvm.ir.save_json(value) if isinstance(value, tvm.ir.DictAttrs) else value
+                             for name, value in (pass_configs or {}).items()},
             "compile_flags": compile_flags,
+            "compiler_identity": compiler_identity,
             **self._get_base_key(),
         }
         # Sort keys to ensure consistency
@@ -368,6 +372,7 @@ class KernelCache:
             target_host=target_host,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            compiler_identity=backend_context.module.compiler_identity() if backend_context.module.compiler_identity else None,
         )
         if verbose:
             self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")
@@ -790,13 +795,16 @@ class KernelCache:
     def _write_manifest(self, cache_path: str):
         """Record size and content hash of every cache file for load-time verification."""
         files: dict[str, dict] = {}
-        for entry in sorted(os.scandir(cache_path), key=lambda item: item.name):
-            if not entry.is_file(follow_symlinks=False) or entry.name == self.manifest_path:
-                continue
-            files[entry.name] = {
-                "size": entry.stat().st_size,
-                "sha256": KernelCache._hash_file(entry.path),
-            }
+        for directory, _, names in os.walk(cache_path, followlinks=False):
+            for name in sorted(names):
+                path = os.path.join(directory, name)
+                relative = os.path.relpath(path, cache_path)
+                if os.path.islink(path) or relative == self.manifest_path:
+                    continue
+                files[relative] = {
+                    "size": os.path.getsize(path),
+                    "sha256": KernelCache._hash_file(path),
+                }
         manifest = {"version": 1, "files": files}
         KernelCache._safe_write_file(
             os.path.join(cache_path, self.manifest_path),
@@ -820,7 +828,7 @@ class KernelCache:
             entries = list(files.items())
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return False
-        required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
+        required_names = {os.path.relpath(path, cache_path) for path in self._get_required_files(cache_path)}
         if not required_names.issubset(files):
             return False
         for name, meta in entries:

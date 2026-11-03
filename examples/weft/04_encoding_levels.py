@@ -1,4 +1,5 @@
 """Packed storage, typed partial sums and explicit state/stage lifetimes."""
+
 import tilelang
 from tilelang.weft import language as T
 
@@ -14,8 +15,7 @@ class Packed32:
 @tilelang.jit(target="weft")
 def packed_dot_factory(M=8, K=64):
     @T.prim_func
-    def main(Wbytes: T.Tensor((M, K // 2), "uint8"),
-             X: T.Tensor((K,), "int8"), Y: T.Tensor((M,), "int32")):
+    def main(Wbytes: T.Tensor((M, K // 2), "uint8"), X: T.Tensor((K,), "int8"), Y: T.Tensor((M,), "int32")):
         W = T.view(Wbytes, shape=(M, K), encoding=Packed32, axes=("m", "k"))
         xv = T.view(X, shape=(K,), axes=("k",))
         yv = T.view(Y, shape=(M,), axes=("m",))
@@ -35,11 +35,13 @@ def packed_dot_factory(M=8, K=64):
                     for r in T.Parallel(4):
                         total[r] += contribution[r]
                 T.copy(total, yv[rows])
+
     return main
 
 
 if __name__ == "__main__":
     import torch
+
     m, k = 8, 64
     q = torch.randint(0, 16, (m, k // 32, 32), dtype=torch.uint8)
     w = (q[..., :16] | (q[..., 16:] << 4)).reshape(m, k // 2).contiguous()

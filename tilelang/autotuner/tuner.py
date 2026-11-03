@@ -130,6 +130,7 @@ class AutoTuner:
         self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
+        self.captured_inputs = None
 
     @classmethod
     def _get_cache_dir(cls) -> Path:
@@ -158,7 +159,7 @@ class AutoTuner:
         self,
         out_idx: list[int] | int | None = None,
         target: TargetLike | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "weft_native"] | None = None,
         target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
@@ -223,7 +224,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -252,9 +253,17 @@ class AutoTuner:
             if supply_prog is not None:
                 logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
             frozen_inputs = list(captured_inputs)
+            self.captured_inputs = frozen_inputs
             cached_tensors_by_device = {}
 
             def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
+                target = self.compile_args.target
+                kind = target.kind.name if isinstance(target, Target) else str(target).split()[0]
+                if kind in ("weft", "c", "llvm"):
+                    # The native profiler borrows these storage identities and
+                    # makes alias-preserving private trials. Per-tensor clones
+                    # here would destroy that relation before validation.
+                    return list(_frozen_inputs)
                 if not isinstance(device, (int, str, torch.device)):
                     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
                 if device not in _cached_tensors_by_device:
@@ -330,11 +339,44 @@ class AutoTuner:
             callback is not None
             for callback in (
                 self.profile_args.ref_prog,
-                self.profile_args.supply_prog,
+                self.profile_args.supply_prog if self.captured_inputs is None else None,
                 self.profile_args.manual_check_prog,
             )
         ):
             return None
+
+        captured_key = None
+        if self.captured_inputs is not None:
+            kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
+            if kind != "weft":
+                return None
+            storages, arguments = {}, []
+            for value in self.captured_inputs:
+                if isinstance(value, torch.Tensor):
+                    if value.device.type != "cpu":
+                        raise TypeError("Weft autotune capture requires CPU input storage")
+                    storage = value.untyped_storage()
+                    identity = storage._cdata
+                    if identity not in storages:
+                        storages[identity] = (len(storages), bytes(storage).hex())
+                    arguments.append(
+                        (
+                            "tensor",
+                            storages[identity][0],
+                            str(value.dtype),
+                            tuple(value.shape),
+                            tuple(value.stride()),
+                            value.storage_offset(),
+                        )
+                    )
+                elif isinstance(value, (int, float, bool)):
+                    arguments.append(("scalar", value))
+                else:
+                    return None
+            # The normal tuning cache records the exact captured input and
+            # alias contract; a fresh process reuses the same selected source
+            # configuration, while different data cannot inherit validation.
+            captured_key = {"arguments": arguments, "storage": [entry[1] for entry in storages.values()]}
 
         # extract parameters from the function signature
         op_parameters = []
@@ -352,6 +394,7 @@ class AutoTuner:
             "extra_parameters": extra_parameters,
             "func_source": func_source,
             "configs": self.configs,
+            "captured_inputs": captured_key,
             "compile_args": hash(self.compile_args),
             "profile_args": hash(self.profile_args),
         }
@@ -474,14 +517,16 @@ class AutoTuner:
 
         def get_compile_func():
             compile_impl = compile_func
-            if torch.cuda.is_available():
+            kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
+            if kind == "cuda" and torch.cuda.is_available():
                 device = torch.cuda.current_device()
                 compile_impl = cuda_device_wrapper(compile_func, device)
             return compile_impl
 
         def get_elaborate_func():
             elaborate_impl = elaborate_func
-            if torch.cuda.is_available():
+            kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
+            if kind == "cuda" and torch.cuda.is_available():
                 device = torch.cuda.current_device()
                 elaborate_impl = cuda_device_wrapper(elaborate_func, device)
             return elaborate_impl

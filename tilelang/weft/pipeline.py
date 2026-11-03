@@ -1,4 +1,5 @@
 """Early semantic import and the single shared physical compilation route."""
+
 from dataclasses import asdict, fields
 import json
 import tempfile
@@ -26,12 +27,14 @@ def compile_artifact(mod, context, *, params, runtime_only, enable_device_compil
     option_type = X86Options if target.arch == "x86_64" else WeftOptions
     physical = json.loads(str(context.target.attrs["options"]))
     pass_config = get_pass_context().config
+
     def static_value(value):
         if isinstance(value, (Map, dict, tvm.ir.DictAttrs)):
             return {str(k): static_value(v) for k, v in value.items()}
         if isinstance(value, (Array, list, tuple)):
             return [static_value(v) for v in value]
         return value.value if isinstance(value, (tvm.tirx.IntImm, tvm.tirx.FloatImm)) else value
+
     backend_options = static_value(pass_config.get("tl.weft.backend_options", {}))
     if not isinstance(backend_options, dict):
         raise TypeError("tl.weft.backend_options must be a mapping of finite compiler parameters")
@@ -50,16 +53,26 @@ def compile_artifact(mod, context, *, params, runtime_only, enable_device_compil
     report["pipeline"].extend(emitted["compilation"]["pipeline"])
     abi = emitted["kernel"] if target.arch == "x86_64" else emitted["kernels"][0]
     source = emitted["llvm_ir"] if target.arch == "x86_64" else emitted["intrinsic_c"]
-    metadata = {**asdict(options), "target": target, "producer": "tilelang", "kernel_abi": abi,
-                "single_instance_abi": single_instance_abi(abi), "compilation": report,
-                "source_bindings": options.meta, "launch_args": [a["name"] for a in abi["arguments"]
-                                                                 if not a["name"].startswith("__triton_")],
-                "num_cpu_threads": imported.threads,
-                "tilelang": {"grid": tvm.ir.save_json(tvm.runtime.convert(imported.grid)),
-                             "parameter_names": [imported.function.buffer_map[p].name if p in imported.function.buffer_map else p.name
-                                                 for p in imported.function.params],
-                             "implicit_names": [p.name for p in imported.implicit],
-                             "function": tvm.ir.save_json(imported.function)}}
+    metadata = {
+        **asdict(options),
+        "target": target,
+        "producer": "tilelang",
+        "kernel_abi": abi,
+        "single_instance_abi": single_instance_abi(abi),
+        "compilation": report,
+        "source_bindings": options.meta,
+        "source_storage": imported.storage_contracts,
+        "launch_args": [a["name"] for a in abi["arguments"] if not a["name"].startswith("__triton_")],
+        "num_cpu_threads": imported.threads,
+        "tilelang": {
+            "grid": tvm.ir.save_json(tvm.runtime.convert(imported.grid)),
+            "parameter_names": [
+                imported.function.buffer_map[p].name if p in imported.function.buffer_map else p.name for p in imported.function.params
+            ],
+            "implicit_names": [p.name for p in imported.implicit],
+            "function": tvm.ir.save_json(imported.function),
+        },
+    }
     native = None
     if enable_device_compile:
         toolchain_config = json.loads(str(context.target.attrs["toolchain"]))
@@ -69,9 +82,23 @@ def compile_artifact(mod, context, *, params, runtime_only, enable_device_compil
         toolchain = Toolchain.resolve(toolchain_config, target)
         with tempfile.TemporaryDirectory(prefix="tilelang-weft-compile-") as directory:
             binary = toolchain.compile(source, metadata, target, directory)
-            native = NativeArtifact.create(binary, SimpleNamespace(**metadata), {
-                "weftir": str(canonical), "x86ir" if target.arch == "x86_64" else "riscvir": str(lowered),
-                "llir" if target.arch == "x86_64" else "c": source,
-            })
-    return CompiledArtifact(None, None, params, source, target=context.target, target_host=context.target_host,
-                            native_artifact=native, semantic_ir=str(canonical), physical_ir=str(lowered))
+            native = NativeArtifact.create(
+                binary,
+                SimpleNamespace(**metadata),
+                {
+                    "weftir": str(canonical),
+                    "x86ir" if target.arch == "x86_64" else "riscvir": str(lowered),
+                    "llir" if target.arch == "x86_64" else "c": source,
+                },
+            )
+    return CompiledArtifact(
+        None,
+        None,
+        params,
+        source,
+        target=context.target,
+        target_host=context.target_host,
+        native_artifact=native,
+        semantic_ir=str(canonical),
+        physical_ir=str(lowered),
+    )

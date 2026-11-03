@@ -1,5 +1,5 @@
 """Persist native files through TileLang's existing atomic cache lifecycle."""
-import os
+
 from weft_core.artifact import NativeArtifact
 
 from tilelang.cache.kernel_cache import KernelCache

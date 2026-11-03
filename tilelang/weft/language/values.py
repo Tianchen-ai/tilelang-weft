@@ -1,4 +1,5 @@
 """TIRx construction for explicit Views, snapshots and finite-width values."""
+
 from dataclasses import dataclass
 import json
 
@@ -19,12 +20,35 @@ def bind(expression):
     return I.bind(expression)
 
 
+def extent(view, axis):
+    """Actual accessible extent of a logical View, including a Level tail."""
+    if not isinstance(view, LogicalView) or type(axis) is not int or not 0 <= axis < len(view.shape):
+        raise ValueError("extent requires a logical View and a valid compile-time axis")
+    return intrinsic("extent", view.var, axis, dtype="int64")
+
+
 @dataclass(frozen=True)
 class LogicalView:
     var: tirx.Var
     shape: tuple
     axes: tuple
     encoding: object
+
+    def __getattr__(self, name):
+        if not isinstance(self.encoding, EncodingDefinition):
+            raise AttributeError(name)
+        field = next((item for item in self.encoding.schema.fields if item.name == name), None)
+        if field is None:
+            raise AttributeError(name)
+        shape = self.shape[:-1] + tuple(field.shape)
+        axes = self.axes[:-1] + tuple(f"{self.axes[-1]}.{name}.{i}" for i in range(max(0, len(field.shape) - 1)))
+        if field.shape:
+            axes += self.axes[-1:]
+        from weft_core import dtypes
+
+        scalar = getattr(dtypes, field.dtype)
+        prefix = "float" if scalar.category == dtypes.DTypeCategory.FLOAT else "int" if scalar.signedness == "signed" else "uint"
+        return LogicalView(bind(intrinsic("field_view", self.var, name)), shape, axes, prefix + str(scalar.bits))
 
     def __getitem__(self, indices):
         indices = indices if isinstance(indices, tuple) else (indices,)
@@ -51,8 +75,9 @@ class LogicalView:
         return LogicalView(variable, tuple(shape), tuple(axes), self.encoding)
 
 
-def view(storage, *, shape, encoding=None, axes=None, strides=None):
+def view(storage, *, shape, encoding=None, axes=None, strides=None, abi=False):
     from .derived import DerivedEncodingInstance
+
     shape = tuple(shape)
     if strides is not None and len(strides) != len(shape):
         raise ValueError("View strides must contain one entry per logical axis")
@@ -66,8 +91,11 @@ def view(storage, *, shape, encoding=None, axes=None, strides=None):
         description = encoding.description()
     else:
         description = encoding.schema.to_dict() if isinstance(encoding, EncodingDefinition) else {"dense": str(encoding or storage.dtype)}
-    variable = bind(intrinsic("view", storage.data, json.dumps(description), *shape,
-                              rank=len(shape), axes=list(axes), strides=list(strides or ())))
+    variable = bind(
+        intrinsic(
+            "view", storage.data, json.dumps(description), *shape, rank=len(shape), axes=list(axes), strides=list(strides or ()), abi=abi
+        )
+    )
     return LogicalView(variable, shape, axes, encoding or str(storage.dtype))
 
 
@@ -85,8 +113,11 @@ class RecordValue:
         if field is None:
             raise AttributeError(name)
         from weft_core import dtypes
+
         scalar = getattr(dtypes, field.dtype)
-        spelling = {"integer": "int" if scalar.signedness == "signed" else "uint", "float": "float", "bfloat": "bfloat"}[scalar.category.value] + str(scalar.bits)
+        spelling = {"integer": "int" if scalar.signedness == "signed" else "uint", "float": "float", "bfloat": "bfloat"}[
+            scalar.category.value
+        ] + str(scalar.bits)
         shape = self.shape[:-1] + tuple(field.shape)
         output = alloc_local(shape, spelling)
         I.evaluate(intrinsic("field", to_tile_region(output), self.var, name))
@@ -95,11 +126,13 @@ class RecordValue:
 
 def load(source):
     from .derived import DerivedEncodingInstance
+
     if not isinstance(source, LogicalView):
         from tilelang.language.copy_op import copy
         from tilelang.utils.language import retrieve_shape, _get_buffer
+
         output = alloc_local(retrieve_shape(source), _get_buffer(source).dtype)
-        copy(source, output)
+        I.evaluate(copy(source, output))
         return output
     if isinstance(source.encoding, (EncodingDefinition, DerivedEncodingInstance)):
         variable = bind(intrinsic("load_record", source.var))
@@ -113,6 +146,7 @@ def stage(value):
     if isinstance(value, RecordValue):
         return RecordValue(bind(intrinsic("stage", value.var)), value.shape, value.axes, value.encoding, True)
     from tilelang.utils.language import retrieve_shape, _get_buffer
+
     snapshot = alloc_local(retrieve_shape(value), _get_buffer(value).dtype)
     I.evaluate(intrinsic("stage", to_tile_region(snapshot), to_tile_region(value)))
     snapshot.__tilelang_immutable_value__ = True
@@ -128,8 +162,14 @@ def state(shape, dtype, *, init):
 def mac_groups(left, right, destination, *, n, into, over):
     if type(n) is not int or n <= 0:
         raise ValueError("mac_groups n requires a positive compile-time group width")
-    I.evaluate(intrinsic("mac_groups", to_tile_region(left), to_tile_region(right),
-                         to_tile_region(destination), n, into, over))
+    I.evaluate(intrinsic("mac_groups", to_tile_region(left), to_tile_region(right), to_tile_region(destination), n, into, over))
+
+
+def narrow(value, dtype, *, rounding="rne", saturation=False):
+    """Explicit numerical narrowing; grouping and rounding stay in the source."""
+    if rounding not in ("rne", "rtz", "rdn", "rup", "dynamic"):
+        raise ValueError("unknown narrowing rounding mode")
+    return intrinsic("narrow", value, rounding, int(saturation), dtype=dtype)
 
 
 stage.__tilelang_birth_kind__ = "staged"

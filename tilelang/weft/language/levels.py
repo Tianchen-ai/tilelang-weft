@@ -1,4 +1,5 @@
 """Explicit semantic Level regions, with separate state/stage initialization."""
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -22,11 +23,18 @@ class LevelFrame:
     @contextmanager
     def __tilelang_with__(self, builder):
         from tilelang.language.loop import serial
+
         domain = self.domain.partition if isinstance(self.domain, Point) else self.domain
-        frame = serial(0, tirx.ceildiv(domain, self.partition), annotations={
-            "weft.level.relation": self.relation, "weft.level.axis": self.axis,
-            "weft.level.extent": domain, "weft.level.partition": self.partition,
-        })
+        frame = serial(
+            0,
+            tirx.ceildiv(domain, self.partition),
+            annotations={
+                "weft.level.relation": self.relation,
+                "weft.level.axis": self.axis,
+                "weft.level.extent": domain,
+                "weft.level.partition": self.partition,
+            },
+        )
         builder.declaration_regions.append(self)
         try:
             with builder.with_frame(frame) as variable:

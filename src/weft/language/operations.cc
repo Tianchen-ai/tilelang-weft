@@ -20,6 +20,9 @@ using tirx::TScriptPrinterName;
 
 WEFT_OP("view", kPure);
 WEFT_OP("slice", kPure);
+WEFT_OP("extent", kPure);
+WEFT_OP("field_view", kPure);
+WEFT_OP("narrow", kPure);
 WEFT_OP("load_record", kReadState);
 WEFT_OP("load_value", kReadState);
 WEFT_OP("field", kOpaque);
@@ -33,5 +36,9 @@ WEFT_OP("helper_result_tile", kOpaque);
 WEFT_OP("derive_argument", kPure);
 WEFT_OP("derive_yield", kOpaque);
 WEFT_OP("interleave", kPure);
+WEFT_OP("atomic_rmw", kOpaque);
+WEFT_OP("combine_argument", kPure);
+WEFT_OP("combine_yield", kOpaque);
+WEFT_OP("reduce_dot", kOpaque);
 #undef WEFT_OP
 }  // namespace tvm::tl

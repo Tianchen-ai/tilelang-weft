@@ -1,0 +1,9 @@
+project = "TileLang–Weft"
+author = "TileLang–Weft contributors"
+extensions = ["myst_parser"]
+source_suffix = {".md": "markdown"}
+root_doc = "index"
+myst_enable_extensions = ["colon_fence", "deflist"]
+html_theme = "furo"
+html_title = "TileLang–Weft handbook / 工具书"
+exclude_patterns = ["_build"]

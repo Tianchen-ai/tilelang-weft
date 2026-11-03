@@ -1,5 +1,7 @@
 # 👋 Welcome to Tile Language
 
+[TileLang–Weft CPU handbook](weft/index.md) · [中文工具书](weft/index.zh-CN.md)
+
 [GitHub](https://github.com/tile-ai/tilelang)
 
 Tile Language (tile-lang) is a concise domain-specific language designed to streamline

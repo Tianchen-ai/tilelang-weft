@@ -1,12 +1,22 @@
 """Import explicit source-model regions and operations into Canonical IR."""
+
 import json
 
 from tvm import tirx
 from weft_core import dtypes as dt
 from weft_core.encoding import Encoding
 from weft_core.types import (
-    DomainType, DomainPointType, EncodingType, ViewType, SliceType, LocalValueType,
-    ScalarType, shape_of, axes_of, element_type, value_type,
+    DomainType,
+    DomainPointType,
+    EncodingType,
+    ViewType,
+    SliceType,
+    LocalValueType,
+    ScalarType,
+    shape_of,
+    axes_of,
+    element_type,
+    value_type,
 )
 
 
@@ -29,6 +39,37 @@ class ModelOperations:
 
     def model_expr(self, call):
         name = call.op.name
+        if name == "tl.weft.narrow":
+            from .importer import dtype
+
+            value = self.expr(call.args[0])
+            output = value_type(ScalarType(dtype(call.dtype)), shape_of(value.type), axes_of(value.type))
+            return self.op(
+                "narrow",
+                (value,),
+                output,
+                {"rounding": json.dumps(string(call.args[1])), "saturate": "true" if self.static(call.args[2]) else "false"},
+            )
+        if name == "tl.weft.field_view":
+            owner = self.expr(call.args[0])
+            field_name = string(call.args[1])
+            schema = self.encodings[owner.type.encoding.family]
+            field = next(field for field in schema.fields if field.name == field_name)
+            shape = shape_of(owner.type)[:-1] + field.shape
+            axes = (
+                axes_of(owner.type)[:-1] + tuple(self.axis() for _ in field.shape[:-1]) + (axes_of(owner.type)[-1:] if field.shape else ())
+            )
+            scalar = getattr(dt, field.dtype)
+            encoding = EncodingType(scalar.name, "dense", "dense." + scalar.name)
+            return self.op("field", (owner,), SliceType(encoding, shape, axes), {"name": json.dumps(field_name)})
+        if name == "tl.weft.extent":
+            view = self.expr(call.args[0])
+            bound = self.op("extent", (view,), ScalarType(dt.index), {"axis": str(self.static(call.args[1]))})
+            return self.cast(bound, dt.i64)
+        if name == "tl.weft.combine_argument":
+            if getattr(self, "combiner", None) is None:
+                self.error("combine_argument requires a closed reduction region")
+            return self.combiner[0][self.static(call.args[0])]
         if name == "tl.weft.derive_argument":
             if self.derivation is None:
                 self.error("derive_argument requires a layout-builder region")
@@ -39,17 +80,28 @@ class ModelOperations:
             source = self.expr(call.args[0])
             rows = self.static(call.args[1])
             from .importer import integers
-            return self.op("interleave", (source,), self.derivation["result"],
-                           {"rows": str(rows), "field_chunks": integers(tuple(int(x) for x in call.annotations["field_chunks"]))})
+
+            return self.op(
+                "interleave",
+                (source,),
+                self.derivation["result"],
+                {"rows": str(rows), "field_chunks": integers(tuple(int(x) for x in call.annotations["field_chunks"]))},
+            )
         if name == "tl.weft.helper_result":
             return self.helper_result(call)
         if name == "tl.weft.view":
             from .importer import dtype, integers
+
+            if bool(call.annotations.get("abi", False)):
+                if call not in self.abi_views:
+                    self.error("an ABI View must be an entry declaration with static or named runtime extents")
+                return self.abi_views[call]
             description = json.loads(string(call.args[1]))
+            schema = None
             rank = int(call.annotations["rank"])
-            extents = tuple(self.cast(self.expr(extent), dt.index) for extent in call.args[2:2 + rank])
+            extents = tuple(self.cast(self.expr(extent), dt.index) for extent in call.args[2 : 2 + rank])
             shape = []
-            for extent, value in zip(call.args[2:2 + rank], extents):
+            for extent, value in zip(call.args[2 : 2 + rank], extents):
                 static = self.analyzer.simplify(extent)
                 if isinstance(static, tirx.IntImm):
                     shape.append(int(static.value))
@@ -73,9 +125,23 @@ class ModelOperations:
                 encoding = EncodingType(schema.name, "base", schema.name)
                 self.declare_encoding(schema)
             strides = tuple(self.cast(self.expr(s), dt.index) for s in call.annotations["strides"])
-            return self.op("bind_view", (self.expr(call.args[0]), *extents, *strides),
-                           ViewType(encoding, tuple(shape), axes),
-                           {"operandSegmentSizes": "array<i32: 1, " + str(len(extents)) + ", " + str(len(strides)) + ">"})
+            storage = self.expr(call.args[0])
+            if schema is not None and encoding.kind != "dense" and storage.name_hint:
+                contract = {
+                    "encoding": encoding.layout_identity,
+                    "shape": list(shape),
+                    "record_elements": schema.elements,
+                    "storage_bytes": schema.storage_bits // 8,
+                }
+                contracts = self.storage_contracts.setdefault(storage.name_hint, [])
+                if contract not in contracts:
+                    contracts.append(contract)
+            return self.op(
+                "bind_view",
+                (storage, *extents, *strides),
+                ViewType(encoding, tuple(shape), axes),
+                {"operandSegmentSizes": "array<i32: 1, " + str(len(extents)) + ", " + str(len(strides)) + ">"},
+            )
         if name == "tl.weft.slice":
             base = self.expr(call.args[0])
             selectors = json.loads(string(call.args[1]))
@@ -96,8 +162,9 @@ class ModelOperations:
                 else:
                     index = self.cast(index, dt.index)
                 values.append(index)
-            return self.op("slice", (base, *values), SliceType(base.type.encoding, tuple(shape), tuple(axes)),
-                           {"selectors": json.dumps(selectors)})
+            return self.op(
+                "slice", (base, *values), SliceType(base.type.encoding, tuple(shape), tuple(axes)), {"selectors": json.dumps(selectors)}
+            )
         if name == "tl.weft.load_record":
             view = self.expr(call.args[0])
             return self.op("admit", (view,), LocalValueType(view.type.encoding, shape_of(view.type), axes_of(view.type)))
@@ -111,6 +178,11 @@ class ModelOperations:
 
     def model_tile(self, call):
         name = call.op.name
+        if name == "tl.weft.combine_yield":
+            if getattr(self, "combiner", None) is None:
+                self.error("combine_yield requires a closed reduction region")
+            self.emit("weft_kernel." + self.combiner[1] + "_yield", tuple(self.expr(arg) for arg in call.args))
+            return True
         if name == "tl.weft.derive_yield":
             if self.derivation is None:
                 self.error("derive_yield requires a layout-builder region")
@@ -128,6 +200,7 @@ class ModelOperations:
         if name == "tl.weft.load_value":
             view = self.expr(call.args[1])
             from .importer import dtype
+
             typ = value_type(ScalarType(dtype(view.type.encoding.family)), shape_of(view.type), axes_of(view.type))
             value = self.op("admit", (view,), typ)
             destination = self.region(call.args[0])[0]
@@ -140,14 +213,19 @@ class ModelOperations:
             schema = self.encodings[element_type(owner.type).family]
             field = next(field for field in schema.fields if field.name == field_name)
             shape = shape_of(owner.type)[:-1] + field.shape
-            axes = axes_of(owner.type)[:-1] + tuple(self.axis() for _ in field.shape[:-1]) + (axes_of(owner.type)[-1:] if field.shape else ())
-            value = self.op("field", (owner,), value_type(ScalarType(getattr(dt, field.dtype)), shape, axes), {"name": json.dumps(field_name)})
+            axes = (
+                axes_of(owner.type)[:-1] + tuple(self.axis() for _ in field.shape[:-1]) + (axes_of(owner.type)[-1:] if field.shape else ())
+            )
+            value = self.op(
+                "field", (owner,), value_type(ScalarType(getattr(dt, field.dtype)), shape, axes), {"name": json.dumps(field_name)}
+            )
             destination = self.region(call.args[0])[0]
             self.locals[destination] = value
             self.local_axes[destination] = axes
             return True
         if name == "tl.weft.state":
             from .importer import dtype
+
             destination, _, shape = self.region(call.args[0])
             initial = self.cast(self.expr(call.args[1]), dtype(destination.dtype))
             axes = self.local_axes[destination]
@@ -171,35 +249,84 @@ class ModelOperations:
             return True
         if name == "tl.weft.mac_groups":
             from .importer import dtype
+
             left = self.locals[self.region(call.args[0])[0]]
             right = self.locals[self.region(call.args[1])[0]]
             destination = self.region(call.args[2])[0]
             group = self.static(call.args[3])
             into = dtype(string(call.args[4]))
             axis = self.named_axis(string(call.args[5]))
-            if axes_of(left.type)[-1] != axis or axes_of(right.type)[-1] != axis:
-                self.error("mac_groups requires the declared grouped axis to be last in each operand")
+            operands = []
+            for value in (left, right):
+                axes = axes_of(value.type)
+                if not axes:
+                    self.error("mac_groups requires a shaped grouped operand")
+                if axes[-1] != axis:
+                    if axes[-1] in self.named_axes.values():
+                        self.error("mac_groups cannot replace a different explicit logical axis")
+                    value = self.rename(value, shape_of(value.type), (*axes[:-1], axis))
+                operands.append(value)
+            left, right = operands
             shape, axes = self.domain(left, right)
             position = axes.index(axis)
             if shape[position] <= 0 or shape[position] % group:
                 self.error("mac_groups requires a complete group domain")
-            shape = shape[:position] + (shape[position] // group,) + shape[position + 1:]
-            result = self.op("mac_groups", (left, right), value_type(ScalarType(into), shape, axes),
-                             {"group": str(group), "overflow": json.dumps("wrap")})
+            shape = shape[:position] + (shape[position] // group,) + shape[position + 1 :]
+            result = self.op(
+                "mac_groups",
+                (left, right),
+                value_type(ScalarType(into), shape, axes),
+                {"group": str(group), "overflow": json.dumps("wrap")},
+            )
             if shape != tuple(self.static(n) for n in destination.shape):
                 self.error("mac_groups destination shape must match its explicit partial groups")
             self.locals[destination], self.local_axes[destination] = result, axes
             return True
+        if name == "tl.weft.reduce_dot":
+            from .importer import dtype, integers
+            from weft_core.types import emit_type
+
+            left_region, right_region, output = (self.region(arg) for arg in call.args)
+            left = self.read_region(left_region, self.local_axes[left_region[0]])
+            right = self.read_region(right_region, self.local_axes[right_region[0]])
+            reduction = tuple(self.named_axis(string(axis)) for axis in call.annotations["axes"])
+            if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
+                self.error("reduce_dot operands must retain every declared named reduction axis")
+            shape, axes = self.domain(left, right)
+            free_shape = tuple(n for n, axis in zip(shape, axes) if axis not in reduction)
+            free_axes = tuple(axis for axis in axes if axis not in reduction)
+            accumulator = ScalarType(dtype(string(call.annotations["accumulator"])))
+            result = self.op(
+                "contract",
+                (left, right),
+                value_type(accumulator, free_shape, free_axes),
+                {"over": integers(reduction), "acc_type": emit_type(accumulator), "engine": json.dumps(string(call.annotations["engine"]))},
+            )
+            output_axes = free_axes
+            if output[2] != free_shape:
+                if free_shape or output[2] != (1,):
+                    self.error("reduce_dot destination must match its free logical axes")
+                output_axes = self.local_axes[output[0]]
+                result = self.broadcast(result, output[2], output_axes)
+            self.write_region(output, result, output_axes)
+            self.local_axes[output[0]] = output_axes
+            return True
         if name == "tl.weft.store_value":
             source = self.region(call.args[0])[0]
             destination = self.expr(call.args[1])
-            value = self.rename(self.locals[source], shape_of(destination.type), axes_of(destination.type))
+            from .importer import dtype
+
+            value = self.locals[source]
+            if destination.type.encoding.kind == "dense":
+                value = self.cast(value, dtype(destination.type.encoding.family))
+            value = self.rename(value, shape_of(destination.type), axes_of(destination.type))
             self.op("commit", (value, destination))
             return True
         return False
 
     def layout_builder(self, block):
         from .importer import integers
+
         declaration = json.loads(str(block.annotations["weft.derive"]))["derived"]
         if declaration["identity"] in self.derived_layouts:
             return
@@ -208,8 +335,9 @@ class ModelOperations:
         shape = tuple(self.static(n) for n in block.annotations["weft.derive.shape"])
         axes = tuple(self.named_axis(str(name)) for name in block.annotations["weft.derive.axes"])
         base = ViewType(EncodingType(schema.name, "base", schema.name), shape, axes)
-        result = ViewType(EncodingType(declaration["family"], "derived_instance", declaration["identity"],
-                                      tuple(declaration["parameters"])), shape, axes)
+        result = ViewType(
+            EncodingType(declaration["family"], "derived_instance", declaration["identity"], tuple(declaration["parameters"])), shape, axes
+        )
         region = self.builder.region((base,))
         environment, previous = self.env, self.derivation
         self.env = {}
@@ -219,13 +347,21 @@ class ModelOperations:
                 self.stmt(block.body)
         finally:
             self.env, self.derivation = environment, previous
-        self.declarations.append(self.builder.operation("weft_kernel.derive", self.location(), attributes={
-            "sym_name": json.dumps(declaration["family"] + "$" + "$".join(map(str, declaration["parameters"]))),
-            "source_family": json.dumps(schema.name), "result_family": json.dumps(declaration["family"]),
-            "layout_identity": json.dumps(declaration["identity"]),
-            "parameter_names": json.dumps([str(name) for name in block.annotations["weft.derive.parameters"]]),
-            "parameter_values": integers(declaration["parameters"]),
-        }, regions=(region,)))
+        self.declarations.append(
+            self.builder.operation(
+                "weft_kernel.derive",
+                self.location(),
+                attributes={
+                    "sym_name": json.dumps(declaration["family"] + "$" + "$".join(map(str, declaration["parameters"]))),
+                    "source_family": json.dumps(schema.name),
+                    "result_family": json.dumps(declaration["family"]),
+                    "layout_identity": json.dumps(declaration["identity"]),
+                    "parameter_names": json.dumps([str(name) for name in block.annotations["weft.derive.parameters"]]),
+                    "parameter_values": integers(declaration["parameters"]),
+                },
+                regions=(region,),
+            )
+        )
         self.encodings[declaration["family"]] = schema
         self.derived_layouts.add(declaration["identity"])
 
@@ -241,12 +377,12 @@ class ModelOperations:
         self.next_domain += 1
         static = self.analyzer.simplify(extent_expr)
         tail = "exact" if isinstance(static, tirx.IntImm) and int(static.value) % partition == 0 else "tail"
-        domain_type = DomainType(f"{name}.{serial}", serial, self.active_domain.type.domain_id,
-                                 self.named_axis(name), relation, tail)
+        domain_type = DomainType(f"{name}.{serial}", serial, self.active_domain.type.domain_id, self.named_axis(name), relation, tail)
         domain = self.op("domain", (self.active_domain, extent, part, multiplicity), domain_type)
         self.domain_partitions[serial] = partition
         point_type = DomainPointType(domain_type)
         blocks = {}
+
         def collect(statement):
             if isinstance(statement, tirx.SeqStmt):
                 for item in statement.seq:
@@ -255,6 +391,7 @@ class ModelOperations:
                 blocks[str(statement.block.annotations["weft.level.region"])] = statement
             else:
                 self.error("a semantic Level must retain its three explicit declaration/body regions", statement)
+
         collect(node.body)
         if set(blocks) != {"state", "staged", "body"}:
             self.error("Level requires distinct state, staged and body regions")
@@ -286,10 +423,10 @@ class ModelOperations:
         carried = tuple(incoming[k] for k in keys)
         body = self.builder.region((point_type, *(v.type for v in carried), *(v.type for _, _, v in births)))
         with self.insertion(body):
-            self.locals, self.env = dict(zip(keys, body.arguments[1:1 + len(keys)])), dict(environment)
+            self.locals, self.env = dict(zip(keys, body.arguments[1 : 1 + len(keys)])), dict(environment)
             self.local_axes, self.readonly = dict(incoming_axes), set(incoming_readonly)
             self.env[node.loop_var] = body.arguments[0]
-            for (kind, key, _), value in zip(births, body.arguments[1 + len(keys):]):
+            for (kind, key, _), value in zip(births, body.arguments[1 + len(keys) :]):
                 if kind in ("buffer", "staged_buffer"):
                     self.locals[key] = value
                     self.local_axes[key] = axes_of(value.type)
@@ -299,8 +436,18 @@ class ModelOperations:
                     self.env[key] = value
             self.birth_phase, self.birth_outputs = "body", []
             self.stmt(blocks["body"])
-            self.emit("weft_kernel.handoff", tuple(self.locals[k] for k in keys))
-        results = self.emit("weft_kernel.level", (domain, *carried), tuple(v.type for v in carried), regions=(*regions, body))
-        self.locals, self.env = dict(zip(keys, results)), environment
+            final = tuple(self.rename(self.locals[k], shape_of(incoming[k].type), axes_of(incoming[k].type)) for k in keys)
+            self.emit("weft_kernel.handoff", final)
+        changed = tuple(i for i, value in enumerate(final) if value is not body.arguments[i + 1] and value is not carried[i])
+        for i, value in enumerate(carried):
+            if i not in changed:
+                body.arguments[i + 1].replace_all_uses_with(value)
+        body.operations[-1].operands = tuple(final[i] for i in changed)
+        body.arguments = (body.arguments[0], *(body.arguments[i + 1] for i in changed), *body.arguments[1 + len(keys) :])
+        results = self.emit(
+            "weft_kernel.level", (domain, *(carried[i] for i in changed)), tuple(carried[i].type for i in changed), regions=(*regions, body)
+        )
+        self.locals, self.env = dict(incoming), environment
+        self.locals.update(zip((keys[i] for i in changed), results))
         self.local_axes, self.readonly = incoming_axes, incoming_readonly
         self.active_domain, self.birth_phase, self.birth_outputs = outer_domain, outer_phase, outer_outputs

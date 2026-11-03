@@ -1,4 +1,5 @@
 """Layout builders use native TileLang macros; instances describe stored bytes."""
+
 from dataclasses import dataclass
 import inspect
 import json
@@ -54,15 +55,28 @@ class DerivedEncodingInstance:
         return self.family.__name__ + "[" + ",".join(map(str, self.parameters)) + "]"
 
     def description(self):
-        return {"derived": {"family": self.family.__name__, "identity": self.identity,
-                            "parameters": self.parameters, "source": self.schema.to_dict()}}
+        return {
+            "derived": {
+                "family": self.family.__name__,
+                "identity": self.identity,
+                "parameters": self.parameters,
+                "source": self.schema.to_dict(),
+            }
+        }
 
     def declare(self, shape, axes):
         from .values import intrinsic, bind, LogicalView
+
         builder = Builder.current()
         with builder.with_frame(I.sblock("weft_derive")):
-            I.sblock_attr({"weft.derive": json.dumps(self.description()), "weft.derive.shape": shape,
-                           "weft.derive.axes": axes, "weft.derive.parameters": self.family.parameters})
+            I.sblock_attr(
+                {
+                    "weft.derive": json.dumps(self.description()),
+                    "weft.derive.shape": shape,
+                    "weft.derive.axes": axes,
+                    "weft.derive.parameters": self.family.parameters,
+                }
+            )
             argument = LogicalView(bind(intrinsic("derive_argument")), shape, axes, self.family.base)
             result = self.family.builder(argument, **dict(zip(self.family.parameters, self.parameters)))
             if not isinstance(result, LogicalView):
@@ -76,6 +90,7 @@ def derive(function):
 
 def interleave(view, *, rows, field_chunks=None):
     from .values import intrinsic, bind, LogicalView
+
     if type(rows) is not int or rows <= 0:
         raise TypeError("interleave rows is a positive static integer")
     fields = view.encoding.schema.fields

@@ -201,6 +201,16 @@ class JITKernel(Generic[_P, _T]):
             compile_flags=compile_flags,
         )
         instance.torch_function = instance.adapter.func
+        if instance.execution_backend == "weft_native":
+            native = instance.adapter.native
+            sources = {path.suffix: path for path in native.directory.glob("kernel.*")}
+            instance.artifact = CompiledArtifact(
+                None, None, params, instance.adapter.get_kernel_source(),
+                target=instance.target, target_host=instance.target_host,
+                native_artifact=native,
+                semantic_ir=sources[".weftir"].read_text(),
+                physical_ir=sources[".x86ir" if native.metadata.target.arch == "x86_64" else ".riscvir"].read_text(),
+            )
         return instance
 
     def __call__(self, *args: _P.args, **kwds: _P.kwargs) -> _T:

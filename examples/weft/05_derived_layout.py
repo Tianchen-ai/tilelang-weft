@@ -1,4 +1,5 @@
 """Explicit preparation creates a persistent layout consumed by another kernel."""
+
 import tilelang
 from tilelang.weft import language as T
 
@@ -23,6 +24,7 @@ def prepare(M=8, R=4):
         with T.Kernel(1):
             for row, byte in T.Parallel(M, 16):
                 Prepared[(row // R) * R * 16 + byte * R + row % R] = Source[row, byte]
+
     return main
 
 
@@ -37,11 +39,13 @@ def consume(M=8, R=4):
                 with T.level.blocks(16, extent=16) as block:
                     values = T.load(W[row, block])
                     T.copy(values.q, output[row, block])
+
     return main
 
 
 if __name__ == "__main__":
     import torch
+
     source = torch.arange(128, dtype=torch.uint8).reshape(8, 16)
     prepared, output = torch.empty(128, dtype=torch.uint8), torch.empty_like(source)
     prepare()(source, prepared)

@@ -1,4 +1,5 @@
 """Native TileLang macros with typed return regions and optional call boundaries."""
+
 from dataclasses import replace
 
 from tvm import tirx
@@ -61,8 +62,7 @@ class HelperRegion:
             I.evaluate(intrinsic("helper_return", *operands, kinds=categories))
 
         with builder.with_frame(I.sblock(f"weft_helper_{identity}")):
-            I.sblock_attr({"weft.helper": macro.name, "weft.helper.id": identity,
-                           "weft.helper.noinline": self.noinline})
+            I.sblock_attr({"weft.helper": macro.name, "weft.helper.id": identity, "weft.helper.noinline": self.noinline})
             builder.return_handlers.append(emit_return)
             try:
                 with builder.macro(macro.name, macro.annotations):
@@ -97,4 +97,5 @@ def macro(function=None, *, noinline=False):
         result.ir_gen = mutate(function, structured_returns=True)
         result.region_builder = HelperRegion(noinline)
         return result
+
     return decorate(function) if function is not None else decorate
