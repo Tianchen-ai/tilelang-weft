@@ -17,6 +17,8 @@ native-deployment.zh-CN
 TileLang–Weft embeds the shared Weft CPU compiler in TileLang v0.1.15.
 The package version is `0.1.15+weft.1`; the import remains `tilelang`.
 
+![TileLang and Triton share the Canonical compiler and native CPU runtime](assets/architecture.png)
+
 ## Installation and builds
 
 Download the matching host/Python wheels from the

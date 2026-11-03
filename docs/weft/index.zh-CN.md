@@ -5,6 +5,8 @@
 TileLang–Weft 将共同 Weft CPU 编译器嵌入 TileLang v0.1.15。
 下游版本身份为 `0.1.15+weft.1`，导入名称仍为 `tilelang`。
 
+![TileLang 和 Triton 共享 Canonical 编译器及原生 CPU runtime](assets/architecture.png)
+
 ## 安装与构建
 
 从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.1)
