@@ -195,7 +195,8 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
         reuse_existing=False,
     ):
         with tvm.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
-            PreLowerSemanticCheck(mod)
+            from tilelang.backend import create_backend_context
+            PreLowerSemanticCheck(mod, create_backend_context(resolved_target))
         with (
             tvm.transform.PassContext(
                 opt_level=3,

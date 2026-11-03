@@ -17,6 +17,7 @@ def test_builtin_backend_modules_are_explicit():
         "metal": (("metal",), ["torch", "tvm_ffi"]),
         "webgpu": (("webgpu",), ["tvm_ffi"]),
         "ascend": (("ascend",), ["tvm_ffi", "cython"]),
+        "weft": (("weft",), ["weft_native"]),
     }
 
     assert {
@@ -122,3 +123,22 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+def test_parallel_ownership_controls_only_storage_ownership_checks():
+    pytest.importorskip("weft_core")
+    from tilelang.engine.semantic_check import PreLowerSemanticCheck
+    from tilelang.weft import language as W
+
+    @W.prim_func
+    def local_tile(A: W.Tensor((16,), "int32")):
+        local = W.alloc_local((16,), "int32")
+        for i in W.Parallel(16):
+            local[i] = A[i]
+
+    mod = tvm.IRModule({"local_tile": local_tile})
+    PreLowerSemanticCheck(mod, create_backend_context("weft"))
+    with pytest.raises(ValueError, match="thread-private"):
+        PreLowerSemanticCheck(mod, create_backend_context("c"))
+    with pytest.raises(ValueError, match="Unknown parallel iteration model"):
+        replace(get_backend("cpu"), parallel_iteration_model="unrecognized")

@@ -333,6 +333,18 @@ class LoopControlFinder(ast.NodeVisitor):
         pass
 
 
+def _falls_through(statements):
+    """Loops may be empty; only an unconditional return or both branches close a path."""
+    for statement in statements:
+        if isinstance(statement, ast.Return):
+            return False
+        if isinstance(statement, ast.If) and statement.orelse and not (
+            _falls_through(statement.body) or _falls_through(statement.orelse)
+        ):
+            return False
+    return True
+
+
 class DSLMutator(ast.NodeTransformer):
     def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any], filename: str):
         self.tmp_counter = 0
@@ -592,6 +604,8 @@ class DSLMutator(ast.NodeTransformer):
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
+        if getattr(self, "structured_returns", False) and _falls_through(node.body):
+            node.body.append(ast.copy_location(ast.Return(value=ast.Constant(None)), node.body[-1]))
         stmts = []
         arg_names = set()
         all_args = node.args.posonlyargs + node.args.args
@@ -706,9 +720,45 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Return(self, node: ast.Return):
         node = self.generic_visit(node)
+        if getattr(self, "structured_returns", False):
+            return quote("__tb.region_return(value)", value=node.value or ast.Constant(None), span=node)
         return quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
+        # Backend region declarations use this AST path and the same Builder;
+        # ordinary expressions and control are still visited normally.
+        if len(node.items) == 1 and isinstance(node.items[0].context_expr, ast.Call):
+            constructor = self._try_eval(node.items[0].context_expr.func)
+            if getattr(constructor, "__tilelang_region_declarations__", False):
+                groups = {"state": [], "staged": [], "body": []}
+                assigned = {"state": set(), "staged": set(), "body": set()}
+                for statement in node.body:
+                    expression = statement.value if isinstance(statement, (ast.Assign, ast.AnnAssign)) else None
+                    kind = None
+                    if isinstance(expression, ast.Call):
+                        kind = getattr(self._try_eval(expression.func), "__tilelang_birth_kind__", None)
+                    kind = kind if kind in ("state", "staged") else "body"
+                    groups[kind].append(statement)
+                    assigned[kind].update(n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+                body = []
+                for kind in ("state", "staged", "body"):
+                    forbidden = sorted(assigned["body"] | assigned["staged" if kind == "state" else "state"]) if kind != "body" else []
+                    statements = []
+                    saved = getattr(self, "initializer_forbidden", set())
+                    self.initializer_forbidden = set(forbidden)
+                    for statement in groups[kind]:
+                        transformed = self.visit(statement)
+                        statements.extend(transformed if isinstance(transformed, list) else [transformed])
+                        self.initializer_forbidden.difference_update(
+                            n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                        )
+                    self.initializer_forbidden = saved
+                    body.extend(quote("with __tb.declarations(phase, forbidden):\n    pass", phase=ast.Constant(kind),
+                                      forbidden=ast.Tuple(elts=[ast.Constant(name) for name in forbidden], ctx=ast.Load()),
+                                      passes=[statements or [ast.Pass()]], span=node))
+                node.body = body
+                node.items[0].context_expr = quote_expr("__tb.ctx_with(e, __tb.capture_scope())", e=self.visit(node.items[0].context_expr), span=node)
+                return node
         is_kernel_ctx = False
         for expr in node.items:
             cexpr = expr.context_expr
@@ -743,6 +793,8 @@ class DSLMutator(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name):
         if isinstance(node.ctx, ast.Load):
             name = None if node.id in self.comprehension_locals else node.id
+            if name in getattr(self, "initializer_forbidden", set()):
+                return quote_expr("__tb.region_rval(name, lambda: node)", name=ast.Constant(name), node=node, span=node)
             return quote_expr("__tb.rval(name, node)", name=ast.Constant(name), node=node, span=node)
         return node
 
@@ -818,7 +870,7 @@ def has_internal_prim_func(func: Callable[_P, _T]) -> bool:
     return False
 
 
-def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
+def mutate(func: Callable[_P, _T], *, structured_returns: bool = False) -> IRGenerator[_P, _T]:
     """
     Transform a Python function into an IR (Intermediate Representation) generator.
     This function takes a regular Python function and performs AST (Abstract Syntax Tree)
@@ -863,6 +915,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #       return bar
     #     ```
     mut = DSLMutator(nonlocals, func.__globals__, str(Path(filename).absolute()))
+    mut.structured_returns = structured_returns
     tree = mut.visit(tree)
     make_closure = utils.get_compiled_object(
         tree,

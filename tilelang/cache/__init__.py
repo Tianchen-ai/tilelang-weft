@@ -14,6 +14,7 @@ from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 from tilelang.ascend.kernel_cache import AscendCythonKernelCache, AscendTVMFFIKernelCache
+from tilelang.jit.adapter.weft_kernel_cache import WeftNativeKernelCache
 
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
@@ -27,6 +28,7 @@ _dispatch_map: dict[str, KernelCache] = {
     "nvrtc": NVRTCKernelCache(),
     "cutedsl": CuTeDSLKernelCache(),
     "torch": TorchKernelCache(),
+    "weft_native": WeftNativeKernelCache(),
 }
 
 _ascend_dispatch_map: dict[str, KernelCache] = {
@@ -38,7 +40,7 @@ _ascend_dispatch_map: dict[str, KernelCache] = {
 def _resolve_cache_dispatch(
     target: TargetLike | None,
     target_host: TargetLike | None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "weft_native"] | None,
     verbose: bool | None,
 ):
     if target is None:
@@ -78,7 +80,7 @@ def cached(
     *args,
     target: TargetLike | None = None,
     target_host: TargetLike | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "weft_native"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,

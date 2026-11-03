@@ -178,7 +178,8 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+option(TILELANG_INIT_SUBMODULES "Initialize bundled dependencies when configuring a Git checkout" ON)
+if(TILELANG_INIT_SUBMODULES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   find_package(Git QUIET)
   if(Git_FOUND)
     execute_process(
@@ -391,6 +392,7 @@ list(APPEND TILE_LANG_SRCS
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/weft/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/metal/CMakeLists.txt")

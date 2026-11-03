@@ -244,7 +244,7 @@ class AutotuneResult:
         if verbose:
             logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
         # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
-        if kernel.execution_backend == "tvm_ffi" or kernel.execution_backend == "cutedsl":
+        if kernel.execution_backend in ("tvm_ffi", "cutedsl", "weft_native"):
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
         else:
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
@@ -265,6 +265,9 @@ class AutotuneResult:
             if verbose:
                 logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
             self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+        elif kernel.execution_backend == "weft_native":
+            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(kernel.adapter.libpath)))
+            kernel.adapter.native.write_metadata(cache_path)
         elif kernel.execution_backend == "tvm_ffi":
             if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
                 src_lib_path = kernel.adapter.libpath
@@ -580,6 +583,9 @@ class AutotuneResult:
         files = [path / cls._get_kernel_lib_file(execution_backend)]
         if execution_backend == "nvrtc":
             files.append(path / KERNEL_PY_PATH)
+        elif execution_backend == "weft_native":
+            from weft_core.artifact import NativeArtifact
+            files.extend(NativeArtifact.required_files(path))
         return files
 
     @classmethod

@@ -39,14 +39,16 @@ class TensorSupplyType(Enum):
     Auto = 7
 
 
-def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
+def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer, *, device=None):
     from tilelang.engine.param import KernelParam
     from .device import get_current_device
+
+    requested_device = device
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
         # Convert tvm.DataType to torch.dtype for tensor creation
         dtype: torch.dtype = param.torch_dtype()
-        device = get_current_device()
+        device = get_current_device() if requested_device is None else requested_device
 
         if hasattr(param, "shape") and not param.shape:
             raise ValueError(

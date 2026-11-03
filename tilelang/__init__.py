@@ -223,6 +223,9 @@ if not env.is_light_import():
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
     from . import cpu as cpu  # noqa: F401
+    from . import weft as weft  # noqa: F401
+    from .weft.language.encoding import encoding as encoding
+    from .weft.language.derived import derive as derive
     from . import ascend as ascend  # noqa: F401
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401

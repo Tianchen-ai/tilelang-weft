@@ -242,6 +242,8 @@ EagerJITStage = Literal["phase1", "phase2", "none"]
 class Builder(BaseBuilder):
     def __init__(self):
         self.frames: list[AnyFrame] = []
+        self.declaration_regions = []
+        self.return_handlers = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
         self.macro_arg_annot = {}
@@ -659,6 +661,9 @@ class Builder(BaseBuilder):
         else:
             orig_value = locals.get(name, self.empty)
 
+        if getattr(orig_value, "__tilelang_immutable_value__", False):
+            raise RuntimeError(f"staged value {name!r} is an immutable snapshot and cannot be rebound")
+
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
         #   we should not use buffer_store, and bind it instead
@@ -888,12 +893,43 @@ class Builder(BaseBuilder):
                 raise RuntimeError(f"Not all tensor from `T.empty` are returned, only got {value}")
             return NotImplemented
 
-    def ctx_with(self, ctx):
+    def region_return(self, value):
+        if not self.return_handlers:
+            raise RuntimeError("structured return requires an enclosing source function region")
+        return self.return_handlers[-1](value)
+
+    def ctx_with(self, ctx, incoming=None):
         self.check_continue_break()
+        enter = getattr(ctx, "__tilelang_with__", None)
+        if enter is not None:
+            if incoming is not None:
+                ctx.incoming = incoming
+            return enter(self)
         if isinstance(ctx, tirx.frame.IRBuilderFrame):
             return self.with_frame(ctx)
         else:
             return super().ctx_with(ctx)
+
+    @contextmanager
+    def declarations(self, phase, forbidden):
+        if not self.declaration_regions:
+            raise RuntimeError("declaration regions require an enclosing semantic region")
+        with self.declaration_regions[-1].declarations(self, phase, forbidden):
+            yield
+
+    def capture_scope(self):
+        import inspect
+        frame = inspect.currentframe()
+        try:
+            return dict(frame.f_back.f_locals)
+        finally:
+            del frame
+
+    def region_rval(self, name, expression):
+        region = self.declaration_regions[-1]
+        if name in region.incoming:
+            return self.unwrap_value(region.incoming[name])
+        raise RuntimeError(f"{region.phase} initializer cannot capture {name!r} from a sibling initializer or region body")
 
     def assert_expr(self, cond, msg=None):
         self.check_continue_break()
@@ -1051,6 +1087,7 @@ class Macro(Generic[_P, _T]):
     orig_func: Callable[_P, _T]
     ir_gen: IRGenerator[_P, _T]
     annotations: dict[str, Any]
+    region_builder: Callable | None = None
 
     @property
     def source(self) -> str:
@@ -1060,6 +1097,18 @@ class Macro(Generic[_P, _T]):
         builder = Builder.current()
         if builder is None:
             raise JITNoBuilderError("T.macro can only be used inside @tilelang.jit")
+
+        if builder.declaration_regions:
+            region = builder.declaration_regions[-1]
+            for name, value in utils.get_func_nonlocals(self.orig_func).items():
+                if name in region.forbidden and value is not region.incoming.get(name, BaseBuilder.empty):
+                    raise RuntimeError(
+                        f"{region.phase} initializer cannot capture {name!r} through helper {self.name!r} "
+                        "from a sibling initializer or region body"
+                    )
+
+        if self.region_builder is not None:
+            return self.region_builder(self, builder, args, kwargs)
 
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
@@ -1168,7 +1217,8 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, module=func.__module__)
-            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            evaluated = eval(value.__forward_arg__, globalns, localns)
+            hints[name] = evaluated if isinstance(evaluated, (Buffer, Var, Ref)) else _eval_type(value, globalns=globalns, localns=localns)
         else:
             hints[name] = value
     return hints

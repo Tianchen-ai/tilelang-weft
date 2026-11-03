@@ -157,13 +157,16 @@ class CompiledArtifact:
     Stores all necessary components for kernel execution in the TVM runtime.
     """
 
-    host_mod: tvm.IRModule  # Host-side TVM IR module for managing kernel execution
-    device_mod: tvm.IRModule  # Device-side TVM IR module containing the actual kernel code
+    host_mod: tvm.IRModule | None  # Absent for an external semantic IR compiler
+    device_mod: tvm.IRModule | None
     params: list[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: tvm.runtime.Module | None = None  # Runtime module for execution, may be lazily initialized
     target: tvm.target.Target | None = None  # Normalized device target used for lowering
     target_host: tvm.target.Target | None = None  # Normalized host target used for host codegen/export
+    native_artifact: object | None = None
+    semantic_ir: str | None = None
+    physical_ir: str | None = None
 
 
 def dump_kernel_params(params: list[KernelParam]) -> str:

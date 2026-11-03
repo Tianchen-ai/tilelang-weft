@@ -30,6 +30,7 @@ import hashlib
 import threading
 import traceback
 from pathlib import Path
+from types import ModuleType
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
@@ -858,10 +859,17 @@ class AutoTuner:
                 if var_name in parameters:
                     continue
                 # Cell content must be serializable
-                assert isinstance(cell.cell_contents, (int, float, str, bool, type(None))), (
-                    f"Cell contents {cell.cell_contents} is not serializable: {type(cell.cell_contents)}"
-                )
-                extra_parameters[var_name] = cell.cell_contents
+                value = cell.cell_contents
+                if isinstance(value, ModuleType):
+                    extra_parameters[var_name] = ("module", value.__name__, getattr(value, "__version__", None))
+                elif isinstance(value, (int, float, str, bool, type(None))):
+                    extra_parameters[var_name] = value
+                elif hasattr(value, "schema") and hasattr(value.schema, "to_dict"):
+                    extra_parameters[var_name] = value.schema.to_dict()
+                elif hasattr(value, "source") and isinstance(value.source, str):
+                    extra_parameters[var_name] = value.source
+                else:
+                    raise TypeError(f"Autotune closure {var_name!r} has no stable source or declaration identity: {type(value).__name__}")
 
         if isinstance(self.configs, Callable):
             kernel_args, kernel_kwargs = self._kernel_parameters

@@ -3,6 +3,278 @@ import tilelang
 import tilelang.language as T
 from itertools import product
 import torch
+import pytest
+
+
+def test_weft_snapshot_keeps_the_prewrite_value_with_alias_inputs():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def capture(N):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "int32"), Alias: W.Tensor((N,), "int32"),
+                 Output: W.Tensor((N,), "int32")):
+            with W.Kernel(1):
+                view = W.view(X, shape=(N,), axes=("k",))
+                output = W.view(Output, shape=(N,), axes=("k",))
+                snapshot = W.stage(W.load(view))
+                for i in W.Parallel(N):
+                    Alias[i] += 7
+                W.copy(snapshot, output)
+        return main
+
+    source = torch.arange(17, dtype=torch.int32)
+    previous = source.clone()
+    output = torch.empty_like(source)
+    capture(17)(source, source, output)
+    torch.testing.assert_close(output, previous, atol=0, rtol=0)
+    torch.testing.assert_close(source, previous + 7, atol=0, rtol=0)
+
+
+def test_weft_stage_rejects_tile_writes_to_snapshot():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def invalid():
+        @W.prim_func
+        def main(X: W.Tensor((8,), "int32")):
+            with W.Kernel(1):
+                snapshot = W.stage(W.load(X))
+                W.fill(snapshot, 0)
+        return main
+
+    with pytest.raises(Exception, match="immutable snapshot"):
+        invalid()
+
+
+def test_weft_stage_rejects_descendant_rebinding():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    with pytest.raises(Exception, match="immutable snapshot and cannot be rebound"):
+        @W.prim_func
+        def invalid(X: W.Tensor((8,), "int32")):
+            with W.Kernel(1):
+                snapshot = W.stage(W.load(X))
+                with W.level.blocks(8, extent=8) as block:
+                    snapshot = W.load(X)
+
+
+def test_weft_level_initializer_does_not_capture_body_value():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    with pytest.raises(Exception, match="initializer cannot capture 'body_value'"):
+        @W.prim_func
+        def invalid(X: W.Tensor((8,), "int32")):
+            with W.Kernel(1):
+                with W.level.blocks(8, extent=8) as block:
+                    body_value = W.alloc_local((8,), "int32")
+                    snapshot = W.stage(body_value)
+
+
+def test_weft_tile_copy_masks_tail_without_an_explicit_element_if():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def tiled(N):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "float32"), Y: W.Tensor((N,), "float32")):
+            with W.Kernel(W.ceildiv(N, 16)) as block:
+                local = W.alloc_local((16,), "float32")
+                W.copy(X[block * 16], local)
+                for i in W.Parallel(16):
+                    local[i] = local[i] * 2
+                W.copy(local, Y[block * 16])
+        return main
+
+    storage = torch.full((37,), 123.0)
+    output = storage[2:35]
+    source = torch.arange(33, dtype=torch.float32)
+    tiled(33)(source, output)
+    torch.testing.assert_close(output, source * 2)
+    torch.testing.assert_close(storage[:2], torch.full((2,), 123.0))
+    torch.testing.assert_close(storage[35:], torch.full((2,), 123.0))
+
+
+def test_weft_level_initializers_capture_incoming_values():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def incoming():
+        @W.prim_func
+        def main(X: W.Tensor((8,), "int32"), Y: W.Tensor((8,), "int32")):
+            with W.Kernel(1):
+                local = W.load(X)
+                with W.level.blocks(8, extent=8) as block:
+                    snapshot = W.stage(local)
+                    local = W.alloc_local((8,), "int32")
+                    W.fill(local, 42)
+                    W.copy(snapshot, Y)
+        return main
+
+    source, output = torch.arange(8, dtype=torch.int32), torch.empty(8, dtype=torch.int32)
+    incoming()(source, output)
+    torch.testing.assert_close(output, source, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_weft_native_tile_scan(reverse):
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def scan(N):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "int32"), Y: W.Tensor((N,), "int32")):
+            with W.Kernel(1):
+                local = W.alloc_local((N,), "int32")
+                W.copy(X, local)
+                W.cumsum(local, dim=0, reverse=reverse)
+                W.copy(local, Y)
+        return main
+
+    x = torch.arange(-8, 9, dtype=torch.int32)
+    y = torch.empty_like(x)
+    scan(17)(x, y)
+    expected = x.flip(0).cumsum(0).flip(0) if reverse else x.cumsum(0)
+    torch.testing.assert_close(y, expected.to(torch.int32), atol=0, rtol=0)
+
+
+def test_weft_grid_atomic_returns_and_seq_cst_ordering():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @tilelang.jit(target="weft")
+    def histogram(N):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "int32"), H: W.Tensor((4,), "int32"),
+                 Previous: W.Tensor((N,), "int32")):
+            with W.Kernel(W.ceildiv(N, 16), cpu_num_threads=4) as block:
+                for i in W.Parallel(16):
+                    index = block * 16 + i
+                    if index < N:
+                        Previous[index] = W.atomic_add(H[X[index]], 1, memory_order="seq_cst", return_prev=True)
+        return main
+
+    x = torch.arange(65, dtype=torch.int32) % 4
+    h, previous = torch.zeros(4, dtype=torch.int32), torch.full_like(x, -1)
+    histogram(65)(x, h, previous)
+    torch.testing.assert_close(h, torch.bincount(x.to(torch.int64), minlength=4).to(torch.int32), atol=0, rtol=0)
+    for bucket in range(4):
+        torch.testing.assert_close(previous[x == bucket].sort().values, torch.arange(int(h[bucket]), dtype=torch.int32), atol=0, rtol=0)
+
+
+def test_weft_autotune_restores_readwrite_alias_storage():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    source = torch.arange(17, dtype=torch.float32)
+    initial = source.clone()
+
+    def reference(x, alias):
+        x.add_(alias)
+
+    @tilelang.autotune(configs=[{"B": 8}, {"B": 16}], warmup=1, rep=2,
+                       ref_prog=reference, supply_prog=lambda params: [source, source],
+                       atol=0, rtol=0, max_mismatched_ratio=0)
+    @tilelang.jit(target="weft")
+    def double_in_place(N, B=8):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "float32"), Alias: W.Tensor((N,), "float32")):
+            with W.Kernel(W.ceildiv(N, B)) as block:
+                for i in W.Parallel(B):
+                    index = block * B + i
+                    if index < N:
+                        X[index] = X[index] + Alias[index]
+        return main
+
+    kernel = double_in_place(17)
+    torch.testing.assert_close(source, initial, atol=0, rtol=0)
+    kernel(source, source)
+    torch.testing.assert_close(source, initial * 2, atol=0, rtol=0)
+    assert kernel.execution_backend == "weft_native"
+    assert "tilelang" in kernel.get_kernel_source()
+
+
+@pytest.mark.parametrize("noinline", [False, True])
+def test_weft_macro_returns_through_condition_loop_and_level(noinline):
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @W.macro(noinline=noinline)
+    def absolute(x):
+        for k in W.serial(3):
+            if x < 0:
+                return -x, x
+        with W.level.blocks(1, extent=1) as block:
+            if x > 0:
+                return x, -x
+        return x, x
+
+    @tilelang.jit(target="weft")
+    def application(N):
+        @W.prim_func
+        def main(X: W.Tensor((N,), "int32"), Y: W.Tensor((N,), "int32")):
+            with W.Kernel(1):
+                for i in W.serial(N):
+                    a, b = absolute(X[i])
+                    Y[i] = a - b
+        return main
+
+    x = torch.arange(-4, 5, dtype=torch.int32)
+    y = torch.empty_like(x)
+    kernel = application(9)
+    kernel(x, y)
+    torch.testing.assert_close(y, x.abs() * 2, atol=0, rtol=0)
+    assert "weft_kernel.helper_return" in kernel.artifact.semantic_ir
+    if noinline:
+        assert "noinline" in kernel.get_kernel_source()
+
+
+def test_weft_macro_rejects_value_return_with_fallthrough():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @W.macro
+    def incomplete(x):
+        if x > 0:
+            return x
+
+    with pytest.raises(Exception, match="return paths must preserve"):
+        @W.prim_func
+        def invalid(X: W.Tensor((1,), "int32"), Y: W.Tensor((1,), "int32")):
+            with W.Kernel(1):
+                Y[0] = incomplete(X[0])
+
+
+def test_weft_macro_rejects_incompatible_named_axes():
+    pytest.importorskip("weft_core")
+    from tilelang.weft import language as W
+
+    @W.macro
+    def choose(condition, left, right):
+        if condition:
+            return left
+        return right
+
+    @tilelang.jit(target="weft")
+    def invalid():
+        @W.prim_func
+        def main(X: W.Tensor((8,), "int32"), Y: W.Tensor((8,), "int32")):
+            with W.Kernel(1):
+                left = W.view(X, shape=(8,), axes=("m",))
+                right = W.view(Y, shape=(8,), axes=("n",))
+                result = choose(X[0] > 0, left, right)
+                W.copy(W.load(result), Y)
+        return main
+
+    with pytest.raises(Exception, match="preserve Encoding and logical axis identity"):
+        invalid()
 
 
 def test_jit2_gemm():

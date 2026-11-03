@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any, Literal
 from collections.abc import Callable
 from functools import partial
+from contextlib import nullcontext
+from types import SimpleNamespace
 import torch
 from dataclasses import dataclass
 from tilelang.utils.tensor import (
@@ -57,7 +59,21 @@ class Profiler:
 
     def with_default_adapter(self, adapter: BaseKernelAdapter) -> Profiler:
         self.adapter = adapter
+        self.supply = get_tensor_supply(self.supply_type, device=getattr(adapter, "input_device", None))
         return self
+
+    def _trial_inputs(self, arguments):
+        prepare = getattr(self.adapter, "trial_inputs", None)
+        if prepare is not None:
+            return prepare(arguments)
+        return nullcontext(SimpleNamespace(arguments=arguments, reset=None, mutations=[]))
+
+    @staticmethod
+    def _synchronize(arguments):
+        from tilelang.utils.device import device_synchronize
+        devices = {value.device for value in arguments if isinstance(value, torch.Tensor) and value.device.type != "cpu"}
+        for device in devices:
+            device_synchronize(device)
 
     def _get_inputs(self, with_output=False, dynamic_symbolic_constraints: dict[str, int] | None = None):
         ins = []
@@ -119,10 +135,12 @@ class Profiler:
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
-        ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
-        lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        with self._trial_inputs(ins) as reference, self._trial_inputs(ins) as candidate:
+            ref_outs = reference_program(*reference.arguments)
+            self._synchronize(reference.arguments)
+            lib_outs = self.func(*candidate.arguments)
+            self._synchronize(candidate.arguments)
+            reference_mutations, candidate_mutations = list(reference.mutations), list(candidate.mutations)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -137,6 +155,9 @@ class Profiler:
             ref_outs = list(ref_outs)
         elif ref_outs is None:
             ref_outs = []
+
+        lib_outs = [*lib_outs, *candidate_mutations]
+        ref_outs = [*ref_outs, *reference_mutations]
 
         # only compare outputs
         assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
@@ -177,10 +198,11 @@ class Profiler:
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
-        ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
-        lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        with self._trial_inputs(ins) as reference, self._trial_inputs(ins) as candidate:
+            ref_outs = reference_program(*reference.arguments)
+            self._synchronize(reference.arguments)
+            lib_outs = self.func(*candidate.arguments)
+            self._synchronize(candidate.arguments)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -265,19 +287,22 @@ class Profiler:
                 ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
             else:
                 ins = self._get_inputs()
-            bench_func = partial(bench_target, *ins)
-            return do_bench(
-                bench_func,
-                warmup=warmup,
-                rep=rep,
-                _n_warmup=n_warmup,
-                _n_repeat=n_repeat,
-                quantiles=quantiles,
-                backend=backend,
-                return_mode=return_mode,
-                device=device,
-                early_stop_baseline=early_stop_baseline,
-            )
+            selected_backend = getattr(self.adapter, "benchmark_backend", backend) if backend == "event" else backend
+            with self._trial_inputs(ins) as state:
+                bench_func = partial(bench_target, *state.arguments)
+                return do_bench(
+                    bench_func,
+                    warmup=warmup,
+                    rep=rep,
+                    _n_warmup=n_warmup,
+                    _n_repeat=n_repeat,
+                    quantiles=quantiles,
+                    backend=selected_backend,
+                    return_mode=return_mode,
+                    device=device,
+                    early_stop_baseline=early_stop_baseline,
+                    before_call=state.reset,
+                )
 
         if device is not None and not isinstance(device, int) and torch.device(device).type == "npu":
             with torch.npu.device(device):

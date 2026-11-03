@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 from tvm import IRModule
 from tvm.target import Target
 
 if TYPE_CHECKING:
+    from tilelang.engine.param import CompiledArtifact
     from tilelang.backend.device_codegen import DeviceCodegen
     from tilelang.backend.execution_backend import ExecutionBackendSpec
     from tilelang.backend.host_codegen import HostCodegen, HostCodegenHook
@@ -38,11 +39,15 @@ class BackendModule:
     host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
+    artifact_compiler: Callable[..., CompiledArtifact] | None = None
+    parallel_iteration_model: Literal["simt", "independent_values"] = "simt"
 
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)
         if not self.name:
             raise ValueError("BackendModule.name must not be empty")
+        if self.parallel_iteration_model not in ("simt", "independent_values"):
+            raise ValueError(f"Unknown parallel iteration model: {self.parallel_iteration_model!r}")
         if not target_kinds or any(not kind for kind in target_kinds):
             raise ValueError(f"BackendModule {self.name!r} must own at least one non-empty target kind")
         if len(set(target_kinds)) != len(target_kinds):
@@ -50,14 +55,15 @@ class BackendModule:
 
         target_kind_set = set(target_kinds)
         pipelines = MappingProxyType(dict(self.pipelines))
-        if set(pipelines) != target_kind_set:
+        expected = target_kind_set if self.artifact_compiler is None else set()
+        if set(pipelines) != expected:
             raise ValueError(f"BackendModule {self.name!r} must define exactly one pipeline for every target kind")
         for target_kind, pipeline in pipelines.items():
             if pipeline.name != target_kind:
                 raise ValueError(f"BackendModule {self.name!r} pipeline {pipeline.name!r} does not match target kind {target_kind!r}")
 
         device_codegens = MappingProxyType(dict(self.device_codegens))
-        if set(device_codegens) != target_kind_set:
+        if set(device_codegens) != expected:
             raise ValueError(f"BackendModule {self.name!r} must define device codegen for every target kind")
 
         host_codegens = MappingProxyType(dict(self.host_codegens))
@@ -76,7 +82,9 @@ class BackendModule:
             raise ValueError(f"BackendModule {self.name!r} must define at least one execution backend")
         if len(set(execution_names)) != len(execution_names):
             raise ValueError(f"BackendModule {self.name!r} execution backend names must be unique: {execution_names}")
-        if any(spec.enable_host_codegen for spec in execution_backends) and not host_codegens:
+        if self.artifact_compiler is not None and (host_codegens or host_codegen_hooks):
+            raise ValueError("An artifact compiler owns its complete IR-to-native route; host codegen cannot also be selected")
+        if any(spec.enable_host_codegen for spec in execution_backends) and not host_codegens and self.artifact_compiler is None:
             raise ValueError(f"BackendModule {self.name!r} enables host codegen but defines no host codegen targets")
 
         callbacks = MappingProxyType(dict(self.callbacks))

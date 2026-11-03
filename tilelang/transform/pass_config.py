@@ -30,6 +30,9 @@ class PassConfigKey(str, Enum):
             mod = tl.transform.Simplify()(mod)
     """
 
+    WEFT_BACKEND_OPTIONS = "tl.weft.backend_options"
+    """Finite physical compiler options for the shared Weft backend."""
+
     # TL_SIMPLIFY sub-config keys
     TL_SIMPLIFY_TRANSITIVELY_PROVE_INEQUALITIES = "transitively_prove_inequalities"
     """Enable transitive inequality proving in simplification. Default: False"""
@@ -365,6 +368,10 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
 
     for key, value in (pass_configs or {}).items():
         normalized_key = key.value if isinstance(key, PassConfigKey) else key
+
+        if normalized_key == PassConfigKey.WEFT_BACKEND_OPTIONS.value and isinstance(value, dict):
+            from tvm.ir import make_node
+            value = make_node("ir.DictAttrs", **value)
 
         normalized[normalized_key] = value
 

@@ -67,7 +67,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "weft_native"] = "tvm_ffi",
         target: TargetLike = "auto",
         target_host: TargetLike | None = None,
         verbose: bool = False,
@@ -85,7 +85,7 @@ class JITKernel(Generic[_P, _T]):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
+        execution_backend : Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "weft_native"], optional
             Execution backend to use for kernel execution.
         target : str, dict, or tvm.target.Target, optional
             Compilation target (default: "auto"). Use a dict for target attributes,
@@ -159,7 +159,7 @@ class JITKernel(Generic[_P, _T]):
         target: TargetLike,
         target_host: TargetLike | None,
         out_idx: list[int] | int,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "weft_native"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
         backend_context: BackendContext | None = None,
@@ -339,7 +339,11 @@ class JITKernel(Generic[_P, _T]):
         target = self.target
         compile_flags = self.compile_flags
 
-        if execution_backend == "tvm_ffi":
+        if execution_backend == "weft_native":
+            from tilelang.jit.adapter.weft_native import WeftNativeKernelAdapter
+            adapter = create_adapter(WeftNativeKernelAdapter, native_artifact=artifact.native_artifact,
+                                     params=artifact.params, result_idx=out_idx)
+        elif execution_backend == "tvm_ffi":
             # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
@@ -439,7 +443,11 @@ class JITKernel(Generic[_P, _T]):
         execution_backend = self.execution_backend
 
         # Create an adapter based on the specified execution backend.
-        if execution_backend == "tvm_ffi":
+        if execution_backend == "weft_native":
+            from tilelang.jit.adapter.weft_native import WeftNativeKernelAdapter
+            adapter = WeftNativeKernelAdapter.from_database(
+                params=params, result_idx=result_idx, kernel_lib_path=kernel_lib_path)
+        elif execution_backend == "tvm_ffi":
             adapter = TVMFFIKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
@@ -538,7 +546,7 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
+        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl", "weft_native"}:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
@@ -546,6 +554,8 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
+        if self.execution_backend == "weft_native":
+            return self.adapter.get_host_source()
         if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
@@ -773,7 +783,7 @@ class JITKernel(Generic[_P, _T]):
         # rt_params: use cloudpickle to serialize
 
         runtime_module = self.artifact.rt_mod if self.artifact is not None else None
-        cached_library = getattr(self.adapter, "libpath", None) if self.execution_backend == "tvm_ffi" else None
+        cached_library = getattr(self.adapter, "libpath", None) if self.execution_backend in ("tvm_ffi", "weft_native") else None
         if runtime_module is None and cached_library is None:
             raise AttributeError(
                 'Runtime module is not available. Please compile the kernel with `execution_backend="tvm_ffi"` before exporting.'
@@ -788,6 +798,12 @@ class JITKernel(Generic[_P, _T]):
         elif not (os.path.exists(kernel_file) and os.path.samefile(cached_library, kernel_file)):
             shutil.copyfile(cached_library, kernel_file)
         logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")
+
+    def export_native(self, directory):
+        """Export the complete typed native artifact for C/C++ deployment."""
+        if self.execution_backend != "weft_native":
+            raise NotImplementedError("typed native artifact export requires the weft_native execution backend")
+        return self.adapter.export(directory)
 
     def _get_ptx(self, verbose: bool | None = None) -> str:
         """

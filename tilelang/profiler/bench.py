@@ -41,6 +41,7 @@ def do_bench(
     device: int | torch.device | None = None,
     cache_size: int = 256,
     early_stop_baseline: float | None = None,
+    before_call: Callable | None = None,
 ) -> float | list[float]:
     """Benchmark a callable with GPU timing or host wall-clock timing.
 
@@ -98,11 +99,13 @@ def do_bench(
                 synchronize = partial(device_synchronize, resolved_device)
 
         with device_context:
+            if before_call is not None:
+                before_call()
             fn()
             if synchronize is not None:
                 synchronize()
 
-            estimate_ms = bench_with_wall(fn, n_repeat=5, synchronize=synchronize)
+            estimate_ms = bench_with_wall(fn, n_repeat=5, synchronize=synchronize, before_call=before_call)
             if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
                 if quantiles is not None:
                     return estimate_ms if len(quantiles) == 1 else [estimate_ms] * len(quantiles)
@@ -113,11 +116,17 @@ def do_bench(
             n_repeat = _n_repeat if _n_repeat > 0 else max(1, int(rep / estimate_ms))
 
             for _ in range(n_warmup):
+                if before_call is not None:
+                    before_call()
                 fn()
             if synchronize is not None:
                 synchronize()
 
-            return bench_with_wall(fn, n_repeat=n_repeat, quantiles=quantiles, return_mode=return_mode, synchronize=synchronize)
+            return bench_with_wall(fn, n_repeat=n_repeat, quantiles=quantiles, return_mode=return_mode,
+                                   synchronize=synchronize, before_call=before_call)
+
+    if before_call is not None:
+        raise ValueError("per-call state restoration requires wall timing")
 
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 

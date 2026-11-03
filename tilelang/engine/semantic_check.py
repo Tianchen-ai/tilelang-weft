@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from tvm import IRModule
 
 import tilelang
 from tilelang.transform import PassContext
+
+if TYPE_CHECKING:
+    from tilelang.backend.module import BackendContext
 
 
 def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -> bool:
@@ -18,8 +23,8 @@ def should_enable_ast_print(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_AST_PRINT_ENABLE, False))
 
 
-def PreLowerSemanticCheck(mod: IRModule) -> None:
-    """Run backend-independent validation before lowering."""
+def PreLowerSemanticCheck(mod: IRModule, context: BackendContext) -> None:
+    """Check common structure and the selected parallel ownership contract."""
 
     if not should_enable_prelower_semantic_check():
         return
@@ -27,5 +32,6 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     if should_enable_ast_print():
         tilelang.analysis.ASTPrinter()(mod)
     tilelang.analysis.NestedLoopChecker()(mod)
-    tilelang.analysis.ParallelLocalIndexChecker()(mod)
-    tilelang.analysis.FragmentLoopChecker()(mod)
+    if context.module.parallel_iteration_model == "simt":
+        tilelang.analysis.ParallelLocalIndexChecker()(mod)
+        tilelang.analysis.FragmentLoopChecker()(mod)

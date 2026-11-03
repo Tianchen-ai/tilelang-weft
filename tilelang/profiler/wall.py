@@ -14,6 +14,7 @@ def bench_with_wall(
     quantiles: list[float] | None = None,
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     synchronize: Callable | None = None,
+    before_call: Callable | None = None,
 ) -> float | list[float]:
     """Time each call in milliseconds, including optional synchronization.
 
@@ -24,6 +25,8 @@ def bench_with_wall(
     """
     times = []
     for _ in range(n_repeat):
+        if before_call is not None:
+            before_call()
         if synchronize is not None:
             synchronize()
         start = perf_counter()

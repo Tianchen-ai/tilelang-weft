@@ -130,3 +130,5 @@ maint/host_checks/logs/*
 
 # uv Lockfile
 uv.lock
+# Local SDKs, Python environments, build logs and JIT caches.
+.local/
