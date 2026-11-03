@@ -37,7 +37,7 @@ RISC-V 上通过 PyTorch 的 DLPack 协议交互，不强制安装可选的预�
 ```sh
 git submodule update --init --recursive
 USE_CUDA=OFF USE_ROCM=OFF USE_LLVM=OFF NO_VERSION_LABEL=1 \
-  python -m pip wheel --no-build-isolation . -w dist
+  python -m pip wheel --no-build-isolation --no-deps . -w dist
 ```
 
 独立 core 使用 Triton–Weft 选定的 LLVM/MLIR SDK，入口为 `third_party/weft`。

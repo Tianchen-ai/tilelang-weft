@@ -53,7 +53,7 @@ with the dependencies declared in `pyproject.toml` and CMake 3.26.1 or newer:
 ```sh
 git submodule update --init --recursive
 USE_CUDA=OFF USE_ROCM=OFF USE_LLVM=OFF NO_VERSION_LABEL=1 \
-  python -m pip wheel --no-build-isolation . -w dist
+  python -m pip wheel --no-build-isolation --no-deps . -w dist
 ```
 
 An independently built core requires the LLVM/MLIR SDK selected by Triton–Weft.
