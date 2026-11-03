@@ -42,6 +42,11 @@ local instructions for one program.
 
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
+Packed projection declares `acc_dtype="float64"` for long reductions with large
+decoded scales, then explicitly converts to its F32 output. Authors can select
+`acc_dtype="float32"` in that source factory. The ordinary `linear.matmul`
+factory separately declares input, accumulator and output types; its existing
+default remains F32. Target passes preserve these numerical choices.
 Persistent interleave requires a separate preparation kernel, demonstrated by
 [example 05](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/05_derived_layout.py).
 

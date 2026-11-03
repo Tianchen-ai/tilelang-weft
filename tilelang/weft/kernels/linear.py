@@ -18,15 +18,20 @@ def matmul(
     pipeline_depth=0,
     cpu_num_threads=0,
     transpose_weight=False,
+    output_dtype=None,
+    operand_dtype=None,
 ):
+    output_dtype = acc_dtype if output_dtype is None else output_dtype
+    operand_dtype = dtype if operand_dtype is None else operand_dtype
+
     @T.prim_func
-    def main(A: T.Tensor((M, K), dtype), B: T.Tensor((N, K) if transpose_weight else (K, N), dtype), C: T.Tensor((M, N), acc_dtype)):
+    def main(A: T.Tensor((M, K), dtype), B: T.Tensor((N, K) if transpose_weight else (K, N), dtype), C: T.Tensor((M, N), output_dtype)):
         with T.Kernel(T.ceildiv(M, block_m), T.ceildiv(N, block_n), cpu_num_threads=cpu_num_threads) as (row, column):
             accumulator = T.alloc_local((block_m, block_n), acc_dtype)
             T.fill(accumulator, 0)
             for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=pipeline_depth):
-                left = T.alloc_local((block_m, block_k), dtype)
-                right = T.alloc_local((block_n, block_k) if transpose_weight else (block_k, block_n), dtype)
+                left = T.alloc_local((block_m, block_k), operand_dtype)
+                right = T.alloc_local((block_n, block_k) if transpose_weight else (block_k, block_n), operand_dtype)
                 T.copy(A[row * block_m, k * block_k], left)
                 if transpose_weight:
                     T.copy(B[column * block_n, k * block_k], right)

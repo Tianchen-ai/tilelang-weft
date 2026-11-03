@@ -536,7 +536,7 @@ def test_weft_product_quantized_partials_and_scale_branches(format):
     projected = torch.empty(2, m)
     composed = packed_projection(2, m, blocks * 256, format=format)
     composed(weights, dense_input, restored, projected)
-    torch.testing.assert_close(projected, dense_input @ restored.T)
+    torch.testing.assert_close(projected, (dense_input.double() @ restored.double().T).float())
     from tilelang.weft.kernels.deployment import vec_dot
     from weft_core.integrations.llama_cpp import validate_vec_dot
 
