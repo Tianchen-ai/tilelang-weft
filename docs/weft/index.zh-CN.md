@@ -21,6 +21,16 @@ core wheel 提供原生 compiler、runtime 及 Clang 23/OpenMP 资源。
 LLVM/MLIR ABI 封装在 core 内；TileLang 保留匹配的 TVM/TVM-FFI。
 CPU Tensor 直接借用底层存储，`out_idx` 输出遵循 TileLang 的普通分配约定。
 
+先安装适合宿主平台的 CPU PyTorch。RISC-V Release 同时提供相应 Python ABI
+的原生 TVM-FFI 依赖 wheel。将匹配的文件下载到同一目录，安装时使用：
+
+```sh
+python -m pip install --find-links . ./weft_core-*.whl ./tilelang-*.whl
+```
+
+RISC-V 上通过 PyTorch 的 DLPack 协议交互，不强制安装可选的预构建
+`torch-c-dlpack-ext` 发行包。自行从源码构建依赖时还需 Cython 和 setuptools-scm。
+
 源码开发时先安装匹配 `weft-core`，初始化固定子模块，再构建 CPU 配置。
 环境需要 `pyproject.toml` 的依赖和 CMake 3.26.1 或更新版本：
 

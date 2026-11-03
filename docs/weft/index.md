@@ -34,6 +34,18 @@ Its LLVM/MLIR ABI is private; TileLang keeps its matching TVM/TVM-FFI dependency
 CPU tensors are borrowed directly. Explicit `out_idx` outputs follow TileLang's
 ordinary allocation convention.
 
+Install a CPU PyTorch build for the host platform first. The RISC-V release also
+provides native TVM-FFI dependency wheels for the supported Python ABIs. Download
+the matching files into one directory and use `--find-links .` during installation:
+
+```sh
+python -m pip install --find-links . ./weft_core-*.whl ./tilelang-*.whl
+```
+
+On RISC-V, TVM-FFI uses PyTorch's DLPack protocol without requiring the optional
+prebuilt `torch-c-dlpack-ext` distribution. Source dependency builds additionally
+need Cython and setuptools-scm.
+
 For source development, initialize the pinned submodules and build with the CPU
 configuration. Install the matching `weft-core` wheel first. Use an environment
 with the dependencies declared in `pyproject.toml` and CMake 3.26.1 or newer:
