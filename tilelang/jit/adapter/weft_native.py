@@ -82,7 +82,7 @@ class WeftNativeKernelAdapter(BaseKernelAdapter):
                 if name not in supplied:
                     continue
                 value = supplied[name]
-                if getattr(value, "device", torch.device("cpu")).type != "cpu":
+                if torch.device(getattr(value, "device", "cpu")).type != "cpu":
                     raise TypeError(f"{name} must reside on the CPU selected for this kernel")
                 actual_shape = tuple(value.shape)
                 actual_stride = (
@@ -119,7 +119,7 @@ class WeftNativeKernelAdapter(BaseKernelAdapter):
                         expected_stride.insert(0, stride)
                         stride *= extent
                     expected_stride = tuple(expected_stride)
-                if actual_stride != expected_stride:
+                if actual_stride != expected_stride and 0 not in expected_shape:
                     raise ValueError(
                         f"{name}: stride {actual_stride} does not match {expected_stride}; use T.StridedTensor for runtime strides"
                     )
