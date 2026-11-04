@@ -185,6 +185,6 @@ build and replacement-counter example.
 ## Experiments
 
 **Under evaluation / 测试中.** Comparative experiments belong to
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench).
+[TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench).
 Native kernel, grid, Python call, cold compilation and model stages use separate
 measurement boundaries.

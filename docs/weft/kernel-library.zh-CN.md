@@ -49,9 +49,10 @@ kernel(a, b, c)
 lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，完整流程见
 [示例 05](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/05_derived_layout.py)。
 
-Packed projection 为长归约和较大的解码 scale 显式声明 `acc_dtype="float64"`，
-局部操作数同步扩展，最后转换为 F32 输出。作者可以在 factory 中选择
-`acc_dtype="float32"`。普通 `linear.matmul` 分别声明输入、局部操作数、累加和
+`packed.projection` 为长归约和较大的解码 scale 声明 F64 state，最后转换为
+F32 输出。Q4_K、Q6_K 通过共享 `partials` 宏保留整数 partial 和独立的
+scale/correction 支路。`composition.packed_projection` 的显式解码到 workspace
+再做 dense 乘法程序另有 `acc_dtype` 参数。普通 `linear.matmul` 分别声明输入、局部操作数、累加和
 输出类型，原有默认仍为 F32；目标 passes 保留这些数值选择。
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。

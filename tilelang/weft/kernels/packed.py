@@ -9,6 +9,7 @@ from tilelang.weft import language as T
 from . import ggml_formats as F
 from . import decoding as D
 from .preparation import quantize_rows
+from . import partials
 
 
 def decoder(format):
@@ -40,7 +41,13 @@ def decoder(format):
 @T.macro
 def accumulate(weight, activation_view, part, total, rows, block, format, activation, partner, decode,
                Grid, Signs, Codebook, Scale, HalfBits, Powers):
-    if format in ("Q4_1", "Q5_1"):
+    if format == "Q4_K":
+        x = T.load(activation_view[part])
+        partials.q4_k(weight, x, total, rows, "float64")
+    elif format == "Q6_K":
+        x = T.load(activation_view[part])
+        partials.q6_k(weight, x, total, rows, "float64")
+    elif format in ("Q4_1", "Q5_1"):
         x = T.stage(T.load(activation_view[part]))
         q = weight.q
         if format == "Q5_1":

@@ -140,5 +140,5 @@ saturation=False)` 保留显式窄化。`output[part].q` 等字段 View 支持 t
 ## 实验
 
 **测试中 / Under evaluation。** 比较实验统一使用独立的
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)。
+[TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench)。
 native kernel、grid、Python 调用、冷编译和模型阶段分别计时。
