@@ -48,7 +48,7 @@ JIT、缓存和调优服务；core 负责物理布局、局部指令、流水与
 
 ## 使用
 
-从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.1)
+从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2)
 下载与宿主架构和 Python ABI 匹配的 `weft-core` 和 `tilelang` wheel 后：
 
 ```sh
@@ -60,7 +60,7 @@ python examples/weft/04_encoding_levels.py
 python examples/weft/05_derived_layout.py
 ```
 
-发行包保留 `tilelang` 名称，下游版本标识为 `0.1.15+weft.1`。源码构建、工具链、
+发行包保留 `tilelang` 名称，下游版本标识为 `0.1.15+weft.2`。源码构建、工具链、
 目标与核心选择见[安装手册](docs/weft/index.zh-CN.md#安装与构建)。
 
 ## 作者模型

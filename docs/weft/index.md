@@ -15,14 +15,14 @@ native-deployment.zh-CN
 :::
 
 TileLang–Weft embeds the shared Weft CPU compiler in TileLang v0.1.15.
-The package version is `0.1.15+weft.1`; the import remains `tilelang`.
+The package version is `0.1.15+weft.2`; the import remains `tilelang`.
 
 ![TileLang and Triton share the Canonical compiler and native CPU runtime](assets/architecture.png)
 
 ## Installation and builds
 
 Download the matching host/Python wheels from the
-[release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.1), then install them:
+[release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2), then install them:
 
 ```sh
 python -m pip install ./weft_core-*.whl ./tilelang-*.whl

@@ -69,7 +69,7 @@ The [catalog](tilelang/weft/kernels/catalog.py) links names to their actual auth
 ## Install and run
 
 Download matching `weft_core` and `tilelang` wheels from the
-[project release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.1),
+[project release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2),
 then install them in a Python environment:
 
 ```sh
@@ -81,7 +81,7 @@ python examples/weft/04_encoding_levels.py
 python examples/weft/05_derived_layout.py
 ```
 
-The distribution remains `tilelang`, with downstream identity `0.1.15+weft.1`.
+The distribution remains `tilelang`, with downstream identity `0.1.15+weft.2`.
 The `weft-core` package supplies the shared native compiler/runtime and Clang 23
 resources. Release assets name their Python ABI and host architecture. See the [handbook](docs/weft/index.md) for source builds, target/core
 selection, autotuning, native export and C/C++ deployment.

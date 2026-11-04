@@ -44,7 +44,7 @@ def get_git_commit_id() -> str | None:
 def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> str:
     assert field == "version"
 
-    version = base_version + "+weft.1"
+    version = base_version + "+weft.2"
 
     # Pin the source commit for sdists, even when the public version omits it.
     get_git_commit_id()

@@ -28,7 +28,7 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "apache-tvm-ffi>=0.1.11,<0.1.13",
-    "weft-core==0.1.0",
+    "weft-core==0.1.1",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
     "torch-c-dlpack-ext; python_version < '3.14' and platform_machine != 'riscv64'",
