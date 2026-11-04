@@ -641,7 +641,7 @@ if os.environ.get("TL_CUTLASS_PATH", None) is None:
     if os.path.exists(cutlass_inc_path):
         os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
     else:
-        logger.warning(CUTLASS_NOT_FOUND_MESSAGE)
+        logger.debug(CUTLASS_NOT_FOUND_MESSAGE)
 
 # Initialize TL_TEMPLATE_PATH
 if os.environ.get("TL_TEMPLATE_PATH", None) is None:
