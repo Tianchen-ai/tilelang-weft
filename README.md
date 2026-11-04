@@ -96,12 +96,17 @@ packages and checks the actual native replacement calls against GGML.
 
 ## Experiments
 
-**Under evaluation / 测试中.** Measurements use the independent
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench).
-The [TileLang adapter guide](https://github.com/Tianchen-ai/triton-weft-bench/blob/codex/tilelang-weft/docs/tilelang-weft-integration.md)
-uses the Bench wheel included with this release.
-Native computation, grid launch, Python/JIT calls and model stages have separate
-timing boundaries.
+Measurements use the independent
+[TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench).
+Its 150 distinct operator IDs form 553 platform cases across SG2044, K1,
+K3 A100 and x86, with 543 matched external reference contracts. Each candidate
+uses the installed TileLang source JIT on its execution target. Native
+computation, grid launch, cold JIT, cache restoration and Python hot calls have
+separate timing columns.
+
+The [bilingual Bench handbook](https://tianchen-ai.github.io/tilelang-weft-bench/)
+provides the coordinated wheels, exact source bindings, fixed-reference workflow
+and full-suite commands. **The full operator campaign is under evaluation.**
 
 ## Source and upstream
 

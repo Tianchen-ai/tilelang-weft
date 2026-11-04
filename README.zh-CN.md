@@ -84,11 +84,14 @@ Python 导出、C++ 编译和原生调用。
 
 ## 实验
 
-**测试中 / Under evaluation。** 性能测量通过独立的
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench) 进行。
-本次发行同时提供 Bench wheel，配置方式见
-[TileLang 接入指南](https://github.com/Tianchen-ai/triton-weft-bench/blob/codex/tilelang-weft/docs/tilelang-weft-integration.zh-CN.md)。
-数值检查、native 计算、Python/JIT 调用、grid 启动和模型部署分别记录。
+性能测量通过独立的
+[TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench) 进行。
+150 个不同算子 ID 在 SG2044、K1、K3 A100 和 x86 上组成 553 个平台用例，
+其中 543 项有匹配外部参考合同。候选通过执行机已安装的 TileLang 源码 JIT 运行；
+原生计算、grid 启动、冷 JIT、缓存恢复和 Python 热调用分别记录。
+
+[双语 Bench 工具书](https://tianchen-ai.github.io/tilelang-weft-bench/) 提供配套
+wheel、源码绑定、固定参考流程和全量套件命令。**全量算子测量仍在进行中。**
 
 ## 源码与上游
 
