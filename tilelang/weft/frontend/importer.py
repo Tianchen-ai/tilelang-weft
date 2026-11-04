@@ -423,6 +423,12 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             value = self.op("select", operands, value_type(element_type(value.type), shape, axes))
         converted = [self.cast(i, dt.u32 if shape_of(i.type) else dt.index) for i in indices]
         selectors = ["gather" if shape_of(i.type) else "index" for i in converted]
+        shape, axes = (), ()
+        for index in converted:
+            shape, axes = self.domain_types(shape, axes, index)
+        # A masked expression can discover column axes before row axes. The
+        # update still uses the destination selectors' ordered domain.
+        value = self.broadcast(value, shape, axes)
         original = self.locals[buffer]
         self.locals[buffer] = self.op("update", (original, value, *converted), original.type, {"selectors": json.dumps(selectors)})
 

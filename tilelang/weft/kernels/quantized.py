@@ -71,7 +71,14 @@ def dequantize(M, K, format="Q4_0", rows=4):
                 with T.level.blocks(K, extent=block) as part:
                     record = T.load(wv[row, part])
                     result = T.alloc_local((rows, block), 'float32')
-                    decode_dequantize(record, result, rows, format, block, 0, 0, 0, 0, 0, 0)
+                    if block > 32:
+                        for segment in T.serial(block // 32):
+                            chunk = T.alloc_local((rows, 32), 'float32')
+                            decode_dequantize(record, chunk, rows, format, block, 0, 0, 0, 0, 0, 0, offset=segment * 32, width=32)
+                            for r, k in T.Parallel(rows, 32):
+                                result[r, segment * 32 + k] = chunk[r, k]
+                    else:
+                        decode_dequantize(record, result, rows, format, block, 0, 0, 0, 0, 0, 0)
                     T.copy(result, yv[row, part])
 
     return main
