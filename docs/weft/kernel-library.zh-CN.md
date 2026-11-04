@@ -1,5 +1,11 @@
 # 普通作者程序
 
+独立的 [TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench) 将 150 个
+workload ID 绑定到 553 个平台用例，与 Triton–Weft 共用固定参考。
+[示例 13](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/13_packed_dot.py)
+展示明确输入 bytes 的完整 packed 调用。`T.load(value, at=point)` 沿 Value 已有的具名
+Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
+
 [English](kernel-library.md) · [工具书](index.zh-CN.md)
 
 程序库位于 `tilelang.weft.kernels`。[catalog](https://github.com/Tianchen-ai/tilelang-weft/blob/main/tilelang/weft/kernels/catalog.py)
@@ -9,7 +15,7 @@
 | 类别 | 源码模块 | 作者表达的结构 |
 |---|---|---|
 | Pointwise、SiLU、SwiGLU、softplus、exp/log、选择 | `activation` | 独立 Parallel tile、显式尾部及稳定 sigmoid/softplus macro |
-| RMSNorm、LayerNorm、residual RMSNorm | `normalization` | 行快照、归约和显式 affine epilogue |
+| RMSNorm、LayerNorm、residual RMSNorm | `normalization` | 显式行归约和有界流式 affine epilogue |
 | Softmax、split/interleaved RoPE | `attention` | 稳定行 softmax 和明确 rotary 坐标 |
 | Online attention | `attention.online_attention` | query stage、m/l/o 状态、key Level 和尾部 score mask |
 | KV 更新、causal GQA | `attention` | 调用者 cache、已填充前缀及 head/group 映射 |
@@ -19,6 +25,8 @@
 | Lookup、sub-byte 格式 | `codebook` | IQ1/IQ2/IQ3/IQ4、MXFP4/NVFP4、TQ1 与显式表输入 |
 | Activation preparation | `preparation` | 调用者 Q8_0/Q8_1/Q8_K 输出字段、舍入和分组和 |
 | Packed 投影 | `composition.packed_projection` | 显式解码和 dense 投影两个程序，workspace 归调用者；可分别 prepare/compute |
+| 24 格式完整 packed dot 与投影 | `packed.vec_dot`、`packed.projection` | record 内解码、作者声明的 partial、逐 record activation scale，投影内包含准备 |
+| IME1/IME2 与 AMX/VNNI | `matrix`、`layouts` | 显式持久布局及局部 contraction engine |
 | GGML 行部署 | `deployment.vec_dot` | 动态 K、typed View ABI、Q4_K/Q6_K scale 支路和明确角色绑定 |
 | MoE | `moe` | Top-k 路由、稳定分组、不等长 expert 范围和加权合并 |
 | 状态程序 | `state` | Welford、Top-K、selective recurrence 和调用者卷积历史 |

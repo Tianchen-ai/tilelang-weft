@@ -686,6 +686,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         function = self.function
         parameters, types, names = [], [], []
         abi_declarations = {}
+        strided_arguments = set()
 
         def abi_view(node):
             if not isinstance(node, tirx.Call) or node.op.name != "tl.weft.view" or not bool(node.annotations.get("abi", False)):
@@ -693,8 +694,6 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             source = next((buffer for buffer in function.buffer_map.values() if buffer.data.same_as(node.args[0])), None)
             if source is None or source in abi_declarations:
                 self.error("each ABI View must declare one unique entry buffer", node)
-            if node.annotations["strides"]:
-                self.error("ABI Views currently require contiguous serialized storage", node)
             from weft_core.encoding import Encoding
 
             description = json.loads(str(node.args[1].value))
@@ -702,11 +701,25 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 element = dtype(description["dense"])
                 encoding = EncodingType(element.name, "dense", "dense." + element.name)
             elif "derived" in description:
-                self.error("derived ABI Views require a declared persistent layout interface", node)
+                derived = description["derived"]
+                schema = Encoding.from_dict(derived["source"])
+                self.declare_encoding(schema)
+                self.encodings[derived["family"]] = schema
+                encoding = EncodingType(derived["family"], "derived_instance", derived["identity"], tuple(derived["parameters"]))
             else:
                 schema = Encoding.from_dict(description)
                 self.declare_encoding(schema)
                 encoding = EncodingType(schema.name, "base", schema.name)
+            if node.annotations["strides"]:
+                if encoding.kind != "dense":
+                    self.error("serialized Encoding ABI uses its declared record layout, not dense strides", node)
+                declared = tuple(node.annotations["strides"])
+                actual = tuple(source.strides)
+                if not actual:
+                    actual = tuple(math.prod(tuple(self.static(n) for n in source.shape)[i + 1:]) for i in range(len(source.shape)))
+                if len(declared) != len(actual) or any(not self.analyzer.can_prove(a == b) for a, b in zip(declared, actual)):
+                    self.error("ABI View strides differ from the source Tensor storage", node)
+                strided_arguments.add(source.name)
             shape = []
             for extent in node.args[2:]:
                 extent = self.analyzer.simplify(extent)
@@ -797,7 +810,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 "arg_names": json.dumps(names),
                 "arg_access": json.dumps(access_names),
                 "arg_alias_sets": integers(alias),
-                "strided_args": "[]",
+                "strided_args": json.dumps(sorted(strided_arguments)),
                 "shape_symbols": json.dumps(list(self.shape_symbols)),
                 "source": json.dumps(self.location(function).format()),
             },

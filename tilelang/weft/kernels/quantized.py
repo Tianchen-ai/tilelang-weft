@@ -3,6 +3,7 @@
 import tilelang
 from tilelang.weft import language as T
 from . import ggml_formats as F
+from .decoding import decode_dequantize, decode_dequantize_iq4_nl
 
 
 @tilelang.jit(target="weft")
@@ -99,61 +100,8 @@ def dequantize(M, K, format="Q4_0", rows=4):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=block) as part:
                     record = T.load(wv[row, part])
-                    if format == "Q6_K":
-                        q, high, scales, d = record.ql, record.qh, record.scales, record.d
-                    elif format == "Q8_K":
-                        q, d = record.q, record.ds
-                    else:
-                        q, d = record.q, record.d
-                    result = T.alloc_local((rows, block), "float32")
-                    if format in ("Q5_0", "Q5_1", "Q5_K"):
-                        high = record.qh
-                    if format in ("Q4_1", "Q5_1"):
-                        minimum = record.m
-                    if format == "Q2_K":
-                        scales, dmin = record.scales, record.dmin
-                    if format == "Q3_K":
-                        high, scale_low, scale_high = record.hmask, record.scale_low, record.scale_high
-                    if format in ("Q4_K", "Q5_K"):
-                        scales, minimum, dmin = record.sc, record.m, record.dmin
-                    for r, k in T.Parallel(rows, block):
-                        if format == "Q1_0":
-                            value = T.cast(q[r, k], "int32") * 2 - 1
-                        elif format in ("Q5_0", "Q5_1"):
-                            value = T.cast(q[r, k], "int32") | (T.cast(high[r, k], "int32") << 4)
-                            if format == "Q5_0":
-                                value = value - 16
-                        elif format == "Q3_K":
-                            value = T.cast(q[r, k], "int32") - (1 - T.cast(high[r, k], "int32")) * 4
-                        elif format == "Q5_K":
-                            value = T.cast(q[r, k], "int32") | (T.cast(high[r, k], "int32") << 4)
-                        elif format == "Q6_K":
-                            value = (T.cast(q[r, k], "int32") | (T.cast(high[r, k], "int32") << 4)) - 32
-                        else:
-                            value = T.cast(q[r, k], "int32")
-                            if format == "Q4_0":
-                                value = value - 8
-                            elif format == "TQ2_0":
-                                value = value - 1
-                        if format == "Q2_K":
-                            scale = T.cast(scales[r, k // 16], "int32") & 15
-                            minimum_value = T.cast(scales[r, k // 16], "int32") >> 4
-                            result[r, k] = T.cast(d[r], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[r], "float32") * T.cast(
-                                minimum_value, "float32"
-                            )
-                        elif format == "Q3_K":
-                            scale = (T.cast(scale_low[r, k // 16], "int32") | (T.cast(scale_high[r, k // 16], "int32") << 4)) - 32
-                            result[r, k] = T.cast(d[r], "float32") * T.cast(scale * value, "float32")
-                        elif format in ("Q4_K", "Q5_K"):
-                            result[r, k] = T.cast(d[r], "float32") * T.cast(scales[r, k // 32], "float32") * T.cast(
-                                value, "float32"
-                            ) - T.cast(dmin[r], "float32") * T.cast(minimum[r, k // 32], "float32")
-                        elif format == "Q6_K":
-                            result[r, k] = T.cast(d[r], "float32") * T.cast(T.cast(scales[r, k // 16], "int32") * value, "float32")
-                        else:
-                            result[r, k] = T.cast(d[r], "float32") * T.cast(value, "float32")
-                        if format in ("Q4_1", "Q5_1"):
-                            result[r, k] += T.cast(minimum[r], "float32")
+                    result = T.alloc_local((rows, block), 'float32')
+                    decode_dequantize(record, result, rows, format, block, 0, 0, 0, 0, 0, 0)
                     T.copy(result, yv[row, part])
 
     return main
@@ -173,10 +121,8 @@ def dequantize_iq4_nl(M, K, rows=1):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=32) as block:
                     record = T.load(wv[row, block])
-                    q, d = record.q, record.d
-                    result = T.alloc_local((rows, 32), "float32")
-                    for r, k in T.Parallel(rows, 32):
-                        result[r, k] = T.cast(d[r], "float32") * T.cast(table[T.cast(q[r, k], "int32")], "float32")
+                    result = T.alloc_local((rows, 32), 'float32')
+                    decode_dequantize_iq4_nl(record, result, rows, 'DEQUANTIZE_IQ4_NL', 32, 0, 0, table, 0, 0, 0)
                     T.copy(result, yv[row, block])
 
     return main

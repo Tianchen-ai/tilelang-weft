@@ -35,4 +35,6 @@ It links the native runtime and system C++ libraries.
 
 Normal reusable author programs live in `tilelang.weft.kernels`.
 Comparison and timing belong to the independent Bench project.
+`13_packed_dot.py` constructs Q4_0/Q8_0 records and executes the same ordinary
+packed factory selected by TileLang–Weft Bench.
 Complete GGML build/run commands are in the [deployment handbook](../../docs/weft/native-deployment.md).

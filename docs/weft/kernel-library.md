@@ -9,7 +9,7 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | Family | Source module | Author structure |
 |---|---|---|
 | Pointwise, SiLU, SwiGLU, softplus, exp/log, selection | `activation` | Independent Parallel tiles and explicit tail guards; stable sigmoid/softplus macros |
-| RMSNorm, LayerNorm, residual RMSNorm | `normalization` | Row snapshots, reductions and explicit affine epilogues |
+| RMSNorm, LayerNorm, residual RMSNorm | `normalization` | Explicit row reductions and bounded streaming affine epilogues |
 | Softmax, split/interleaved RoPE | `attention` | Stable row softmax and explicit rotary index choices |
 | Online attention | `attention.online_attention` | Query stage, m/l/o state, bounded key Levels and explicit tail score mask |
 | KV update and causal grouped-query attention | `attention` | Caller-owned cache, populated prefix and head/group mapping |
@@ -19,6 +19,8 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | Lookup and sub-byte formats | `codebook` | IQ1/IQ2/IQ3/IQ4, MXFP4/NVFP4 and TQ1 author programs with explicit tables |
 | Activation preparation | `preparation` | Caller-owned Q8_0/Q8_1/Q8_K output fields, rounding and group sums |
 | Packed projection | `composition.packed_projection` | Explicit decode and dense projection programs with caller-owned workspace; prepare/compute can be invoked separately |
+| Complete packed dot and projection, 24 formats | `packed.vec_dot`, `packed.projection` | Record-local decode, author-declared partials, per-record activation scale and preparation inside projection |
+| IME1/IME2 and AMX/VNNI | `matrix`, `layouts` | Explicit persistent layouts and local contraction engines |
 | GGML row deployment | `deployment.vec_dot` | Dynamic K, typed View ABI, Q4_K/Q6_K scale branches and checked role binding |
 | MoE | `moe` | Top-k routing, stable grouping, ragged expert ranges and weighted combination |
 | State-space programs | `state` | Welford, Top-K, selective recurrence and caller-owned causal history |
@@ -53,3 +55,11 @@ Persistent interleave requires a separate preparation kernel, demonstrated by
 The product owns these normal programs. Bench owns workloads, external references,
 numerical comparisons and timing boundaries. Public comparative performance is
 **Under evaluation / 测试中**.
+
+The independent [TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench)
+binds 150 workload IDs to 553 platform cases, sharing the fixed references with
+Triton–Weft. Its full suites select ordinary factories from this package.
+[Example 13](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/13_packed_dot.py)
+shows a complete packed call with explicit input bytes. `T.load(value, at=point)`
+projects a numeric field along its existing named Level axis; compressed fields
+retain the Encoding's record/group relationship.

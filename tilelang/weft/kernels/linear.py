@@ -44,6 +44,26 @@ def matmul(
 
 
 @tilelang.jit(target="weft")
+def full_reduction(M, N, K, dtype="bfloat16", acc_dtype="float32", rows=16, columns=16, engine="auto"):
+    """Keep each K reduction closed; share an activation tile across columns."""
+    @T.prim_func
+    def main(X: T.Tensor((M, K), dtype), W: T.Tensor((N, K), dtype), Y: T.Tensor((M, N), acc_dtype)):
+        xv = T.view(X, shape=(M, K), axes=("m", "k"))
+        wv = T.view(W, shape=(N, K), axes=("n", "k"))
+        yv = T.view(Y, shape=(M, N), axes=("m", "n"))
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.rows(M, group=rows) as row:
+                activation = T.stage(T.load(xv[row, :]))
+                with T.level.cols(N, group=columns) as col:
+                    weights = T.load(wv[col, :])
+                    result = T.alloc_local((rows, columns), acc_dtype)
+                    T.gemm(activation, weights, result, transpose_B=True, clear_accum=True, engine=engine)
+                    T.copy(result, yv[row, col])
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def projection(Batch, M, N, K, block_m=4, block_n=16, block_k=32, transpose_weight=True, bias=True, activation="none", engine="auto"):
     """Batched dense projection, optional bias and explicit epilogue."""
     assert activation in ("none", "silu")

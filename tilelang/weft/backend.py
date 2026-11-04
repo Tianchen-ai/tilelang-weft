@@ -19,7 +19,8 @@ def compiler_identity():
     # Include that implementation in the existing frontend cache identity.
     root = Path(__file__).parent
     digest = sha256()
-    for path in sorted((*root.glob("*.py"), *root.joinpath("frontend").glob("*.py"))):
+    for path in sorted((*root.glob("*.py"), *root.joinpath("frontend").glob("*.py"),
+                        *root.joinpath("language").glob("*.py"))):
         digest.update(str(path.relative_to(root)).encode() + b"\0")
         digest.update(path.read_bytes())
     return digest.hexdigest()

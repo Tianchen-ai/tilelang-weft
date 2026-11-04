@@ -198,6 +198,34 @@ class ModelOperations:
             self.locals[destination], self.local_axes[destination] = value, axes_of(value.type)
             return True
         if name == "tl.weft.load_value":
+            if len(call.args) == 4:
+                source = self.region(call.args[1])[0]
+                value = self.locals[source]
+                point = self.expr(call.args[2])
+                axis = self.static(call.args[3])
+                if not isinstance(point.type, DomainPointType):
+                    self.error("local Value projection requires an explicit Level point")
+                shape, axes = list(shape_of(value.type)), list(axes_of(value.type))
+                identity = point.type.domain.axis_id
+                if axes[axis] != identity:
+                    self.error("Level projection requires the Value's existing logical axis; use a positional tile slice for an anonymous local tile")
+                extent = self.domain_partitions[point.type.domain.domain_id]
+                record_extent = getattr(self, "field_record_extents", {}).get(source)
+                grouped = record_extent is not None and shape[axis] < record_extent
+                if grouped:
+                    if extent * shape[axis] != record_extent:
+                        self.error("field projection must select complete declared field groups")
+                    del shape[axis]
+                    del axes[axis]
+                else:
+                    shape[axis] = extent
+                selector = "group_index" if grouped else "domain"
+                selectors = [selector if i == axis else "all" for i in range(len(shape_of(value.type)))]
+                result = self.op("extract", (value, point), value_type(element_type(value.type), tuple(shape), tuple(axes)),
+                                 {"selectors": json.dumps(selectors)})
+                destination = self.region(call.args[0])[0]
+                self.locals[destination], self.local_axes[destination] = result, tuple(axes)
+                return True
             view = self.expr(call.args[1])
             from .importer import dtype
 
@@ -222,6 +250,9 @@ class ModelOperations:
             destination = self.region(call.args[0])[0]
             self.locals[destination] = value
             self.local_axes[destination] = axes
+            if not hasattr(self, "field_record_extents"):
+                self.field_record_extents = {}
+            self.field_record_extents[destination] = schema.elements
             return True
         if name == "tl.weft.state":
             from .importer import dtype
@@ -290,6 +321,14 @@ class ModelOperations:
             left = self.read_region(left_region, self.local_axes[left_region[0]])
             right = self.read_region(right_region, self.local_axes[right_region[0]])
             reduction = tuple(self.named_axis(string(axis)) for axis in call.annotations["axes"])
+            if len(reduction) == 1:
+                values = []
+                for value in (left, right):
+                    ids = axes_of(value.type)
+                    if reduction[0] not in ids and ids and ids[-1] not in self.named_axes.values():
+                        value = self.rename(value, shape_of(value.type), (*ids[:-1], reduction[0]))
+                    values.append(value)
+                left, right = values
             if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
                 self.error("reduce_dot operands must retain every declared named reduction axis")
             shape, axes = self.domain(left, right)

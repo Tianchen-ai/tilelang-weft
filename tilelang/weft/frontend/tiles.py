@@ -84,6 +84,18 @@ class TileOperations:
             m, n, k = (self.static(a) for a in call.args[5:8])
             clear = bool(int(call.args[9].value))
             row, column, reduction = self.axis(), self.axis(), self.axis()
+            # Logical Views and Level projections already carry axis identity.
+            # Preserve that information when their positional GEMM roles agree;
+            # anonymous ordinary TileLang tiles still receive fresh identities.
+            left_ids = self.local_axes.get(left[0], ())
+            right_ids = self.local_axes.get(right[0], ())
+            if len(left_ids) == len(right_ids) == 2:
+                left_row, left_k = left_ids[::-1] if transpose_left else left_ids
+                right_k, right_column = right_ids[::-1] if transpose_right else right_ids
+                named = set(self.named_axes.values())
+                shared_k = left_k if left_k in named or right_k not in named else right_k
+                if len({left_row, right_column, shared_k}) == 3:
+                    row, column, reduction = left_row, right_column, shared_k
             left_axes = (reduction, row) if transpose_left else (row, reduction)
             right_axes = (column, reduction) if transpose_right else (reduction, column)
             if len(left[2]) != 2 or len(right[2]) != 2 or len(output[2]) != 2:

@@ -34,3 +34,4 @@ c++ -std=c++17 examples/weft/native/affine.cpp -I/tmp/tilelang-affine \
 native runtime 与系统 C++ 库。
 
 普通可复用作者程序位于 `tilelang.weft.kernels`；参考比较与计时放在独立 Bench 项目。
+`13_packed_dot.py` 构造 Q4_0/Q8_0 records，调用 TileLang–Weft Bench 选择的同一个普通 packed factory。

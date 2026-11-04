@@ -120,13 +120,31 @@ class RecordValue:
         ] + str(scalar.bits)
         shape = self.shape[:-1] + tuple(field.shape)
         output = alloc_local(shape, spelling)
+        output.__tilelang_field_record_elements__ = self.encoding.schema.elements
         I.evaluate(intrinsic("field", to_tile_region(output), self.var, name))
         return output
 
 
-def load(source):
+def load(source, *, at=None, axis=-1):
     from .derived import DerivedEncodingInstance
 
+    if at is not None:
+        from tilelang.utils.language import retrieve_shape, _get_buffer
+
+        if not isinstance(at, Point) or isinstance(source, LogicalView):
+            raise TypeError("load(at=) projects a local Value with an explicit Level point")
+        shape = list(retrieve_shape(source))
+        axis = axis % len(shape)
+        record_extent = getattr(_get_buffer(source), "__tilelang_field_record_elements__", None)
+        if record_extent is not None and int(shape[axis]) < record_extent:
+            if at.partition * int(shape[axis]) != record_extent:
+                raise ValueError("compressed field projection requires one complete field group")
+            del shape[axis]
+        else:
+            shape[axis] = at.partition
+        output = alloc_local(tuple(shape), _get_buffer(source).dtype)
+        I.evaluate(intrinsic("load_value", to_tile_region(output), to_tile_region(source), at.var, axis))
+        return output
     if not isinstance(source, LogicalView):
         from tilelang.language.copy_op import copy
         from tilelang.utils.language import retrieve_shape, _get_buffer
