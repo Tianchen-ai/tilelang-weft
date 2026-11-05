@@ -1,0 +1,21 @@
+# GitHub is canonical; Gitee-only refs are retained by the shared bridge.
+direction = "github2gitee"
+state_dir = "./state"
+interval = 300
+
+[sync]
+git = true
+issues = false
+issue_comments = false
+pull_requests = false
+pr_comments = false
+review_comments = false
+labels = false
+milestones = false
+reverse_comments = false
+
+[[repositories]]
+github = "Tianchen-ai/tilelang-weft"
+gitee = "dongshan-community/tilelang-weft"
+gitee_account_type = "org"
+allow_public_target = false

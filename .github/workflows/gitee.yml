@@ -1,0 +1,41 @@
+name: GitHub to Gitee mirror
+on:
+  push:
+    branches: ['**']
+    tags: ['**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: gitee-mirror-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  mirror:
+    if: github.repository == 'Tianchen-ai/tilelang-weft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Tianchen-ai/github-gitee-bridge
+          ref: 1e9d24829dc3de28ec3ad0016445ba358e536050
+          path: .bridge
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r .bridge/requirements-bridge.txt
+      - name: Mirror source branches and tags
+        working-directory: .bridge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          BRIDGE_STATE_DIR: ${{ runner.temp }}/gitee-bridge
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: pack.threads
+          GIT_CONFIG_VALUE_0: '1'
+          GIT_CONFIG_KEY_1: pack.window
+          GIT_CONFIG_VALUE_1: '0'
+        run: |
+          test -n "$GITEE_TOKEN" || { echo 'GITEE_TOKEN repository secret is required.' >&2; exit 1; }
+          python -m bridge --config "$GITHUB_WORKSPACE/.github/gitee.toml" once
