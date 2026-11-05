@@ -44,8 +44,8 @@ local instructions for one program.
 
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
-`packed.projection` declares F64 state for long reductions with large decoded
-scales and converts to its F32 output. Q4_K and Q6_K retain typed integer
+`packed.projection` uses explicit integer block partials and F32 scale updates.
+Q4_K and Q6_K retain typed integer
 partials and separate scale/correction branches through the shared `partials`
 macros. `composition.packed_projection` separately exposes `acc_dtype` for its
 explicit decode-to-workspace and dense multiplication program. `linear.matmul`
@@ -53,6 +53,12 @@ factory separately declares input, accumulator and output types; its existing
 default remains F32. Target passes preserve these numerical choices.
 Persistent interleave requires a separate preparation kernel, demonstrated by
 [example 05](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/05_derived_layout.py).
+
+`row_partials` provides source-selected deferred row reductions and grouped
+integer products for x86. `scale_groups` in the single-row Q6_K factory bounds
+the author's simultaneously exposed scale groups; it does not select an ISA.
+The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
+activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 
 The product owns these normal programs. Bench owns workloads, external references,
 numerical comparisons and timing boundaries. Public comparative performance is

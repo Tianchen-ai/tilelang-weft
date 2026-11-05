@@ -15,9 +15,10 @@ def q4_k_q8_k(M, K, rows=4):
     def main(
         Weights: T.Tensor((M, K // 256 * 144), "uint8"), Activation: T.Tensor((K // 256 * 292,), "uint8"), Output: T.Tensor((M,), "float32")
     ):
-        wv = T.view(Weights, shape=(M, K), encoding=F.Q4_K, axes=("m", "k"))
+        T.func_attr({"weft.alias_groups": {"Output": "output"}})
+        wv = T.view(Weights, shape=(M, K), encoding=F.Q4_K, axes=("m", "k"), abi=True)
         xv = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",))
-        yv = T.view(Output, shape=(M,), axes=("m",))
+        yv = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1):
             with T.level.rows(M, group=rows) as row:
                 total = T.state((rows,), "float32", init=0)
@@ -38,9 +39,10 @@ def q6_k_q8_k(M, K, rows=1):
     def main(
         Weights: T.Tensor((M, K // 256 * 210), "uint8"), Activation: T.Tensor((K // 256 * 292,), "uint8"), Output: T.Tensor((M,), "float32")
     ):
-        wv = T.view(Weights, shape=(M, K), encoding=F.Q6_K, axes=("m", "k"))
+        T.func_attr({"weft.alias_groups": {"Output": "output"}})
+        wv = T.view(Weights, shape=(M, K), encoding=F.Q6_K, axes=("m", "k"), abi=True)
         xv = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",))
-        yv = T.view(Output, shape=(M,), axes=("m",))
+        yv = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1):
             with T.level.rows(M, group=rows) as row:
                 total = T.state((rows,), "float32", init=0)
@@ -64,16 +66,17 @@ def dequantize(M, K, format="Q4_0", rows=4):
 
     @T.prim_func
     def main(Weights: T.Tensor((M, K // block * record_bytes), "uint8"), Output: T.Tensor((M, K), "float32")):
-        wv = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"))
-        yv = T.view(Output, shape=(M, K), axes=("m", "k"))
+        T.func_attr({"weft.alias_groups": {"Output": "output"}})
+        wv = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
         with T.Kernel(1):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=block) as part:
                     record = T.load(wv[row, part])
-                    result = T.alloc_local((rows, block), 'float32')
+                    result = T.alloc_local((rows, block), "float32")
                     if block > 32:
-                        for segment in T.serial(block // 32):
-                            chunk = T.alloc_local((rows, 32), 'float32')
+                        for segment in T.unroll(block // 32):
+                            chunk = T.alloc_local((rows, 32), "float32")
                             decode_dequantize(record, chunk, rows, format, block, 0, 0, 0, 0, 0, 0, offset=segment * 32, width=32)
                             for r, k in T.Parallel(rows, 32):
                                 result[r, segment * 32 + k] = chunk[r, k]
@@ -90,16 +93,17 @@ def dequantize_iq4_nl(M, K, rows=1):
 
     @T.prim_func
     def main(Weights: T.Tensor((M, K // 32 * 18), "uint8"), Codebook: T.Tensor((16,), "int8"), Output: T.Tensor((M, K), "float32")):
-        wv = T.view(Weights, shape=(M, K), encoding=F.IQ4_NL, axes=("m", "k"))
-        yv = T.view(Output, shape=(M, K), axes=("m", "k"))
+        T.func_attr({"weft.alias_groups": {"Output": "output"}})
+        wv = T.view(Weights, shape=(M, K), encoding=F.IQ4_NL, axes=("m", "k"), abi=True)
+        yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
         with T.Kernel(1):
             table = T.alloc_local((16,), "int8")
             T.copy(Codebook, table)
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=32) as block:
                     record = T.load(wv[row, block])
-                    result = T.alloc_local((rows, 32), 'float32')
-                    decode_dequantize_iq4_nl(record, result, rows, 'DEQUANTIZE_IQ4_NL', 32, 0, 0, table, 0, 0, 0)
+                    result = T.alloc_local((rows, 32), "float32")
+                    decode_dequantize_iq4_nl(record, result, rows, "DEQUANTIZE_IQ4_NL", 32, 0, 0, table, 0, 0, 0)
                     T.copy(result, yv[row, block])
 
     return main

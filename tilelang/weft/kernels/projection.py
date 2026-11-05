@@ -31,8 +31,10 @@ def project(weights, activation, output, M, N, K, rows, block_k=None):
 def f16_projection(M, N, K, rows=4, block_k=None):
     @T.prim_func
     def main(
-        Weights: T.Tensor((N, K), "float16"), Activation: T.Tensor((M, K), "float32"),
-        Half: T.Tensor((M, K), "float16"), Output: T.Tensor((M, N), "float32"),
+        Weights: T.Tensor((N, K), "float16"),
+        Activation: T.Tensor((M, K), "float32"),
+        Half: T.Tensor((M, K), "float16"),
+        Output: T.Tensor((M, N), "float32"),
     ):
         weights = T.view(Weights, shape=(N, K), axes=("n", "k"), abi=True)
         source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
@@ -55,7 +57,8 @@ def f16_projection(M, N, K, rows=4, block_k=None):
 def f16_f32_projection(M, N, K, rows=4, block_k=None):
     @T.prim_func
     def main(
-        Weights: T.Tensor((N, K), "float16"), Activation: T.Tensor((M, K), "float32"),
+        Weights: T.Tensor((N, K), "float16"),
+        Activation: T.Tensor((M, K), "float32"),
         Output: T.Tensor((M, N), "float32"),
     ):
         weights = T.view(Weights, shape=(N, K), axes=("n", "k"), abi=True)

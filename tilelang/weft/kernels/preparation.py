@@ -6,62 +6,90 @@ from . import ggml_formats as F
 
 
 @T.macro
+def quantize_k_record(value, output, part, extreme_policy):
+    extreme = T.alloc_var("float32", init=0)
+    positive = T.alloc_var("float32", init=0)
+    negative = T.alloc_var("float32", init=0)
+    with T.level.subtiles(part, extent=64) as chunk:
+        values = T.load(value, at=chunk)
+        maximum = T.alloc_local((1,), "float32")
+        minimum = T.alloc_local((1,), "float32")
+        T.reduce_max(values, maximum, dim=0)
+        T.reduce_min(values, minimum, dim=0)
+        positive = T.max(positive, maximum[0])
+        negative = T.min(negative, minimum[0])
+    extreme = T.if_then_else(T.abs(positive) > T.abs(negative), positive, negative)
+    # Different magnitudes already determine the sign. Only an equal pair of
+    # opposite extrema needs source positions to retain the first occurrence.
+    if extreme_policy == "first" and positive > 0 and positive == -negative:
+        found = T.alloc_var("bool", init=False)
+        with T.level.subtiles(part, extent=64) as chunk:
+            values = T.load(value, at=chunk)
+            absolute = T.alloc_local((64,), "float32")
+            candidates = T.alloc_local((64,), "int32")
+            first = T.alloc_local((1,), "int32")
+            for i in T.Parallel(64):
+                absolute[i] = T.abs(values[i])
+            for i in T.Parallel(64):
+                candidates[i] = T.if_then_else(absolute[i] == positive, i, 64)
+            T.reduce_min(candidates, first, dim=0)
+            if not found and first[0] < 64:
+                extreme = values[first[0]]
+                found = True
+    inverse = T.alloc_var("float32", init=0)
+    d = T.alloc_local((1,), "float32")
+    d[0] = 0
+    if extreme != 0:
+        inverse = -127.0 / extreme
+        d[0] = 1.0 / inverse
+    with T.level.subtiles(part, extent=64) as chunk:
+        values = T.load(value, at=chunk)
+        q = T.alloc_local((64,), "int8")
+        for i in T.Parallel(64):
+            q[i] = T.narrow(values[i] * inverse, "int8", rounding="rne", saturation=True)
+        T.copy(q, output.q[chunk])
+        with T.level.subtiles(chunk, extent=16) as group:
+            selected = T.load(q, at=group)
+            wide = T.alloc_local((16,), "int16")
+            total = T.alloc_local((1,), "int16")
+            for i in T.Parallel(16):
+                wide[i] = T.cast(selected[i], "int16")
+            T.reduce_sum(wide, total, dim=0)
+            T.copy(total, output.bsum[group])
+    T.copy(d, output.ds)
+
+
+@T.macro
 def quantize_rows(xv, yv, M, K, format, elements, extreme_policy, inverse_policy, rounding):
     for row in T.serial(M):
         with T.level.blocks(K, extent=elements) as part:
             value = T.load(xv[row, part])
-            absolute = T.alloc_local((elements,), 'float32')
-            maximum = T.alloc_local((1,), 'float32')
-            d = T.alloc_local((1,), 'float32')
-            inverse = T.alloc_var('float32', init=0)
-            q = T.alloc_local((elements,), 'int8')
-            for i in T.Parallel(elements):
-                absolute[i] = T.abs(value[i])
-            T.reduce_max(absolute, maximum, dim=0)
-            if format == 'Q8_K':
-                extreme = T.alloc_var('float32', init=0)
-                found = T.alloc_var('int32', init=0)
-                if extreme_policy == 'first':
-                    for i in T.serial(elements):
-                        if found == 0 and absolute[i] == maximum[0]:
-                            extreme = value[i]
-                            found = 1
-                else:
-                    minimum = T.alloc_local((1,), 'float32')
-                    positive = T.alloc_local((1,), 'float32')
-                    T.reduce_min(value, minimum, dim=0)
-                    T.reduce_max(value, positive, dim=0)
-                    extreme = T.if_then_else(T.abs(positive[0]) > T.abs(minimum[0]), positive[0], minimum[0])
-                d[0] = 0
-                if extreme != 0:
-                    inverse = -127.0 / extreme
-                    d[0] = 1.0 / inverse
+            if format == "Q8_K":
+                quantize_k_record(value, yv[row, part], part, extreme_policy)
             else:
+                absolute = T.alloc_local((elements,), "float32")
+                maximum = T.alloc_local((1,), "float32")
+                d = T.alloc_local((1,), "float32")
+                inverse = T.alloc_var("float32", init=0)
+                q = T.alloc_local((elements,), "int8")
+                for i in T.Parallel(elements):
+                    absolute[i] = T.abs(value[i])
+                T.reduce_max(absolute, maximum, dim=0)
                 d[0] = maximum[0] / 127.0
                 if maximum[0] != 0:
-                    inverse = 127.0 / maximum[0] if inverse_policy == 'direct' else 1.0 / d[0]
-            for i in T.Parallel(elements):
-                q[i] = T.narrow(value[i] * inverse, 'int8', rounding='rne' if format == 'Q8_K' else rounding, saturation=format == 'Q8_K')
-            T.copy(q, yv[row, part].q)
-            if format == 'Q8_K':
-                sums = T.alloc_local((16,), 'int16')
-                for g in T.Parallel(16):
-                    subtotal = T.alloc_var('int16', init=0)
-                    for i in T.serial(16):
-                        subtotal = subtotal + T.cast(q[g * 16 + i], 'int16')
-                    sums[g] = subtotal
-                T.copy(sums, yv[row, part].bsum)
-                T.copy(d, yv[row, part].ds)
-            else:
+                    inverse = 127.0 / maximum[0] if inverse_policy == "direct" else 1.0 / d[0]
+                for i in T.Parallel(elements):
+                    q[i] = T.narrow(value[i] * inverse, "int8", rounding=rounding, saturation=False)
+                T.copy(q, yv[row, part].q)
                 T.copy(d, yv[row, part].d)
-                if format == 'Q8_1':
-                    wide = T.alloc_local((elements,), 'int16')
-                    total = T.alloc_local((1,), 'int16')
-                    scaled = T.alloc_local((1,), 'float32')
+                if format == "Q8_1":
+                    wide = T.alloc_local((elements,), "int16")
+                    total = T.alloc_local((1,), "int16")
+                    scaled = T.alloc_local((1,), "float32")
                     for i in T.Parallel(elements):
-                        wide[i] = T.cast(q[i], 'int16')
+                        wide[i] = T.cast(q[i], "int16")
                     T.reduce_sum(wide, total, dim=0)
-                    scaled[0] = T.cast(total[0], 'float32') * d[0]
+                    scaled[0] = T.cast(total[0], "float32") * d[0]
                     T.copy(scaled, yv[row, part].s)
 
 

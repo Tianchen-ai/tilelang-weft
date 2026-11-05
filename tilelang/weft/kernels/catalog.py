@@ -81,10 +81,39 @@ for _format in ("MXFP4", "NVFP4"):
 for _format in ("Q8_0", "Q8_1", "Q8_K"):
     _entries.append(Program(_format.lower() + "_quantize", "preparation", preparation.quantize, (("format", _format),)))
 
-for _format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
-                "IQ1_S", "IQ1_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ3_S", "IQ3_XXS", "IQ4_NL", "IQ4_XS",
-                "TQ1_0", "TQ2_0", "MXFP4", "NVFP4"):
-    _activation = "Q8_1" if _format in ("Q4_1", "Q5_1") else "Q8_0" if _format in ("Q1_0", "Q4_0", "Q5_0", "Q8_0", "IQ4_NL", "MXFP4", "NVFP4") else "Q8_K"
+for _format in (
+    "Q1_0",
+    "Q4_0",
+    "Q4_1",
+    "Q5_0",
+    "Q5_1",
+    "Q8_0",
+    "Q2_K",
+    "Q3_K",
+    "Q4_K",
+    "Q5_K",
+    "Q6_K",
+    "IQ1_S",
+    "IQ1_M",
+    "IQ2_S",
+    "IQ2_XS",
+    "IQ2_XXS",
+    "IQ3_S",
+    "IQ3_XXS",
+    "IQ4_NL",
+    "IQ4_XS",
+    "TQ1_0",
+    "TQ2_0",
+    "MXFP4",
+    "NVFP4",
+):
+    _activation = (
+        "Q8_1"
+        if _format in ("Q4_1", "Q5_1")
+        else "Q8_0"
+        if _format in ("Q1_0", "Q4_0", "Q5_0", "Q8_0", "IQ4_NL", "MXFP4", "NVFP4")
+        else "Q8_K"
+    )
     _defaults = (("format", _format), ("activation", _activation))
     _entries.append(Program(_format.lower() + "_dot", "packed-dot", packed.vec_dot, _defaults))
     _entries.append(Program(_format.lower() + "_projection", "packed-projection", packed.projection, _defaults))

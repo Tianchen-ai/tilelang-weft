@@ -46,18 +46,20 @@ def matmul(
 @tilelang.jit(target="weft")
 def full_reduction(M, N, K, dtype="bfloat16", acc_dtype="float32", rows=16, columns=16, engine="auto"):
     """Keep each K reduction closed; share an activation tile across columns."""
+
     @T.prim_func
     def main(X: T.Tensor((M, K), dtype), W: T.Tensor((N, K), dtype), Y: T.Tensor((M, N), acc_dtype)):
-        xv = T.view(X, shape=(M, K), axes=("m", "k"))
-        wv = T.view(W, shape=(N, K), axes=("n", "k"))
-        yv = T.view(Y, shape=(M, N), axes=("m", "n"))
+        T.func_attr({"tir.noalias": True})
+        xv = T.view(X, shape=(M, K), axes=("m", "k"), abi=True)
+        wv = T.view(W, shape=(N, K), axes=("n", "k"), abi=True)
+        yv = T.view(Y, shape=(M, N), axes=("m", "n"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             with T.level.rows(M, group=rows) as row:
-                activation = T.stage(T.load(xv[row, :]))
+                activation = T.load(xv[row, :])
                 with T.level.cols(N, group=columns) as col:
                     weights = T.load(wv[col, :])
                     result = T.alloc_local((rows, columns), acc_dtype)
-                    T.gemm(activation, weights, result, transpose_B=True, clear_accum=True, engine=engine)
+                    T.reduce_dot(activation, weights, result, over="k", acc_dtype=acc_dtype, engine=engine)
                     T.copy(result, yv[row, col])
 
     return main

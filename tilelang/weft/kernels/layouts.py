@@ -4,7 +4,6 @@ import tilelang
 from tilelang.weft import language as T
 
 
-
 @tilelang.encoding
 class IMEQ4Centered:
     layout = (T.bitorder.lsb_first, T.byteorder.little)
@@ -12,7 +11,6 @@ class IMEQ4Centered:
     elements = 32
     d: T.Field("float16")
     q: T.Field("uint4", (32,)) @ T.grouped(elements=16) @ T.bit_layers(elements=8, order=T.lo_first)
-
 
 
 @tilelang.encoding
@@ -25,7 +23,6 @@ class IMEQ4Affine:
     q: T.Field("uint4", (32,)) @ T.grouped(elements=16) @ T.bit_layers(elements=8, order=T.lo_first)
 
 
-
 @tilelang.encoding
 class IMEQ8:
     layout = (T.bitorder.lsb_first, T.byteorder.little)
@@ -35,23 +32,19 @@ class IMEQ8:
     q: T.Field("int8", (32,))
 
 
-
 @tilelang.derive
 def IMEQ4Centered_I(W: T.View[IMEQ4Centered], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'d': 2, 'q': 8})
-
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 8})
 
 
 @tilelang.derive
 def IMEQ4Affine_I(W: T.View[IMEQ4Affine], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'d': 2, 'zp': 1, 'q': 8})
-
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "zp": 1, "q": 8})
 
 
 @tilelang.derive
 def IMEQ8_I(X: T.View[IMEQ8], *, rows: int):
-    return T.interleave(X, rows=rows, field_chunks={'d': 4, 'q': 8})
-
+    return T.interleave(X, rows=rows, field_chunks={"d": 4, "q": 8})
 
 
 @tilelang.encoding
@@ -61,7 +54,6 @@ class IME2Weight8:
     elements = 32
     d: T.Field("float16")
     q: T.Field("int8", (32,))
-
 
 
 @tilelang.encoding
@@ -74,7 +66,6 @@ class IME2Activation8:
     q: T.Field("int8", (32,))
 
 
-
 @tilelang.encoding
 class IME2Weight4Affine:
     layout = (T.bitorder.lsb_first, T.byteorder.little)
@@ -85,23 +76,19 @@ class IME2Weight4Affine:
     q: T.Field("uint4", (32,))
 
 
-
 @tilelang.derive
 def IME2Weight4AffineRows(W: T.View[IME2Weight4Affine], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'d': 2, 'zp': 1, 'q': 16})
-
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "zp": 1, "q": 16})
 
 
 @tilelang.derive
 def IME2Weight8Rows(W: T.View[IME2Weight8], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'d': 2, 'q': 32})
-
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 32})
 
 
 @tilelang.derive
 def IME2Activation8Rows(X: T.View[IME2Activation8], *, rows: int):
-    return T.interleave(X, rows=rows, field_chunks={'d': 4, 'neg_sum': 2, 'q': 32})
-
+    return T.interleave(X, rows=rows, field_chunks={"d": 4, "neg_sum": 2, "q": 32})
 
 
 @tilelang.encoding
@@ -113,11 +100,9 @@ class AMXQ4_0:
     d: T.Field("float16")
 
 
-
 @tilelang.derive
 def AMXQ4_0Rows(W: T.View[AMXQ4_0], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'q': 4, 'd': 2})
-
+    return T.interleave(W, rows=rows, field_chunks={"q": 4, "d": 2})
 
 
 @tilelang.encoding
@@ -128,11 +113,9 @@ class BlockScale32:
     value: T.Field("float32")
 
 
-
 @tilelang.derive
 def BlockScale32Rows(S: T.View[BlockScale32], *, rows: int):
-    return T.interleave(S, rows=rows, field_chunks={'value': 4})
-
+    return T.interleave(S, rows=rows, field_chunks={"value": 4})
 
 
 @tilelang.encoding
@@ -147,11 +130,9 @@ class AMXQ4_K:
     dmin: T.Field("float16")
 
 
-
 @tilelang.derive
 def AMXQ4_KRows(W: T.View[AMXQ4_K], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'q': 4, 'scales': 1, 'mins': 2, 'd': 2, 'dmin': 2})
-
+    return T.interleave(W, rows=rows, field_chunks={"q": 4, "scales": 1, "mins": 2, "d": 2, "dmin": 2})
 
 
 @tilelang.encoding
@@ -165,7 +146,6 @@ class AMXQ6_K:
     d: T.Field("float16")
 
 
-
 @tilelang.derive
 def AMXQ6_KRows(W: T.View[AMXQ6_K], *, rows: int):
-    return T.interleave(W, rows=rows, field_chunks={'low': 4, 'high': 4, 'scales': 1, 'd': 2})
+    return T.interleave(W, rows=rows, field_chunks={"low": 4, "high": 4, "scales": 1, "d": 2})
