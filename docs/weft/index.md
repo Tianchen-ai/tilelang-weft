@@ -174,6 +174,10 @@ includes the actual compiler command and typed runtime loading. `T.extent(view, 
 the accessible size of a tail View so authors can mask nonlinear consumers;
 `T.narrow(value, dtype, rounding="rne", saturation=False)` records explicit narrowing.
 Field Views such as `output[part].q` support typed writes, including packed Q8 preparation.
+`T.load(table, at=indices, bounds="in_bounds")` reads a dense numeric View or
+numeric field with an integer index tile. Indices address its row-major logical
+table; the result retains the index tile's domain. Field projections retain
+Encoding group relationships, including one sum per 16-element Q8_K group.
 
 The optional `tilelang.weft.integrations.llama_cpp` module validates exported
 artifacts against exact GGML roles before creating a native package. A kernel's

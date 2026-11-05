@@ -54,6 +54,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         self.locals = {}
         self.pointers = {}
         self.local_axes = {}
+        self.operation_axes = {}
         self.next_axis = 1
         self.mask = None
         self.grid = []
@@ -142,9 +143,35 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         return self.emit(operation, types=(ty,), attrs={"value": spelling})[0]
 
     def cast(self, value, typ):
-        if element_type(value.type) == ScalarType(typ):
+        source_type = element_type(value.type).dtype
+        if source_type == typ:
             return value
-        return self.op("cast", (value,), value_type(ScalarType(typ), shape_of(value.type), axes_of(value.type)))
+        if typ.category == dt.DTypeCategory.INTEGER and typ.signedness == "unsigned":
+            source = value
+            widths = [typ.bits]
+            while source.producer is not None and source.producer.name == "weft_kernel.cast":
+                scalar = element_type(source.type).dtype
+                if scalar.category != dt.DTypeCategory.INTEGER:
+                    break
+                widths.append(scalar.bits - (scalar.signedness == "signed"))
+                source = source.producer.operands[0]
+            producer = source.producer
+            if producer is not None and producer.name == "weft_kernel.iota":
+                start, end = int(producer.attributes["start"]), int(producer.attributes["end"])
+                if 0 <= start < end <= 1 << min(widths):
+                    return self.op(
+                        "iota", ty=value_type(ScalarType(typ), shape_of(source.type), axes_of(source.type)), attrs=producer.attributes
+                    )
+        preserving_integer_widen = (
+            source_type.category == typ.category == dt.DTypeCategory.INTEGER
+            and typ.bits > source_type.bits
+            and (source_type.signedness == typ.signedness or typ.signedness == "signed")
+        )
+        return self.op(
+            "widen" if preserving_integer_widen else "cast",
+            (value,),
+            value_type(ScalarType(typ), shape_of(value.type), axes_of(value.type)),
+        )
 
     def domain(self, *values):
         extents = {}
@@ -226,6 +253,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             return self.cast(self.expr(node.value), dtype(node.dtype))
         if isinstance(node, tirx.BufferLoad):
             axes = self.complete_local_domain(node.buffer, node.indices)
+            if node.buffer in getattr(self, "field_record_extents", {}) and axes != axes_of(self.locals[node.buffer].type):
+                axes = None
             if axes is not None:
                 return self.rename(self.locals[node.buffer], shape_of(self.locals[node.buffer].type), axes)
             return self.load(node.buffer, [self.expr(i) for i in node.indices])
@@ -263,6 +292,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             # TIR floor division differs from signed truncation. Keep its
             # quotient/remainder correction explicit in the Canonical program.
             left, right = self.expr(node.a), self.expr(node.b)
+            if self.analyzer.can_prove(node.a >= 0) and self.analyzer.can_prove(node.b > 0):
+                return self.binary("div" if kind == "FloorDiv" else "mod", left, right)
             q = self.binary("div", left, right)
             r = self.binary("mod", left, right)
             zero = self.constant(0, element_type(left.type).dtype)
@@ -327,7 +358,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 strides.insert(0, stride)
                 stride *= size
         for index, stride in zip(indices, strides):
-            result = self.binary("add", result, self.binary("mul", self.cast(index, dt.i64), self.cast(self.expr(stride), dt.i64)))
+            offset = self.cast(index, dt.i64)
+            if not self.analyzer.can_prove_equal(stride, 1):
+                offset = self.binary("mul", offset, self.cast(self.expr(stride), dt.i64))
+            result = self.binary("add", result, offset)
         if not isinstance(buffer.elem_offset, tirx.IntImm) or int(buffer.elem_offset.value):
             result = self.binary("add", result, self.cast(self.expr(buffer.elem_offset), dt.i64))
         return result
@@ -360,26 +394,55 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         if buffer not in self.locals:
             self.error(f"read of unallocated local buffer {buffer.name}")
         source = self.locals[buffer]
-        if not buffer.shape or (buffer.scope() == "local.var" and self.parallel_domains):
+        if not buffer.shape or buffer.scope() == "local.var":
             # A scalar allocated inside Parallel has one value per logical
-            # iteration, even though its TIRx buffer has rank zero.
-            shape = tuple(self.static(extent) for _, extent, _ in self.parallel_domains.values())
+            # iteration, already recorded by its defining assignment. A scalar
+            # defined outside the Parallel remains scalar; broadcasting every
+            # read would turn loop bases and invariant scale arithmetic into
+            # unrelated multidimensional vector work before its actual use.
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
             if not set(axes_of(source.type)) <= set(axes):
                 source = self.rename(source, (), ())
-            return self.broadcast(source, shape, axes)
+            return source
+        if (
+            len(buffer.shape) == 1
+            and len(indices) == 1
+            and shape_of(indices[0].type)
+            and buffer not in getattr(self, "field_record_extents", {})
+        ):
+            index = self.local_index(indices[0])
+            return self.op(
+                "lookup",
+                (source, index),
+                value_type(element_type(source.type), shape_of(index.type), axes_of(index.type)),
+                {"bounds": json.dumps("in_bounds")},
+            )
         selectors, operands = [], []
         shape, axes = (), ()
-        for index in indices:
+        source_shape, source_axes = shape_of(source.type), axes_of(source.type)
+        for position, index in enumerate(indices):
+            full = any(
+                self.env.get(var) is index
+                and axis == source_axes[position]
+                and self.analyzer.can_prove_equal(start, 0)
+                and self.analyzer.can_prove_equal(extent, source_shape[position])
+                for var, (start, extent, axis) in self.parallel_domains.items()
+            )
+            if full:
+                selectors.append("all")
+                shape, axes = (*shape, source_shape[position]), (*axes, source_axes[position])
+                continue
             if shape_of(index.type):
                 selectors.append("gather")
-                index = self.cast(index, dt.u32)
+                index = self.local_index(index)
             else:
                 selectors.append("index")
                 index = self.cast(index, dt.index)
             operands.append(index)
         for index in operands:
             shape, axes = self.domain_types(shape, axes, index)
+        if all(selector == "all" for selector in selectors):
+            return source
         return self.op(
             "extract", (source, *operands), value_type(element_type(source.type), shape, axes), {"selectors": json.dumps(selectors)}
         )
@@ -389,6 +452,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         for axis, size in zip(axes_of(value.type), shape_of(value.type)):
             dimensions[axis] = size
         return tuple(dimensions.values()), tuple(dimensions)
+
+    def local_index(self, value):
+        scalar = element_type(value.type).dtype
+        return value if scalar.category == dt.DTypeCategory.INTEGER and scalar.signedness == "unsigned" else self.cast(value, dt.u32)
 
     def store(self, buffer, indices, value):
         if buffer in self.readonly:
@@ -402,7 +469,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             return
         if buffer not in self.locals:
             self.error(f"write of unallocated local buffer {buffer.name}")
-        if not buffer.shape or (buffer.scope() == "local.var" and self.parallel_domains):
+        if not buffer.shape or buffer.scope() == "local.var":
             original = self.locals[buffer]
             shape = tuple(self.static(extent) for _, extent, _ in self.parallel_domains.values())
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
@@ -433,7 +500,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         self.locals[buffer] = self.op("update", (original, value, *converted), original.type, {"selectors": json.dumps(selectors)})
 
     def complete_local_domain(self, buffer, indices):
-        if buffer not in self.locals or self.mask is not None or len(indices) != len(buffer.shape):
+        if buffer not in self.locals or len(indices) != len(buffer.shape):
             return None
         axes = []
         for index, size in zip(indices, buffer.shape):
@@ -463,7 +530,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.pointers[buffer] = pointer
             self.env[buffer.data] = pointer
             return
-        axes = tuple(self.axis() for _ in shape)
+        axes = tuple(self.operation_axes[(buffer, i)] if (buffer, i) in self.operation_axes else self.axis() for i in range(len(shape)))
         if not shape:
             shape = tuple(self.static(extent) for _, extent, _ in self.parallel_domains.values())
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
@@ -491,6 +558,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 self.env[node.var] = None
             else:
                 self.env[node.var] = self.expr(node.value)
+                if str(node.var.dtype).startswith(("int", "uint")):
+                    self.analyzer.bind(node.var, node.value)
             return
         if isinstance(node, tirx.BufferStore):
             axes = self.complete_local_domain(node.buffer, node.indices)
@@ -498,10 +567,15 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if axes is not None:
                 if node.buffer in self.readonly:
                     self.error(f"staged buffer {node.buffer.name} is an immutable snapshot")
-                value = self.broadcast(value, shape_of(self.locals[node.buffer].type), axes)
-                self.locals[node.buffer] = self.rename(
-                    self.cast(value, dtype(node.buffer.dtype)), shape_of(self.locals[node.buffer].type), self.local_axes[node.buffer]
-                )
+                original = self.locals[node.buffer]
+                shape = shape_of(original.type)
+                value = self.broadcast(self.cast(value, dtype(node.buffer.dtype)), shape, axes)
+                if self.mask is not None:
+                    mask = self.broadcast(self.mask, shape, axes)
+                    previous = self.rename(original, shape, axes)
+                    value = self.op("select", (mask, value, previous), previous.type)
+                self.locals[node.buffer] = value
+                self.local_axes[node.buffer] = axes_of(value.type)
             else:
                 self.store(node.buffer, [self.expr(i) for i in node.indices], value)
             return
@@ -555,12 +629,18 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 environment = dict(self.env)
                 private = {buffer: value for buffer, value in self.locals.items() if buffer.scope() == "local.var"}
                 private_axes = {buffer: self.local_axes[buffer] for buffer in private}
-                axis = self.axis()
+                axis = self.parallel_axis(node)
                 value = self.iota(extent, axis)
-                self.env[node.loop_var] = self.binary("add", self.expr(node.min), value)
+                self.env[node.loop_var] = (
+                    value if self.analyzer.can_prove_equal(node.min, 0) else self.binary("add", self.expr(node.min), value)
+                )
                 self.parallel_domains[node.loop_var] = (node.min, node.extent, axis)
                 try:
-                    self.stmt(node.body)
+                    with (
+                        self.analyzer.constraint_scope(node.loop_var >= node.min),
+                        self.analyzer.constraint_scope(node.loop_var < node.min + node.extent),
+                    ):
+                        self.stmt(node.body)
                 finally:
                     self.parallel_domains.pop(node.loop_var)
                     self.env = environment
@@ -599,22 +679,68 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.error(f"unhandled TIRx region attribute {node.attr_key}")
         self.error(f"TIRx statement {name} has no Canonical import: {node}")
 
+    def parallel_axis(self, loop):
+        candidates = set()
+        destinations = set()
+        sources = set()
+
+        def access(node):
+            if not isinstance(node, (tirx.BufferLoad, tirx.BufferStore)) or node.buffer not in self.locals:
+                return
+            axes = self.local_axes[node.buffer]
+            record = getattr(self, "field_record_extents", {}).get(node.buffer)
+            for dimension, (index, extent) in enumerate(zip(node.indices, node.buffer.shape)):
+                if not index.same_as(loop.loop_var):
+                    continue
+                if record is not None and dimension + 1 == len(axes) and not self.analyzer.can_prove_equal(extent, record):
+                    continue
+                if self.analyzer.can_prove_equal(loop.min, 0) and self.analyzer.can_prove_equal(loop.extent, extent):
+                    candidates.add(axes[dimension])
+                    if isinstance(node, tirx.BufferStore):
+                        destinations.add(axes[dimension])
+                    elif self.locals[node.buffer].producer is None or self.locals[node.buffer].producer.name != "weft_kernel.empty":
+                        sources.add(axes[dimension])
+
+        tirx.stmt_functor.post_order_visit(loop.body, access)
+        named = candidates.intersection(self.named_axes.values())
+        if len(named) == 1:
+            return next(iter(named))
+        # A newly written positional tile can retain the coordinate of its
+        # saved input. In particular, scaling a contraction's free axes does
+        # not create new logical coordinates merely because its destination
+        # was allocated before the contraction result existed.
+        if not named and len(sources) == 1:
+            return next(iter(sources))
+        if not named and len(destinations) == 1:
+            return next(iter(destinations))
+        if not named and len(candidates) == 1:
+            return next(iter(candidates))
+        return self.axis()
+
     def serial(self, node):
         request = node.annotations.get("weft.pipeline.depth", node.annotations.get("num_stages"))
         if "tl_pipeline_order" in node.annotations or "tl_pipeline_stage" in node.annotations:
             self.error("manual T.Pipelined order/stage requires a closed source-operation schedule", node)
         attributes = None
+        if node.kind == tirx.ForKind.UNROLLED:
+            self.static(node.extent)
+            attributes = {"weft.unroll": "unit"}
         if request is not None:
             depth = self.static(request)
             if depth not in (0, 1, 2, 3, 4):
                 self.error("T.Pipelined depth must be one of 0, 1, 2, 3, 4", node)
-            attributes = {"weft.pipeline.depth": str(depth) + " : i64"}
+            attributes = {**(attributes or {}), "weft.pipeline.depth": str(depth) + " : i64"}
         environment = dict(self.env)
-        lower, upper, step = (
-            self.cast(self.expr(node.min), dt.index),
-            self.cast(self.expr(node.min + node.extent), dt.index),
-            self.constant(1, dt.index),
-        )
+        bounds = []
+        for expression in (node.min, node.min + node.extent):
+            simplified = self.analyzer.simplify(expression)
+            bounds.append(
+                self.constant(int(simplified.value), dt.index)
+                if isinstance(simplified, tirx.IntImm)
+                else self.cast(self.expr(expression), dt.index)
+            )
+        lower, upper = bounds
+        step = self.constant(1, dt.index)
         incoming = dict(self.locals)
         incoming_axes = dict(self.local_axes)
         keys = tuple(incoming)
@@ -622,7 +748,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         with self.insertion(region):
             self.locals = {k: value for k, value in zip(keys, region.arguments[1:])}
             self.env[node.loop_var] = self.cast(region.arguments[0], dtype(node.loop_var.dtype))
-            self.stmt(node.body)
+            with (
+                self.analyzer.constraint_scope(node.loop_var >= node.min),
+                self.analyzer.constraint_scope(node.loop_var < node.min + node.extent),
+            ):
+                self.stmt(node.body)
             final = [self.rename(self.locals[k], shape_of(incoming[k].type), axes_of(incoming[k].type)) for k in keys]
             self.emit("scf.yield", final)
         changed = tuple(i for i, value in enumerate(final) if value is not region.arguments[i + 1] and value is not incoming[keys[i]])
@@ -722,7 +852,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 declared = tuple(node.annotations["strides"])
                 actual = tuple(source.strides)
                 if not actual:
-                    actual = tuple(math.prod(tuple(self.static(n) for n in source.shape)[i + 1:]) for i in range(len(source.shape)))
+                    actual = tuple(math.prod(tuple(self.static(n) for n in source.shape)[i + 1 :]) for i in range(len(source.shape)))
                 if len(declared) != len(actual) or any(not self.analyzer.can_prove(a == b) for a, b in zip(declared, actual)):
                     self.error("ABI View strides differ from the source Tensor storage", node)
                 strided_arguments.add(source.name)
@@ -741,6 +871,30 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             abi_declarations[source] = (node, ViewType(encoding, tuple(shape), axes))
 
         tirx.stmt_functor.post_order_visit(function.body, abi_view)
+        axis_requests = {}
+
+        def contraction_axes(node):
+            if not isinstance(node, tirx.Call):
+                return
+            if node.op.name == "tl.weft.mac_groups":
+                name = str(node.args[5].value)
+            elif node.op.name == "tl.weft.reduce_dot" and len(node.annotations["axes"]) == 1:
+                name = str(node.annotations["axes"][0].value)
+            else:
+                return
+            identity = self.named_axis(name)
+            for argument in node.args[:2]:
+                buffer, _, shape = self.region(argument)
+                if not shape or not buffer.scope().startswith("local"):
+                    continue
+                key = (buffer, len(shape) - 1)
+                axis_requests.setdefault(key, set()).add(identity)
+
+        # Explicit named contractions constrain the positional tiles that
+        # feed them. Resolve these declarations before importing Parallel
+        # producers, as Triton does when constructing a named arange Value.
+        tirx.stmt_functor.post_order_visit(function.body, contraction_axes)
+        self.operation_axes = {key: next(iter(identities)) for key, identities in axis_requests.items() if len(identities) == 1}
         seen = set(function.params)
         for param in function.params:
             buffer = function.buffer_map.get(param)
@@ -799,10 +953,17 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         names = [names[i] for i in indices]
         access_names = ["readwrite" if accesses[i] == {"read", "write"} else next(iter(accesses[i]), "none") for i in indices]
         noalias = bool(function.attrs.get("tir.noalias", False))
+        alias_groups = {str(name): str(group) for name, group in function.attrs.get("weft.alias_groups", {}).items()}
+        memory_names = {name for name, value in zip(names, body.arguments) if isinstance(value.type, (PointerType, ViewType))}
+        if set(alias_groups) - memory_names or any(not group for group in alias_groups.values()):
+            self.error("weft.alias_groups requires named memory arguments and nonempty alias groups")
+        if noalias and alias_groups:
+            self.error("tir.noalias and explicit weft.alias_groups cannot be combined")
+        identities = {group: i + 1 for i, group in enumerate(sorted(set(alias_groups.values())))}
         alias = [
             i + 1
             if noalias and isinstance(body.arguments[j].type, (PointerType, ViewType))
-            else 0
+            else identities.get(alias_groups.get(names[j]), 0)
             if isinstance(body.arguments[j].type, (PointerType, ViewType))
             else -1
             for j, i in enumerate(indices)

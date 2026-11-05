@@ -37,6 +37,34 @@ class ModelOperations:
             self.named_axes[name] = self.axis()
         return self.named_axes[name]
 
+    def align_anonymous_batches(self, left, right):
+        left_shape, right_shape = shape_of(left.type), shape_of(right.type)
+        left_axes, right_axes = axes_of(left.type), list(axes_of(right.type))
+        named = set(self.named_axes.values())
+        for offset in range(2, min(len(left_shape), len(right_shape)) + 1):
+            if left_shape[-offset] != right_shape[-offset] and 1 not in (left_shape[-offset], right_shape[-offset]):
+                continue
+            if right_axes[-offset] not in named:
+                right_axes[-offset] = left_axes[-offset]
+        return left, self.rename(right, right_shape, tuple(right_axes))
+
+    def bind_group_axis(self, left, right, name):
+        named = set(self.named_axes.values())
+        left_axes, right_axes = axes_of(left.type), axes_of(right.type)
+        if not left_axes or not right_axes:
+            self.error("grouped operands require a shaped reduction axis")
+        if name not in self.named_axes and left_axes[-1] not in named and right_axes[-1] not in named:
+            self.named_axes[name] = left_axes[-1]
+        axis = self.named_axis(name)
+        values = []
+        for value, axes in ((left, left_axes), (right, right_axes)):
+            if axes[-1] != axis:
+                if axes[-1] in named:
+                    self.error("grouped operands cannot replace a different explicit logical axis")
+                value = self.rename(value, shape_of(value.type), (*axes[:-1], axis))
+            values.append(value)
+        return axis, *values
+
     def model_expr(self, call):
         name = call.op.name
         if name == "tl.weft.narrow":
@@ -154,11 +182,12 @@ class ModelOperations:
                     continue
                 index = self.expr(call.args[cursor])
                 cursor += 1
-                if selector == "domain":
+                if selector in ("domain", "group_index"):
                     if not isinstance(index.type, DomainPointType) or index.type.domain.axis_id != axis:
                         self.error("View domain selector must match the explicit logical axis")
-                    shape.append(self.domain_partitions[index.type.domain.domain_id])
-                    axes.append(axis)
+                    if selector == "domain":
+                        shape.append(self.domain_partitions[index.type.domain.domain_id])
+                        axes.append(axis)
                 else:
                     index = self.cast(index, dt.index)
                 values.append(index)
@@ -198,6 +227,22 @@ class ModelOperations:
             self.locals[destination], self.local_axes[destination] = value, axes_of(value.type)
             return True
         if name == "tl.weft.load_value":
+            if len(call.args) == 3:
+                table = self.expr(call.args[1])
+                indices = self.region(call.args[2])
+                index = self.read_region(indices, self.local_axes[indices[0]])
+                bounds = string(call.annotations["bounds"])
+                if bounds != "in_bounds" or not isinstance(table.type, (ViewType, SliceType)) or table.type.encoding.kind != "dense":
+                    self.error("indexed View loads require a numeric table and the in_bounds contract")
+                scalar = ScalarType(getattr(dt, table.type.encoding.family))
+                numeric = value_type(scalar, shape_of(table.type), axes_of(table.type))
+                table = self.op("admit", (table,), numeric)
+                value = self.op(
+                    "lookup", (table, index), value_type(scalar, shape_of(index.type), axes_of(index.type)), {"bounds": json.dumps(bounds)}
+                )
+                destination = self.region(call.args[0])
+                self.write_region(destination, value, axes_of(value.type))
+                return True
             if len(call.args) == 4:
                 source = self.region(call.args[1])[0]
                 value = self.locals[source]
@@ -208,7 +253,9 @@ class ModelOperations:
                 shape, axes = list(shape_of(value.type)), list(axes_of(value.type))
                 identity = point.type.domain.axis_id
                 if axes[axis] != identity:
-                    self.error("Level projection requires the Value's existing logical axis; use a positional tile slice for an anonymous local tile")
+                    self.error(
+                        "Level projection requires the Value's existing logical axis; use a positional tile slice for an anonymous local tile"
+                    )
                 extent = self.domain_partitions[point.type.domain.domain_id]
                 record_extent = getattr(self, "field_record_extents", {}).get(source)
                 grouped = record_extent is not None and shape[axis] < record_extent
@@ -221,8 +268,12 @@ class ModelOperations:
                     shape[axis] = extent
                 selector = "group_index" if grouped else "domain"
                 selectors = [selector if i == axis else "all" for i in range(len(shape_of(value.type)))]
-                result = self.op("extract", (value, point), value_type(element_type(value.type), tuple(shape), tuple(axes)),
-                                 {"selectors": json.dumps(selectors)})
+                result = self.op(
+                    "extract",
+                    (value, point),
+                    value_type(element_type(value.type), tuple(shape), tuple(axes)),
+                    {"selectors": json.dumps(selectors)},
+                )
                 destination = self.region(call.args[0])[0]
                 self.locals[destination], self.local_axes[destination] = result, tuple(axes)
                 return True
@@ -286,18 +337,8 @@ class ModelOperations:
             destination = self.region(call.args[2])[0]
             group = self.static(call.args[3])
             into = dtype(string(call.args[4]))
-            axis = self.named_axis(string(call.args[5]))
-            operands = []
-            for value in (left, right):
-                axes = axes_of(value.type)
-                if not axes:
-                    self.error("mac_groups requires a shaped grouped operand")
-                if axes[-1] != axis:
-                    if axes[-1] in self.named_axes.values():
-                        self.error("mac_groups cannot replace a different explicit logical axis")
-                    value = self.rename(value, shape_of(value.type), (*axes[:-1], axis))
-                operands.append(value)
-            left, right = operands
+            axis, left, right = self.bind_group_axis(left, right, string(call.args[5]))
+            left, right = self.align_anonymous_batches(left, right)
             shape, axes = self.domain(left, right)
             position = axes.index(axis)
             if shape[position] <= 0 or shape[position] % group:
@@ -320,15 +361,13 @@ class ModelOperations:
             left_region, right_region, output = (self.region(arg) for arg in call.args)
             left = self.read_region(left_region, self.local_axes[left_region[0]])
             right = self.read_region(right_region, self.local_axes[right_region[0]])
-            reduction = tuple(self.named_axis(string(axis)) for axis in call.annotations["axes"])
-            if len(reduction) == 1:
-                values = []
-                for value in (left, right):
-                    ids = axes_of(value.type)
-                    if reduction[0] not in ids and ids and ids[-1] not in self.named_axes.values():
-                        value = self.rename(value, shape_of(value.type), (*ids[:-1], reduction[0]))
-                    values.append(value)
-                left, right = values
+            names = tuple(string(axis) for axis in call.annotations["axes"])
+            if len(names) == 1:
+                axis, left, right = self.bind_group_axis(left, right, names[0])
+                reduction = (axis,)
+                left, right = self.align_anonymous_batches(left, right)
+            else:
+                reduction = tuple(self.named_axis(name) for name in names)
             if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
                 self.error("reduce_dot operands must retain every declared named reduction axis")
             shape, axes = self.domain(left, right)

@@ -33,9 +33,12 @@ class LogicalView:
     shape: tuple
     axes: tuple
     encoding: object
+    field_record_elements: int | None = None
 
     def __getattr__(self, name):
-        if not isinstance(self.encoding, EncodingDefinition):
+        from .derived import DerivedEncodingInstance
+
+        if not isinstance(self.encoding, (EncodingDefinition, DerivedEncodingInstance)):
             raise AttributeError(name)
         field = next((item for item in self.encoding.schema.fields if item.name == name), None)
         if field is None:
@@ -48,7 +51,13 @@ class LogicalView:
 
         scalar = getattr(dtypes, field.dtype)
         prefix = "float" if scalar.category == dtypes.DTypeCategory.FLOAT else "int" if scalar.signedness == "signed" else "uint"
-        return LogicalView(bind(intrinsic("field_view", self.var, name)), shape, axes, prefix + str(scalar.bits))
+        return LogicalView(
+            bind(intrinsic("field_view", self.var, name)),
+            shape,
+            axes,
+            prefix + str(scalar.bits),
+            self.encoding.schema.elements if field.shape else None,
+        )
 
     def __getitem__(self, indices):
         indices = indices if isinstance(indices, tuple) else (indices,)
@@ -60,10 +69,14 @@ class LogicalView:
             if isinstance(index, Point):
                 if index.axis != axis:
                     raise ValueError(f"Level axis {index.axis} cannot select View axis {axis}")
-                selectors.append("domain")
+                grouped = self.field_record_elements is not None and axis == self.axes[-1] and size < self.field_record_elements
+                if grouped and index.partition * size != self.field_record_elements:
+                    raise ValueError("compressed field projection requires one complete field group")
+                selectors.append("group_index" if grouped else "domain")
                 operands.append(index.var)
-                shape.append(index.partition)
-                axes.append(axis)
+                if not grouped:
+                    shape.append(index.partition)
+                    axes.append(axis)
             elif isinstance(index, slice) and index == slice(None):
                 selectors.append("all")
                 shape.append(size)
@@ -125,9 +138,24 @@ class RecordValue:
         return output
 
 
-def load(source, *, at=None, axis=-1):
+def load(source, *, at=None, axis=-1, bounds=None):
     from .derived import DerivedEncodingInstance
 
+    if at is not None and isinstance(source, LogicalView):
+        from tilelang.utils.language import retrieve_shape, _get_buffer
+
+        if bounds != "in_bounds":
+            raise ValueError("indexed View loads require the explicit bounds='in_bounds' contract")
+        if isinstance(source.encoding, (EncodingDefinition, DerivedEncodingInstance)):
+            raise TypeError("indexed View loads require a numeric field or dense table")
+        indices = _get_buffer(at)
+        if not str(indices.dtype).startswith(("int", "uint")):
+            raise TypeError("indexed View loads require an integer index tile")
+        output = alloc_local(retrieve_shape(at), source.encoding)
+        I.evaluate(intrinsic("load_value", to_tile_region(output), source.var, to_tile_region(at), bounds=bounds))
+        return output
+    if bounds is not None:
+        raise ValueError("bounds is only valid for indexed View loads")
     if at is not None:
         from tilelang.utils.language import retrieve_shape, _get_buffer
 

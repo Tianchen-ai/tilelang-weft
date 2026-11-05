@@ -77,6 +77,10 @@ class Packed32:
 
 ## 布局、engine 和流水
 
+`T.load(table, at=indices, bounds="in_bounds")` 使用整数索引 tile 读取 dense 数值
+View 或数值字段。索引对应表的 row-major 逻辑序号，结果保留索引 tile 的数值域。
+字段投影保留 Encoding 的分组关系，例如 Q8_K 每 16 个元素对应一个分组和。
+
 `T.gemm(a, b, c, engine="auto")` 优先使用合法矩阵实现，否则向量；
 `matrix` 要求矩阵硬件，`vector` 排除矩阵指令。约束作用于每个 contraction，
 保留输入类型和累加精度。`T.reduce_dot(..., over=...)` 缩并显式具名轴。

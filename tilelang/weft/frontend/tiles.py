@@ -21,7 +21,12 @@ class TileOperations:
 
     def region_indices(self, region, axes):
         buffer, starts, shape = region
-        return [self.binary("add", self.expr(start), self.iota(size, axis)) for start, size, axis in zip(starts, shape, axes)]
+        return [
+            self.iota(size, axis)
+            if self.analyzer.can_prove_equal(start, 0)
+            else self.binary("add", self.expr(start), self.iota(size, axis))
+            for start, size, axis in zip(starts, shape, axes)
+        ]
 
     def read_region(self, region, axes):
         buffer, starts, shape = region
@@ -43,7 +48,8 @@ class TileOperations:
             and shape == shape_of(self.locals[buffer].type)
             and self.mask is None
         ):
-            self.locals[buffer] = self.rename(value, shape, self.local_axes[buffer])
+            self.locals[buffer] = value
+            self.local_axes[buffer] = axes
             return
         self.store(buffer, self.region_indices(region, axes), value)
 
@@ -67,7 +73,7 @@ class TileOperations:
         if name in ("tl.tileop.cumsum", "tl.tileop.cummax"):
             source, output = self.region(call.args[0]), self.region(call.args[1])
             axis, reverse = self.static(call.args[2]), bool(self.static(call.args[3]))
-            axes = tuple(self.axis() for _ in source[2])
+            axes = self.local_axes.get(source[0], tuple(self.axis() for _ in source[2]))
             value = self.read_region(source, axes)
             combine = self.builder.region((element_type(value.type),) * 2)
             with self.insertion(combine):
@@ -130,7 +136,7 @@ class TileOperations:
             names = {"sum": "add", "max": "max", "min": "min", "bitand": "and", "bitor": "or", "bitxor": "xor"}
             if kind not in names and kind not in ("abssum", "absmax"):
                 self.error(f"unknown tile reduction kind {kind}")
-            axes = tuple(self.axis() for _ in source[2])
+            axes = self.local_axes.get(source[0], tuple(self.axis() for _ in source[2]))
             value = self.read_region(source, axes)
             if kind in ("abssum", "absmax"):
                 value = self.op("unary", (value,), value.type, {"kind": json.dumps("abs")})
