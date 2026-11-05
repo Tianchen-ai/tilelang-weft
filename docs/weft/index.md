@@ -52,7 +52,7 @@ with the dependencies declared in `pyproject.toml` and CMake 3.26.1 or newer:
 
 ```sh
 git submodule update --init --recursive
-USE_CUDA=OFF USE_ROCM=OFF USE_LLVM=OFF NO_VERSION_LABEL=1 \
+NO_VERSION_LABEL=1 CMAKE_ARGS='-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DUSE_LLVM=OFF' \
   python -m pip wheel --no-build-isolation --no-deps . -w dist
 ```
 
@@ -184,7 +184,16 @@ build and replacement-counter example.
 
 ## Experiments
 
-**Under evaluation / 测试中.** Comparative experiments belong to
+Comparative experiments use
 [TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench).
-Native kernel, grid, Python call, cold compilation and model stages use separate
-measurement boundaries.
+Its formal suites contain 150 workload IDs and 553 platform cases, with 543
+matched external reference contracts. Candidates run ordinary source JIT on the
+execution machine. Native workloads, grid, cold JIT, cache restoration and Python
+hot calls have separate columns.
+
+![Native operator performance and target-native JIT coverage](assets/performance.png)
+
+The [operator results](https://tianchen-ai.github.io/tilelang-weft-bench/results.html)
+publish the full CSV, original candidate/reference samples, hardware decisions
+and source-level analysis. Use the Bench catalog to inspect each source variant,
+Encoding provider, preparation protocol and counted work before reproducing it.

@@ -1,6 +1,6 @@
 # TileLang–Weft
 
-[English](README.md) | [双语手册](https://tianchen-ai.github.io/tilelang-weft/index.zh-CN.html) | [示例](examples/weft/README.zh-CN.md)
+[English](README.md) | [双语手册](https://tianchen-ai.github.io/tilelang-weft/index.zh-CN.html) | [示例](examples/weft/README.zh-CN.md) | [Gitee 镜像](https://gitee.com/dongshan-community/tilelang-weft)
 
 TileLang–Weft 是基于 **TileLang v0.1.15** 的 CPU 编译扩展。作者使用原生 TileLang
 的 Tensor、tile 操作、循环、macro、JIT 和 autotuner，并可用 Encoding、Level、
@@ -90,8 +90,28 @@ Python 导出、C++ 编译和原生调用。
 其中 543 项有匹配外部参考合同。候选通过执行机已安装的 TileLang 源码 JIT 运行；
 原生计算、grid 启动、冷 JIT、缓存恢复和 Python 热调用分别记录。
 
+![原生算子性能与目标机 JIT 覆盖](docs/weft/assets/performance.png)
+
+| 平台 | JIT 与数值检查 | 匹配参考 | 快于参考 | 原生倍率中位数 |
+|---|---:|---:|---:|---:|
+| SG2044 | 133/133 | 132 | 11 | 0.0580× |
+| K1 | 137/137 | 136 | 9 | 0.1143× |
+| K3 A100 | 136/136 | 135 | 10 | 0.1074× |
+| x86 | 147/147 | 140 | 11 | 0.0375× |
+| **合计** | **553/553** | **543** | **41** | — |
+
+图中包含全部 543 项匹配原生比较及 553 项数值检查结果。倍率为参考耗时除以
+TileLang 耗时。归一化和 activation 量化已有快于参考的实现；当前作者程序中的
+packed dot 与完整 projection 仍有显著性能差距。使用已发行的 TileLang–Weft、
+TileLang–Weft Bench wheel 和工具书中的完整套件命令即可复现实验。
+
 [双语 Bench 工具书](https://tianchen-ai.github.io/tilelang-weft-bench/) 提供配套
-wheel、源码绑定、固定参考流程和全量套件命令。**全量算子测量仍在进行中。**
+wheel、源码绑定、固定参考流程和全量套件命令。
+[算子结果](https://tianchen-ai.github.io/tilelang-weft-bench/results.zh-CN.html)提供完整 CSV、
+原始样本、数值检查范围、源码参数和实际实现差距。
+
+GitHub 的分支和 tag 会在 push、发布 Release 后自动同步到
+[Gitee 镜像](https://gitee.com/dongshan-community/tilelang-weft)。
 
 ## 源码与上游
 

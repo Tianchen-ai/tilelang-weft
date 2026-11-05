@@ -1,7 +1,8 @@
 # TileLang–Weft
 
 [中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/tilelang-weft/) · [Examples](examples/weft/README.md) ·
-[Upstream TileLang](https://github.com/tile-ai/tilelang)
+[Upstream TileLang](https://github.com/tile-ai/tilelang) ·
+[Gitee mirror](https://gitee.com/dongshan-community/tilelang-weft)
 
 **Native TileLang authoring with the Weft CPU programming model.**
 This fork extends TileLang **v0.1.15** with Encoding, logical axes, Level,
@@ -104,9 +105,31 @@ uses the installed TileLang source JIT on its execution target. Native
 computation, grid launch, cold JIT, cache restoration and Python hot calls have
 separate timing columns.
 
+![Native operator performance and target-native JIT coverage](docs/weft/assets/performance.png)
+
+| Platform | JIT + numerical checks | Matched refs | Faster than ref | Median native speedup |
+|---|---:|---:|---:|---:|
+| SG2044 | 133/133 | 132 | 11 | 0.0580× |
+| K1 | 137/137 | 136 | 9 | 0.1143× |
+| K3 A100 | 136/136 | 135 | 10 | 0.1074× |
+| x86 | 147/147 | 140 | 11 | 0.0375× |
+| **Total** | **553/553** | **543** | **41** | — |
+
+The plot contains all 543 matched native comparisons and all 553 numerical-check
+outcomes. Speedup is reference time divided by TileLang time. Normalization and
+activation quantization include faster implementations; packed dot and complete
+projection account for substantial performance gaps in the current author programs.
+Reproduce these experiments with the released TileLang–Weft and TileLang–Weft Bench
+wheels and the documented full-suite commands.
+
 The [bilingual Bench handbook](https://tianchen-ai.github.io/tilelang-weft-bench/)
 provides the coordinated wheels, exact source bindings, fixed-reference workflow
-and full-suite commands. **The full operator campaign is under evaluation.**
+and full-suite commands. [Operator results](https://tianchen-ai.github.io/tilelang-weft-bench/results.html)
+include the full CSV, original samples, numerical-check coverage, source
+parameters and measured implementation gaps.
+
+GitHub branches and tags synchronize automatically to the
+[Gitee mirror](https://gitee.com/dongshan-community/tilelang-weft) after pushes and releases.
 
 ## Source and upstream
 

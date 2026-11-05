@@ -36,7 +36,7 @@ RISC-V 上通过 PyTorch 的 DLPack 协议交互，不强制安装可选的预�
 
 ```sh
 git submodule update --init --recursive
-USE_CUDA=OFF USE_ROCM=OFF USE_LLVM=OFF NO_VERSION_LABEL=1 \
+NO_VERSION_LABEL=1 CMAKE_ARGS='-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DUSE_LLVM=OFF' \
   python -m pip wheel --no-build-isolation --no-deps . -w dist
 ```
 
@@ -139,6 +139,14 @@ saturation=False)` 保留显式窄化。`output[part].q` 等字段 View 支持 t
 
 ## 实验
 
-**测试中 / Under evaluation。** 比较实验统一使用独立的
+比较实验使用独立的
 [TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench)。
-native kernel、grid、Python 调用、冷编译和模型阶段分别计时。
+正式套件包含 150 个 workload ID、553 个平台用例，其中 543 项有匹配外部参考合同。
+候选通过执行机上的普通源码 JIT 运行；原生 workload、grid、冷 JIT、缓存恢复和
+Python 热调用分别列出。
+
+![原生算子性能与目标机 JIT 覆盖](assets/performance.png)
+
+[算子结果](https://tianchen-ai.github.io/tilelang-weft-bench/results.zh-CN.html)公开完整
+CSV、候选与参考的原始样本、硬件决定和源码分析。复现前可通过 Bench catalog 查看
+具体源码变体、Encoding 来源、准备协议与计算范围。
