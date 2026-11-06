@@ -2,6 +2,40 @@
 
 import tilelang
 from tilelang.weft import language as T
+from . import ggml_formats as F
+
+
+@tilelang.derive
+def Q4_0Rows(W: T.View[F.Q4_0], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 4})
+
+
+@tilelang.derive
+def Q4_1Rows(W: T.View[F.Q4_1], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "m": 2, "q": 4})
+
+
+@tilelang.derive
+def Q5_0Rows(W: T.View[F.Q5_0], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "qh": 4, "q": 4})
+
+
+@tilelang.derive
+def Q5_1Rows(W: T.View[F.Q5_1], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "m": 2, "qh": 4, "q": 4})
+
+
+@tilelang.derive
+def Q8_0Rows(W: T.View[F.Q8_0], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 4})
+
+
+@tilelang.encoding
+class BlockSum32:
+    layout = (T.bitorder.lsb_first, T.byteorder.little)
+    alignment = 2
+    elements = 32
+    value: T.Field("int16")
 
 
 @tilelang.encoding

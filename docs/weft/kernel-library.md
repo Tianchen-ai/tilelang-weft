@@ -16,6 +16,7 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | GEMM and batched projection | `linear` | Author blocks, transpose, bias/SiLU epilogue and local engine requirement |
 | Dense CPU panels | `panel_dense` | In-call panel transposes, optional F16 activation rounding and an explicit outer-product loop |
 | Batched packed and codebook projections | `panel_projection`, `indexed_projection` | Decode a weight record once, reuse across activation rows, and close integer scale/correction groups |
+| Short-record interleaved projections | `short_projection`, `layouts` | Author-declared persistent row cohorts, in-call Q8 activation preparation and state retained across K records |
 | Q4_K/Q6_K × Q8_K | `quantized` | Shared Encoding fields, typed grouped partials, scale/correction branches |
 | Integer-field dequantization | `quantized.dequantize` | Q1, Q4/Q5/Q8, K formats and TQ2 fields; explicit numerical decoding |
 | Lookup and sub-byte formats | `codebook` | IQ1/IQ2/IQ3/IQ4, MXFP4/NVFP4 and TQ1 author programs with explicit tables |
@@ -99,6 +100,15 @@ retaining packed sign planes alongside the payload. The scalar program reads
 the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
+
+`short_projection.projection` consumes the `Q4_0Rows`, `Q4_1Rows`, `Q5_0Rows`,
+`Q5_1Rows` or `Q8_0Rows` derived Encoding. These layouts retain each GGML
+record and explicitly interleave four-byte payload chunks across a row cohort.
+The caller prepares that persistent weight object before invocation. The
+projection itself quantizes activation, computes any required integer block
+sums, then retains an output tile's state across all K records. Its `rows` and
+`columns` parameters describe author reuse, while `engine="vector"` constrains
+the local dot. This program shares the same core as ordinary Tensor programs.
 
 The product owns these normal programs. Bench owns workloads, external references,
 numerical comparisons and timing boundaries. Public comparative performance is
