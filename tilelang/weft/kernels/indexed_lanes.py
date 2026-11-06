@@ -39,6 +39,7 @@ def iq1_planes(M, K):
                 with T.level.blocks(K, extent=256) as block:
                     w, x = T.load(weights[row, block][0, :]), T.load(values[block])
                     q, metadata, d, activation, sums, ds = w.q, w.qh, w.d, x.q, x.bsum, x.ds
+                    block_scale = T.cast(d[()], "float32") * ds[()]
                     indices = T.alloc_local((8, 4, 8), "uint16")
                     inputs = T.alloc_local((8, 4, 8), "int8")
                     for group, entry, payload in T.Parallel(8, 4, 8):
@@ -61,7 +62,7 @@ def iq1_planes(M, K):
                     T.reduce_sum(main_terms, main_sum, dim=0)
                     T.reduce_sum(corrections, correction_sum, dim=0)
                     combined = T.cast(main_sum[0], "float32") + T.cast(correction_sum[0], "float32") * 0.125
-                    total += (T.cast(d[()], "float32") * ds[()]) * combined
+                    total += block_scale * combined
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
                 T.copy(result, output[row])

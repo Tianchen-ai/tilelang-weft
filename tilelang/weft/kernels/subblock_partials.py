@@ -209,37 +209,31 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
                                 high = weight_record.qh
                             if affine:
                                 minimum, activation_sum = weight_record.m, input_record.s
-                        if affine:
-                            weight_meta = T.alloc_local((2,), "float16")
-                            activation_meta = T.alloc_local((2,), "float16")
-                            metadata = T.alloc_local((2,), "float32")
-                            weight_meta[0], weight_meta[1] = d[()], minimum[()]
-                            activation_meta[0], activation_meta[1] = xd[()], activation_sum[()]
-                            for i in T.Parallel(2):
-                                metadata[i] = T.cast(weight_meta[i], "float32") * T.cast(activation_meta[i], "float32")
-                        codes = T.alloc_local((32,), "int8" if lookup or format in ("Q4_0", "Q5_0", "Q8_0") else "uint8")
+                        if lookup:
+                            codes = T.load(table, at=q, bounds="in_bounds")
+                        else:
+                            codes = T.alloc_local((32,), "int8" if format in ("Q4_0", "Q5_0", "Q8_0") else "uint8")
                         products = T.alloc_local((partials,), "int32")
-                        for k in T.Parallel(32):
-                            if lookup:
-                                codes[k] = table[T.cast(q[k], "uint8")]
-                            elif format in ("Q5_0", "Q5_1"):
-                                code = T.cast(q[k], "uint8") | (T.cast(high[k], "uint8") << T.uint8(4))
-                                codes[k] = T.cast(code, "int8") - T.int8(16) if format == "Q5_0" else code
-                            else:
-                                if format == "Q8_0":
-                                    codes[k] = q[k]
+                        if not lookup:
+                            for k in T.Parallel(32):
+                                if format in ("Q5_0", "Q5_1"):
+                                    code = T.cast(q[k], "uint8") | (T.cast(high[k], "uint8") << T.uint8(4))
+                                    codes[k] = T.cast(code, "int8") - T.int8(16) if format == "Q5_0" else code
                                 else:
-                                    codes[k] = T.cast(q[k], "int8") - T.int8(8) if format == "Q4_0" else T.cast(q[k], "uint8")
+                                    if format == "Q8_0":
+                                        codes[k] = q[k]
+                                    else:
+                                        codes[k] = T.cast(q[k], "int8") - T.int8(8) if format == "Q4_0" else T.cast(q[k], "uint8")
+                        if format == "MXFP4":
+                            scale = Scale[T.cast(exponent[()], "uint8")] * T.cast(xd[()], "float32")
+                        else:
+                            scale = T.cast(d[()], "float32") * T.cast(xd[()], "float32")
+                        if affine:
+                            offset = T.cast(minimum[()], "float32") * T.cast(activation_sum[()], "float32")
                         if partials == 1:
                             T.reduce_dot(codes, activation, products, over="k", acc_dtype="int32", engine="vector")
                         else:
                             T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
-                        if affine:
-                            scale = metadata[0]
-                        elif format == "MXFP4":
-                            scale = Scale[T.cast(exponent[()], "uint8")] * T.cast(xd[()], "float32")
-                        else:
-                            scale = T.cast(d[()], "float32") * T.cast(xd[()], "float32")
                         if partials == 1:
                             if records == 1 or part == 0:
                                 first_scalar += scale * T.cast(products[0], "float32")
@@ -255,7 +249,7 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
                                     else:
                                         second[p] += scale * T.cast(products[p], "float32")
                         if affine:
-                            correction += metadata[1]
+                            correction += offset
                 if partials == 1:
                     result[0] = first_scalar + second_scalar if records == 2 else first_scalar
                 else:
@@ -445,6 +439,7 @@ def ternary_planes(M, K):
                 with T.level.blocks(K, extent=256) as block:
                     w, x = T.load(weights[row, block][0, :]), T.load(values[block])
                     q, high, activation, d, ds = w.q, w.qh, x.q, w.d, x.ds
+                    block_scale = T.cast(d[()], "float32") * ds[()]
                     first = T.alloc_local((4, 32), "int8")
                     first_inputs = T.alloc_local((4, 32), "int8")
                     second = T.alloc_local((5, 16), "int8")
@@ -479,7 +474,7 @@ def ternary_planes(M, K):
                     T.reduce_sum(p1, s1, dim=0)
                     T.reduce_sum(p2, s2, dim=0)
                     integer = s0[0] + s1[0] + s2[0] + st[0]
-                    total += T.cast(integer, "float32") * (T.cast(d[()], "float32") * ds[()])
+                    total += T.cast(integer, "float32") * block_scale
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
                 T.copy(result, output[row])
