@@ -69,6 +69,13 @@ Standard Tensor, StridedTensor, Parallel, serial, copy, fill, gemm, reduce and
 scalar expressions retain TileLang's source construction. `T.Kernel` declares
 independent CPU tile instances, and `cpu_num_threads` controls their native launch.
 
+`T.reshape(buffer, shape)` creates a same-type, contiguous view of the same
+storage. Reads and writes through either shape share one numerical value,
+including updates carried through serial loops and helpers. A reshape keeps
+the original allocation or state/stage lifetime. The
+[tile example](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
+loads rows through a reshaped local tile before reducing them.
+
 Encoding describes serialized storage. It does not implement dequantization:
 
 ```python

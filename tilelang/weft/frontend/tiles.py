@@ -30,26 +30,29 @@ class TileOperations:
 
     def read_region(self, region, axes):
         buffer, starts, shape = region
-        if buffer in self.locals and all(self.static(start) == 0 for start in starts) and shape == shape_of(self.locals[buffer].type):
-            return self.rename(self.locals[buffer], shape, axes)
+        if self.buffer_owner(buffer) in self.locals and all(self.static(start) == 0 for start in starts):
+            value = self.local_value(buffer)
+            if shape == shape_of(value.type):
+                return self.rename(value, shape, axes)
         return self.load(buffer, self.region_indices(region, axes))
 
     def write_region(self, region, value, axes):
         buffer, starts, shape = region
-        if buffer in self.readonly:
+        if self.buffer_owner(buffer) in self.readonly:
             self.error(f"staged buffer {buffer.name} is an immutable snapshot")
         from .importer import dtype
 
         value = self.cast(value, dtype(buffer.dtype))
         value = self.rename(value, shape, axes)
+        owner = self.buffer_owner(buffer)
+        original = self.local_value(buffer) if owner in self.locals else None
         if (
-            buffer in self.locals
+            original is not None
             and all(self.static(start) == 0 for start in starts)
-            and shape == shape_of(self.locals[buffer].type)
+            and shape == shape_of(original.type)
             and self.mask is None
         ):
-            self.locals[buffer] = value
-            self.local_axes[buffer] = axes
+            self.set_local_value(buffer, value)
             return
         self.store(buffer, self.region_indices(region, axes), value)
 

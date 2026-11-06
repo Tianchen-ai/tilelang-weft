@@ -50,6 +50,11 @@ NO_VERSION_LABEL=1 CMAKE_ARGS='-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DUSE_LLVM=OFF' \
 Tensor、StridedTensor、Parallel、serial、copy、fill、gemm、reduce 和标量表达式沿用
 TileLang。`T.Kernel` 声明独立的 CPU tile 实例，`cpu_num_threads` 指定原生启动线程数。
 
+`T.reshape(buffer, shape)` 在同一份连续存储上建立相同元素类型的新形状。
+两种形状的读写共享同一个数值，包括 serial 循环和 helper 中的更新；重塑保持原
+allocation 或 state/stage 生命周期。[tile 示例](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
+通过重塑后的局部 tile 逐行写入，再完成归约。
+
 Encoding 定义序列化存储；解码公式由作者程序表达：
 
 ```python

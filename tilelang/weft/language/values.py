@@ -64,6 +64,31 @@ class LogicalView:
         if len(indices) > len(self.shape):
             raise IndexError("View selectors exceed its logical rank")
         indices = (*indices, *(slice(None) for _ in range(len(self.shape) - len(indices))))
+        if all(isinstance(index, slice) and index == slice(None) for index in indices):
+            return self
+        if any(isinstance(index, slice) and index != slice(None) for index in indices):
+            from tvm import arith
+
+            offsets, extents, remaining = [], [], []
+            for size, index in zip(self.shape, indices):
+                if isinstance(index, slice) and index != slice(None):
+                    if index.step not in (None, 1):
+                        raise ValueError("logical View ranges require unit stride")
+                    start = 0 if index.start is None else index.start
+                    end = size if index.stop is None else index.stop
+                    extent = arith.Analyzer().simplify(tirx.const(0, "int64") + end - start)
+                    if not isinstance(extent, tirx.IntImm) or int(extent.value) <= 0:
+                        raise ValueError("logical View ranges require a positive compile-time extent")
+                    offsets.append(start)
+                    extents.append(int(extent.value))
+                    remaining.append(slice(None))
+                else:
+                    offsets.append(0)
+                    extents.append(size)
+                    remaining.append(index)
+            variable = bind(intrinsic("slice", self.var, "[]", *offsets, subview=True, extents=extents))
+            window = LogicalView(variable, tuple(extents), self.axes, self.encoding)
+            return window[tuple(remaining)]
         selectors, operands, shape, axes = [], [], [], []
         for size, axis, index in zip(self.shape, self.axes, indices):
             if isinstance(index, Point):

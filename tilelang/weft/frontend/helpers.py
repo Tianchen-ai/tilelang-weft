@@ -11,7 +11,7 @@ class HelperOperations:
         incoming_axes, readonly = dict(self.local_axes), set(self.readonly)
         keys = tuple(incoming)
         region = self.builder.region(())
-        context = {"keys": keys, "types": None, "returns": 0}
+        context = {"keys": keys, "carried_types": tuple(incoming[key].type for key in keys), "types": None, "returns": 0}
         self.helper_stack.append(context)
         with self.insertion(region):
             try:
@@ -79,7 +79,15 @@ class HelperOperations:
                 value = self.rename(value, shape_of(expected), axes_of(expected))
             normalized.append(value)
         context["returns"] += 1
-        self.emit("weft_kernel.helper_return", (*normalized, *(self.locals[key] for key in context["keys"])))
+        carried = []
+        for key, expected in zip(context["keys"], context["carried_types"]):
+            value = self.locals[key]
+            if value.type != expected:
+                if element_type(value.type) != element_type(expected) or shape_of(value.type) != shape_of(expected):
+                    self.error("helper mutation must preserve its caller buffer dtype and shape")
+                value = self.rename(value, shape_of(expected), axes_of(expected))
+            carried.append(value)
+        self.emit("weft_kernel.helper_return", (*normalized, *carried))
 
     def helper_result(self, call):
         identity, index = self.static(call.args[0]), self.static(call.args[1])

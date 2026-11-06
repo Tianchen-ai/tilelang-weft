@@ -1,4 +1,4 @@
-"""Tile copies, local values, reduction and contraction on a CPU."""
+"""Tile copies, shared-storage reshaping, reduction and contraction on a CPU."""
 
 import tilelang
 from tilelang.weft import language as T
@@ -25,9 +25,13 @@ def sum_factory(M=4, N=32):
     @T.prim_func
     def main(X: T.Tensor((M, N), "float32"), Y: T.Tensor((M,), "float32")):
         with T.Kernel(1):
-            x = T.alloc_local((M, N), "float32")
+            flat = T.alloc_local((M * N,), "float32")
+            x = T.reshape(flat, (M, N))
             y = T.alloc_local((M,), "float32")
-            T.copy(X, x)
+            T.fill(flat, 0)
+            for row in T.serial(M):
+                for column in T.Parallel(N):
+                    x[row, column] = X[row, column]
             T.reduce_sum(x, y, dim=1)
             T.copy(y, Y)
 

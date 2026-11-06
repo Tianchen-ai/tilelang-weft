@@ -213,11 +213,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         target = value_type(element_type(value.type), tuple(shape), tuple(axes))
         if value.type == target and order is None:
             return value
-        if not shape_of(value.type):
-            return self.broadcast(value, shape, axes)
         if not shape:
             indices = (self.constant(0, dt.index),) * len(shape_of(value.type))
             return self.op("extract", (value, *indices), target, {"selectors": json.dumps(["index"] * len(indices))})
+        if not shape_of(value.type):
+            return self.broadcast(value, shape, axes)
         source_axes = axes_of(value.type)
         # T.Parallel can write a tile in a different loop order from the
         # expression's pointer loads. Preserve those coordinate identities
@@ -256,7 +256,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if node.buffer in getattr(self, "field_record_extents", {}) and axes != axes_of(self.locals[node.buffer].type):
                 axes = None
             if axes is not None:
-                return self.rename(self.locals[node.buffer], shape_of(self.locals[node.buffer].type), axes)
+                value = self.local_value(node.buffer)
+                return self.rename(value, shape_of(value.type), axes)
             return self.load(node.buffer, [self.expr(i) for i in node.indices])
         if isinstance(node, tirx.Select):
             condition, yes, no = self.expr(node.condition), self.expr(node.true_value), self.expr(node.false_value)
@@ -383,17 +384,77 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             mask = self.binary("and", mask, self.binary("and", nonnegative, below))
         return self.broadcast(mask, shape, axes)
 
+    def buffer_owner(self, buffer):
+        if buffer in self.locals or buffer in self.pointers:
+            return buffer
+        owners = [owner for owner in (*self.locals, *self.pointers) if owner.data.same_as(buffer.data)]
+        if not owners:
+            return None
+        if len(owners) != 1:
+            self.error(f"buffer view {buffer.name} has no unique storage owner")
+        owner = owners[0]
+        if str(buffer.dtype) != str(owner.dtype):
+            self.error("CPU buffer views currently require the owner's element type")
+        for selected in (owner, buffer):
+            if not self.analyzer.can_prove_equal(selected.elem_offset, 0):
+                self.error("CPU buffer reshape requires zero element offsets")
+            stride = 1
+            for position in reversed(range(len(selected.shape))):
+                if selected.strides and not self.analyzer.can_prove_equal(selected.strides[position], stride):
+                    self.error("CPU buffer reshape requires contiguous storage")
+                stride *= selected.shape[position]
+        if not self.analyzer.can_prove_equal(math.prod(buffer.shape), math.prod(owner.shape)):
+            self.error("CPU buffer reshape must preserve the number of elements")
+        return owner
+
+    def local_value(self, buffer):
+        owner = self.buffer_owner(buffer)
+        if owner not in self.locals:
+            self.error(f"read of unallocated local buffer {buffer.name}")
+        value = self.locals[owner]
+        if owner is buffer or owner.same_as(buffer):
+            return value
+        shape = tuple(self.static(n) for n in buffer.shape)
+        if math.prod(shape) != math.prod(shape_of(value.type)):
+            self.error("CPU buffer reshape cannot change an implicit Parallel domain")
+        axes = self.local_axes_for(buffer)
+        return self.rename(value, shape, axes)
+
+    def local_axes_for(self, buffer):
+        owner = self.buffer_owner(buffer)
+        if owner not in self.locals:
+            self.error(f"local axes require allocated storage for {buffer.name}")
+        if buffer not in self.local_axes:
+            shape = tuple(self.static(n) for n in buffer.shape)
+            if shape == shape_of(self.locals[owner].type):
+                self.local_axes[buffer] = axes_of(self.locals[owner].type)
+            else:
+                self.local_axes[buffer] = tuple(
+                    self.operation_axes[(buffer, i)] if (buffer, i) in self.operation_axes else self.axis()
+                    for i in range(len(shape)))
+        return self.local_axes[buffer]
+
+    def set_local_value(self, buffer, value):
+        owner = self.buffer_owner(buffer)
+        if owner in self.readonly:
+            self.error(f"staged buffer {owner.name} is an immutable snapshot")
+        if owner is buffer or (owner is not None and owner.same_as(buffer)):
+            self.locals[owner] = value
+            self.local_axes[owner] = axes_of(value.type)
+        else:
+            original = self.locals[owner]
+            self.locals[owner] = self.rename(value, shape_of(original.type), axes_of(original.type))
+
     def load(self, buffer, indices):
-        if buffer in self.pointers:
+        owner = self.buffer_owner(buffer)
+        if owner in self.pointers:
             offsets = self.offsets(buffer, indices)
             shape, axes = self.memory_domain(offsets)
             offsets = self.broadcast(offsets, shape, axes)
             ty = value_type(ScalarType(dtype(buffer.dtype)), shape, axes)
             other = self.broadcast(self.constant(0, dtype(buffer.dtype)), shape, axes)
-            return self.op("pointer_load", (self.pointers[buffer], offsets, self.access_mask(buffer, indices, shape, axes), other), ty)
-        if buffer not in self.locals:
-            self.error(f"read of unallocated local buffer {buffer.name}")
-        source = self.locals[buffer]
+            return self.op("pointer_load", (self.pointers[owner], offsets, self.access_mask(buffer, indices, shape, axes), other), ty)
+        source = self.local_value(buffer)
         if not buffer.shape or buffer.scope() == "local.var":
             # A scalar allocated inside Parallel has one value per logical
             # iteration, already recorded by its defining assignment. A scalar
@@ -458,19 +519,20 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         return value if scalar.category == dt.DTypeCategory.INTEGER and scalar.signedness == "unsigned" else self.cast(value, dt.u32)
 
     def store(self, buffer, indices, value):
-        if buffer in self.readonly:
-            self.error(f"staged buffer {buffer.name} is an immutable snapshot")
+        owner = self.buffer_owner(buffer)
+        if owner in self.readonly:
+            self.error(f"staged buffer {owner.name} is an immutable snapshot")
         value = self.cast(value, dtype(buffer.dtype))
-        if buffer in self.pointers:
+        if owner in self.pointers:
             offsets = self.offsets(buffer, indices)
             shape, axes = self.memory_domain(offsets, value)
             offsets, value = (self.broadcast(v, shape, axes) for v in (offsets, value))
-            self.op("pointer_store", (self.pointers[buffer], offsets, self.access_mask(buffer, indices, shape, axes), value))
+            self.op("pointer_store", (self.pointers[owner], offsets, self.access_mask(buffer, indices, shape, axes), value))
             return
-        if buffer not in self.locals:
+        if owner not in self.locals:
             self.error(f"write of unallocated local buffer {buffer.name}")
         if not buffer.shape or buffer.scope() == "local.var":
-            original = self.locals[buffer]
+            original = self.local_value(buffer)
             shape = tuple(self.static(extent) for _, extent, _ in self.parallel_domains.values())
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
             if not set(axes_of(original.type)) <= set(axes):
@@ -480,8 +542,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if self.mask is not None:
                 mask = self.broadcast(self.mask, shape, axes)
                 value = self.op("select", (mask, value, original), original.type)
-            self.locals[buffer] = value
-            self.local_axes[buffer] = axes
+            self.set_local_value(buffer, value)
             return
         if self.mask is not None:
             old = self.load(buffer, indices)
@@ -496,11 +557,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         # A masked expression can discover column axes before row axes. The
         # update still uses the destination selectors' ordered domain.
         value = self.broadcast(value, shape, axes)
-        original = self.locals[buffer]
-        self.locals[buffer] = self.op("update", (original, value, *converted), original.type, {"selectors": json.dumps(selectors)})
+        original = self.local_value(buffer)
+        self.set_local_value(buffer, self.op("update", (original, value, *converted), original.type, {"selectors": json.dumps(selectors)}))
 
     def complete_local_domain(self, buffer, indices):
-        if buffer not in self.locals or len(indices) != len(buffer.shape):
+        if self.buffer_owner(buffer) not in self.locals or len(indices) != len(buffer.shape):
             return None
         axes = []
         for index, size in zip(indices, buffer.shape):
@@ -536,7 +597,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
         self.local_axes[buffer] = axes
         ty = LocalValueType(ScalarType(dtype(buffer.dtype)), shape, axes)
-        self.locals[buffer] = self.op("empty", tuple(self.constant(n, dt.index) for n in shape), ty)
+        value = self.op("empty", tuple(self.constant(n, dt.index) for n in shape), ty)
+        # Empty storage has a shaped result even at rank zero. A scalar local
+        # carries the ordinary scalar numerical type through SCF and helpers,
+        # just like its eventual field or arithmetic assignment.
+        self.locals[buffer] = self.rename(value, (), ()) if not shape else value
 
     def stmt(self, node):
         previous = self.current_node
@@ -565,17 +630,16 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             axes = self.complete_local_domain(node.buffer, node.indices)
             value = self.expr(node.value)
             if axes is not None:
-                if node.buffer in self.readonly:
+                if self.buffer_owner(node.buffer) in self.readonly:
                     self.error(f"staged buffer {node.buffer.name} is an immutable snapshot")
-                original = self.locals[node.buffer]
+                original = self.local_value(node.buffer)
                 shape = shape_of(original.type)
                 value = self.broadcast(self.cast(value, dtype(node.buffer.dtype)), shape, axes)
                 if self.mask is not None:
                     mask = self.broadcast(self.mask, shape, axes)
                     previous = self.rename(original, shape, axes)
                     value = self.op("select", (mask, value, previous), previous.type)
-                self.locals[node.buffer] = value
-                self.local_axes[node.buffer] = axes_of(value.type)
+                self.set_local_value(node.buffer, value)
             else:
                 self.store(node.buffer, [self.expr(i) for i in node.indices], value)
             return
@@ -685,9 +749,12 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         sources = set()
 
         def access(node):
-            if not isinstance(node, (tirx.BufferLoad, tirx.BufferStore)) or node.buffer not in self.locals:
+            if not isinstance(node, (tirx.BufferLoad, tirx.BufferStore)):
                 return
-            axes = self.local_axes[node.buffer]
+            owner = self.buffer_owner(node.buffer)
+            if owner not in self.locals:
+                return
+            axes = self.local_axes_for(node.buffer)
             record = getattr(self, "field_record_extents", {}).get(node.buffer)
             for dimension, (index, extent) in enumerate(zip(node.indices, node.buffer.shape)):
                 if not index.same_as(loop.loop_var):
@@ -698,7 +765,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                     candidates.add(axes[dimension])
                     if isinstance(node, tirx.BufferStore):
                         destinations.add(axes[dimension])
-                    elif self.locals[node.buffer].producer is None or self.locals[node.buffer].producer.name != "weft_kernel.empty":
+                    elif self.locals[owner].producer is None or self.locals[owner].producer.name != "weft_kernel.empty":
                         sources.add(axes[dimension])
 
         tirx.stmt_functor.post_order_visit(loop.body, access)

@@ -172,6 +172,30 @@ class ModelOperations:
             )
         if name == "tl.weft.slice":
             base = self.expr(call.args[0])
+            if bool(call.annotations.get("subview", False)):
+                from .importer import integers
+
+                offsets, extents, shape, dynamic = [], [], [], []
+                for offset in call.args[2:]:
+                    simplified = self.analyzer.simplify(offset)
+                    if isinstance(simplified, tirx.IntImm):
+                        offsets.append(int(simplified.value))
+                    else:
+                        offsets.append(-1)
+                        dynamic.append(self.cast(self.expr(offset), dt.index))
+                for axis, extent in enumerate(call.annotations["extents"]):
+                    simplified = self.analyzer.simplify(extent)
+                    if isinstance(simplified, tirx.IntImm):
+                        extents.append(int(simplified.value))
+                        shape.append(int(simplified.value))
+                    else:
+                        extents.append(-1)
+                        shape.append(shape_of(base.type)[axis])
+                        dynamic.append(self.cast(self.expr(extent), dt.index))
+                return self.op(
+                    "subview", (base, *dynamic), SliceType(base.type.encoding, tuple(shape), axes_of(base.type)),
+                    {"offsets": integers(offsets), "extents": integers(extents)},
+                )
             selectors = json.loads(string(call.args[1]))
             values, shape, axes = [], [], []
             cursor = 2
