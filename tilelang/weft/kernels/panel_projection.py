@@ -70,52 +70,61 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                         T.reduce_sum(widened, total_sum, dim=0)
                         T.copy(total_sum, activation_sums[m])
                 with T.level.cols(N, group=columns) as col:
-                    weight = weights[col, block]
-                    wd = T.load(weight.d)
+                    wd = T.alloc_local((columns,), "float32")
                     if short_affine:
-                        wm = T.load(weight.m)
+                        wm = T.alloc_local((columns,), "float32")
                     if k_affine:
-                        dmin = T.load(weight.dmin)
-                    if format == "Q2_K":
-                        metadata = T.load(weight.scales)
-                    elif format == "Q3_K":
-                        scale_low, scale_high = T.load(weight.scale_low), T.load(weight.scale_high)
-                    elif format in ("Q4_K", "Q5_K"):
-                        scales, minima = T.load(weight.sc), T.load(weight.m)
-                    elif format == "Q6_K":
-                        scales = T.load(weight.scales)
-                    low = T.load(weight.ql if format == "Q6_K" else weight.q)
-                    if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
-                        high = T.load(weight.qh)
-                    elif format == "Q3_K":
-                        high = T.load(weight.hmask)
-                    codes = T.alloc_local((columns, elements), panel_dtype)
-                    for c, k in T.Parallel(columns, elements):
-                        if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
-                            code = T.cast(low[c, k], "int16") | (T.cast(high[c, k], "int16") << T.int16(4))
-                            code -= 16 if format == "Q5_0" else 32 if format == "Q6_K" else 0
-                        elif format == "Q3_K":
-                            code = T.cast(low[c, k], "int16") + T.cast(high[c, k], "int16") * 4 - 4
-                        elif format == "IQ4_NL":
-                            code = T.cast(table[T.cast(low[c, k], "uint8")], "int16")
-                        else:
-                            code = T.cast(low[c, k], "int16") - (8 if format == "Q4_0" else 1 if format == "TQ2_0" else 0)
-                        group = T.cast(k, "uint32") // T.uint32(width)
-                        if format == "Q2_K":
-                            coefficient = T.cast(metadata[c, group] & T.uint8(15), "int16")
-                        elif format == "Q3_K":
-                            coefficient = (T.cast(scale_low[c, group], "int16") | (T.cast(scale_high[c, group], "int16") << T.int16(4))) - 32
-                        elif format in ("Q4_K", "Q5_K", "Q6_K"):
-                            coefficient = T.cast(scales[c, group], "int16")
-                        else:
-                            coefficient = 1
-                        codes[c, k] = T.cast(code * coefficient + bias, panel_dtype)
-                    T.copy(codes, panel)
-                    weight_values = T.load(panel)
-                    if k_affine:
+                        dmin = T.alloc_local((columns,), "float32")
                         minimum_values = T.alloc_local((columns, 16), "int16")
-                        for c, g in T.Parallel(columns, 16):
-                            minimum_values[c, g] = T.cast(metadata[c, g] >> T.uint8(4), "int16") if format == "Q2_K" else T.cast(minima[c, T.cast(g, "uint32") // T.uint32(2)], "int16")
+                    for c in T.serial(columns):
+                        weight = T.load(weights[col, block][c, :])
+                        d = weight.d
+                        wd[c] = T.cast(d[()], "float32")
+                        if short_affine:
+                            minimum = weight.m
+                            wm[c] = T.cast(minimum[()], "float32")
+                        if k_affine:
+                            minimum_scale = weight.dmin
+                            dmin[c] = T.cast(minimum_scale[()], "float32")
+                        if format == "Q2_K":
+                            metadata = weight.scales
+                        elif format == "Q3_K":
+                            scale_low, scale_high = weight.scale_low, weight.scale_high
+                        elif format in ("Q4_K", "Q5_K"):
+                            scales, minima = weight.sc, weight.m
+                        elif format == "Q6_K":
+                            scales = weight.scales
+                        low = weight.ql if format == "Q6_K" else weight.q
+                        if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
+                            high = weight.qh
+                        elif format == "Q3_K":
+                            high = weight.hmask
+                        codes = T.alloc_local((elements,), panel_dtype)
+                        for k in T.Parallel(elements):
+                            if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
+                                code = T.cast(low[k], "int16") | (T.cast(high[k], "int16") << T.int16(4))
+                                code -= 16 if format == "Q5_0" else 32 if format == "Q6_K" else 0
+                            elif format == "Q3_K":
+                                code = T.cast(low[k], "int16") + T.cast(high[k], "int16") * 4 - 4
+                            elif format == "IQ4_NL":
+                                code = T.cast(table[T.cast(low[k], "uint8")], "int16")
+                            else:
+                                code = T.cast(low[k], "int16") - (8 if format == "Q4_0" else 1 if format == "TQ2_0" else 0)
+                            group = T.cast(k, "uint32") // T.uint32(width)
+                            if format == "Q2_K":
+                                coefficient = T.cast(metadata[group] & T.uint8(15), "int16")
+                            elif format == "Q3_K":
+                                coefficient = (T.cast(scale_low[group], "int16") | (T.cast(scale_high[group], "int16") << T.int16(4))) - 32
+                            elif format in ("Q4_K", "Q5_K", "Q6_K"):
+                                coefficient = T.cast(scales[group], "int16")
+                            else:
+                                coefficient = 1
+                            codes[k] = T.cast(code * coefficient + bias, panel_dtype)
+                        T.copy(codes, panel[c, :])
+                        if k_affine:
+                            for g in T.Parallel(16):
+                                minimum_values[c, g] = T.cast(metadata[g] >> T.uint8(4), "int16") if format == "Q2_K" else T.cast(minima[T.cast(g, "uint32") // T.uint32(2)], "int16")
+                    weight_values = T.load(panel)
                     with T.level.rows(M, group=rows) as row:
                         activation_values = T.load(packed_activation[row, :])
                         products = T.alloc_local((rows, columns), "int32")

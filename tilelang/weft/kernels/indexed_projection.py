@@ -216,14 +216,15 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
     use (column, row). All panels are invocation-local, including the final
     transpose. Group widths and numerical partials remain author declarations.
     """
-    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
+    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS", "Q4_K", "Q5_K")
+    affine = format in ("Q4_K", "Q5_K")
     assert M > 0 and N > 0 and K > 0 and M % rows == N % columns == K % 256 == 0
     encoding = getattr(F, format)
     weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
     groups = 16 if format == "IQ2_S" else 8
     words = 64 // groups
     payload = 8 if format == "IQ2_S" else 4
-    entries = {"IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 0}[format]
+    entries = {"IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 0, "Q4_K": 0, "Q5_K": 0}[format]
     grid_encoding = F.I8X8 if payload == 8 else F.I8X4
 
     @T.prim_func
@@ -242,11 +243,14 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
         Grid: T.Tensor((entries * payload,), "int8"),
         Signs: T.Tensor((1024 if format == "IQ3_XXS" else 0,), "int8"),
         Codebook: T.Tensor((16 if format == "IQ4_XS" else 0,), "int8"),
+        Minima: T.Tensor((groups, columns) if affine else (0,), "int32"),
+        MinimumScale: T.Tensor((columns,) if affine else (0,), "float32"),
     ):
         T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Codebook": "input",
                      "Signs": "input", "Quantized": "quantized", "Output": "output", "Panel": "panel",
                      "PackedActivation": "activation", "Scales": "scales", "BlockScale": "block_scale",
-                     "Sums": "sums", "ActivationScale": "activation_scale", "Transposed": "transposed"}})
+                     "Sums": "sums", "ActivationScale": "activation_scale", "Transposed": "transposed",
+                     "Minima": "minima", "MinimumScale": "minimum_scale"}})
         weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
         source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
         prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
@@ -255,12 +259,15 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
         packed = T.view(PackedActivation, shape=(64, M, 4), axes=("ak", "m", "byte"), abi=True)
         scales = T.view(Scales, shape=(groups, columns), axes=("g", "n"), abi=True)
         block_scale = T.view(BlockScale, shape=(columns,), axes=("n",), abi=True)
+        if affine:
+            minima = T.view(Minima, shape=(groups, columns), axes=("g", "n"), abi=True)
+            minimum_scale = T.view(MinimumScale, shape=(columns,), axes=("n",), abi=True)
         sums = T.view(Sums, shape=(groups, M), axes=("g", "m"), abi=True)
         activation_scale = T.view(ActivationScale, shape=(M,), axes=("m",), abi=True)
         transposed = T.view(Transposed, shape=(N, M), axes=("n", "m"), abi=True)
         if format == "IQ4_XS":
             codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
-        else:
+        elif not affine:
             grid = T.view(Grid, shape=(entries, payload), encoding=grid_encoding, axes=("entry", "payload"), abi=True)
         if format == "IQ3_XXS":
             signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "payload"), abi=True)
@@ -292,7 +299,11 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                     for c in T.serial(columns):
                         w = T.load(weights[col, block][c, :])
                         q, d = w.q, w.d
-                        if format == "IQ4_XS":
+                        if affine:
+                            metadata, minimum, dmin = w.sc, w.m, w.dmin
+                            if format == "Q5_K":
+                                high = w.qh
+                        elif format == "IQ4_XS":
                             scale_low, scale_high = w.scales_l, w.scales_h
                         elif format != "IQ3_XXS":
                             high, sign_bits, metadata = w.qh, w.signs, w.scales
@@ -300,7 +311,9 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                             metadata = w.metadata
                         factors = T.alloc_local((groups,), "int32")
                         for g in T.Parallel(groups):
-                            if format == "IQ2_S":
+                            if affine:
+                                factors[g] = T.cast(metadata[g], "int32")
+                            elif format == "IQ2_S":
                                 factors[g] = T.cast((metadata[T.cast(g, "uint32") // T.uint32(2)] >> (T.cast(g, "uint32") % T.uint32(2) * T.uint32(4))) & T.uint8(15), "int32") * 2 + 1
                             elif format == "IQ3_XXS":
                                 factors[g] = T.cast(metadata[g] >> T.uint32(28), "int32") * 2 + 1
@@ -310,7 +323,18 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                                 factors[g] = T.cast(lower | (upper << T.uint8(4)), "int32") - 32
                             else:
                                 factors[g] = T.cast(metadata[g], "int32") * 2 + 1
-                        if format == "IQ4_XS":
+                        if affine:
+                            values = T.reshape(q, (groups, words, 4))
+                            if format == "Q5_K":
+                                upper_bits = T.reshape(high, (groups, words, 4))
+                            min_values = T.alloc_local((groups,), "int32")
+                            for g in T.Parallel(groups):
+                                min_values[g] = T.cast(minimum[g], "int32")
+                            T.copy(min_values, minima[:, c])
+                            min_scale = T.alloc_local((1,), "float32")
+                            min_scale[0] = T.cast(dmin[()], "float32")
+                            T.copy(min_scale, minimum_scale[c])
+                        elif format == "IQ4_XS":
                             decoded = T.load(table, at=q, bounds="in_bounds")
                             values = T.reshape(decoded, (groups, words, 4))
                         else:
@@ -342,7 +366,11 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                             sign_values = T.reshape(selected_signs, (groups, words, 4))
                         codes = T.alloc_local((groups, words, 4), "uint8")
                         for g, widx, p in T.Parallel(groups, words, 4):
-                            if format == "IQ4_XS":
+                            if affine:
+                                code = values[g, widx, p]
+                                if format == "Q5_K":
+                                    code = T.cast(code, "uint8") | (T.cast(upper_bits[g, widx, p], "uint8") << T.uint8(4))
+                            elif format == "IQ4_XS":
                                 code = values[g, widx, p]
                             elif format == "IQ3_XXS":
                                 value = values[g, widx, p]
@@ -351,15 +379,19 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                                 position = T.cast(g, "uint32") * T.uint32(words * 4) + T.cast(widx, "uint32") * T.uint32(4) + T.cast(p, "uint32")
                                 value = values[g, widx, p]
                                 code = T.if_then_else(sign_bits[position] != 0, -value, value)
-                            codes[g, widx, p] = T.cast(code, "uint8") + T.uint8(128)
+                            codes[g, widx, p] = T.cast(code, "uint8") if affine else T.cast(code, "uint8") + T.uint8(128)
                         T.copy(codes, panel[c, :, :, :])
                         T.copy(factors, scales[:, c])
                         scale = T.alloc_local((1,), "float32")
                         scale[0] = T.cast(d[()], "float32") * (0.125 if format == "IQ2_S" else 0.25 if format == "IQ3_XXS" else 1.0)
                         T.copy(scale, block_scale[c])
                     wd = T.load(block_scale)
+                    if affine:
+                        md = T.load(minimum_scale)
                     with T.level.rows(M, group=rows) as row:
                         integer = T.state((columns, rows), "int32", init=0)
+                        if affine:
+                            correction = T.state((columns, rows), "int32", init=0)
                         for g in T.serial(groups):
                             partial = T.alloc_local((columns, rows), "int32")
                             T.fill(partial, 0)
@@ -372,12 +404,20 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                                     partial[c, r] += products[c, r, 0]
                             factor = T.load(scales[g, :])
                             group_sums = T.load(sums[g, row])
+                            if affine:
+                                minimum = T.load(minima[g, :])
                             for c, r in T.Parallel(columns, rows):
-                                integer[c, r] += (partial[c, r] - T.int32(128) * group_sums[r]) * factor[c]
+                                if affine:
+                                    integer[c, r] += partial[c, r] * factor[c]
+                                    correction[c, r] += group_sums[r] * minimum[c]
+                                else:
+                                    integer[c, r] += (partial[c, r] - T.int32(128) * group_sums[r]) * factor[c]
                         xd, prior = T.load(activation_scale[row]), T.load(transposed[col, row])
                         result = T.alloc_local((columns, rows), "float32")
                         for c, r in T.Parallel(columns, rows):
                             result[c, r] = prior[c, r] + T.cast(integer[c, r], "float32") * (xd[r] * wd[c])
+                            if affine:
+                                result[c, r] -= T.cast(correction[c, r], "float32") * (xd[r] * md[c])
                         T.copy(result, transposed[col, row])
             with T.level.cols(N, group=columns) as col:
                 with T.level.rows(M, group=rows) as row:
