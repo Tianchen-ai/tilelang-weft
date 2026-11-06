@@ -37,14 +37,13 @@ def rms_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction_w
                             if k < active:
                                 partial[k] += value[k] * value[k]
                     T.reduce_sum(partial, total, dim=0)
-                factor = T.alloc_local((1,), "float32")
-                factor[0] = T.rsqrt(total[0] / N + epsilon)
+                factor = T.alloc_var("float32", init=T.rsqrt(total[0] / N + epsilon))
                 with T.level.blocks(N, extent=block) as part:
                     saved = T.load(rows[row, part])
                     weight = T.load(weights[part])
                     result = T.alloc_local((block,), "float32")
                     for k in T.Parallel(block):
-                        result[k] = saved[k] * factor[0] * weight[k]
+                        result[k] = saved[k] * factor * weight[k]
                     T.copy(result, output[row, part])
 
     return main
@@ -75,8 +74,6 @@ def layer_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction
                 row = base + local_row
                 total = T.alloc_local((1,), "float32")
                 variance = T.alloc_local((1,), "float32")
-                mean = T.alloc_local((1,), "float32")
-                factor = T.alloc_local((1,), "float32")
                 if reduction_width == N:
                     values = T.load(rows[row, :])
                     T.reduce_sum(values, total, dim=0)
@@ -90,11 +87,12 @@ def layer_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction
                             if k < active:
                                 partial[k] += value[k]
                     T.reduce_sum(partial, total, dim=0)
-                mean[0] = total[0] / N
+                mean = T.alloc_var("float32", init=total[0] / N)
                 square = T.alloc_local((reduction_width,), "float32")
                 if reduction_width == N:
+                    centered_values = T.load(rows[row, :])
                     for k in T.Parallel(N):
-                        centered = values[k] - mean[0]
+                        centered = centered_values[k] - mean
                         square[k] = centered * centered
                 else:
                     T.fill(square, 0)
@@ -103,16 +101,16 @@ def layer_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction
                         active = T.extent(rows[row, part], axis=0)
                         for k in T.Parallel(reduction_width):
                             if k < active:
-                                centered = value[k] - mean[0]
+                                centered = value[k] - mean
                                 square[k] += centered * centered
                 T.reduce_sum(square, variance, dim=0)
-                factor[0] = T.rsqrt(variance[0] / N + epsilon)
+                factor = T.alloc_var("float32", init=T.rsqrt(variance[0] / N + epsilon))
                 with T.level.blocks(N, extent=block) as part:
                     value = T.load(rows[row, part])
                     weight, bias = T.load(weights[part]), T.load(biases[part])
                     result = T.alloc_local((block,), "float32")
                     for k in T.Parallel(block):
-                        result[k] = (value[k] - mean[0]) * factor[0] * weight[k] + bias[k]
+                        result[k] = (value[k] - mean) * factor * weight[k] + bias[k]
                     T.copy(result, output[row, part])
 
     return main

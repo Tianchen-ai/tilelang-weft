@@ -145,3 +145,21 @@ Triton–Weft. Its full suites select ordinary factories from this package.
 shows a complete packed call with explicit input bytes. `T.load(value, at=point)`
 projects a numeric field along its existing named Level axis; compressed fields
 retain the Encoding's record/group relationship.
+
+Short-record quantizers accept `records=1/2/4/8`. A cohort exposes separate
+record and payload axes, so the extrema and encoded scales are computed once
+per record while the quantized lanes share their inverse. The public Tensor
+shape and serialized Encoding remain unchanged. Integer-field dequantizers
+use the same finite cohorts; `rows=1` traverses contiguous storage directly,
+while larger row groups retain the explicit row reuse program.
+
+`decoding.ternary_digits` is the shared author macro for the positive radix-3
+codes used by row dots, dequantization and invocation panels. It spells the
+byte-width wrap and the five constant powers in the DSL. `panel_projection`
+consumes these codes in its ordinary preparation and contraction program;
+preparing the panels remains part of the measured call.
+
+`row_partials.k_projection` reuses the grouped Q2/Q3/Q4/Q5/Q6 dot body after
+in-call Q8_K quantization. The indexed projection wrappers likewise reuse the
+same integer partials as their row-dot programs. Source parameters choose
+column cohorts and record windows; target passes choose local instructions.

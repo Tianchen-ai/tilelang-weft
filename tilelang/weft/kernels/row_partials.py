@@ -148,17 +148,28 @@ def indexed_subgroups_rows(weights, values, output, grid, M, K, format, rows, wi
                 integer = T.alloc_local((rows, 16), "int32")
                 T.fill(integer, 0)
                 for part in T.unroll(windows):
+                    entry_indices = T.alloc_local((rows, entries), "uint16")
+                    entry_factors = T.alloc_local((rows, entries), "int16")
                     indices = T.alloc_local((rows, entries, payload), "uint16")
                     inputs = T.alloc_local((rows, entries, payload), "int8")
                     codes = T.alloc_local((rows, entries, payload), "uint6")
-                    for r, e, p in T.Parallel(rows, entries, payload):
+                    for r, e in T.Parallel(rows, entries):
                         code = T.uint16(part * entries) + T.cast(e, "uint16")
                         if format == "IQ2_S":
                             upper = (high[r, code // T.uint16(4)] >> (code % T.uint16(4) * T.uint16(2))) & T.uint8(3)
                             index = T.cast(quantized[r, code], "uint16") | (T.cast(upper, "uint16") << T.uint16(8))
                         else:
                             index = T.cast(quantized[r, code], "uint16") | (T.cast(high[r, code], "uint16") << T.uint16(8))
-                        indices[r, e, p] = index * T.uint16(payload) + T.cast(p, "uint16")
+                        entry_indices[r, e] = index
+                        if format == "IQ2_S":
+                            group = T.uint16(part * entries // 2) + T.cast(e, "uint16") // T.uint16(2)
+                            metadata_value = scales[r, group // T.uint16(2)]
+                            scale = (metadata_value >> (group % T.uint16(2) * T.uint16(4))) & T.uint8(15)
+                        else:
+                            scale = scales[r, T.uint16(part * entries // 8) + T.cast(e, "uint16") // T.uint16(8)]
+                        entry_factors[r, e] = T.cast(scale, "int16") * T.int16(2) + T.int16(1)
+                    for r, e, p in T.Parallel(rows, entries, payload):
+                        indices[r, e, p] = entry_indices[r, e] * T.uint16(payload) + T.cast(p, "uint16")
                     selected = T.load(grid.values, at=indices, bounds="in_bounds")
                     for r, e, p in T.Parallel(rows, entries, payload):
                         position = T.uint16(part * window_elements) + T.cast(e, "uint16") * T.uint16(payload) + T.cast(p, "uint16")
@@ -166,24 +177,17 @@ def indexed_subgroups_rows(weights, values, output, grid, M, K, format, rows, wi
                         negative = signs[r, position] != 0
                         codes[r, e, p] = T.cast(selected[r, e, p], "uint6")
                         inputs[r, e, p] = T.if_then_else(negative, -value, value)
-                    scaled = T.alloc_local((rows, entries, payload // 4), "int32")
-                    products = T.alloc_local((rows, entries, payload // 2), "int16")
-                    factors = T.alloc_local((rows, entries, payload // 2), "int16")
-                    T.mac_groups(codes, inputs, products, n=2, into="int16", over="payload")
-                    for r, e, p in T.Parallel(rows, entries, payload // 2):
-                        if format == "IQ2_S":
-                            group = T.uint16(part * entries // 2) + T.cast(e, "uint16") // T.uint16(2)
-                            metadata_value = scales[r, group // T.uint16(2)]
-                            scale = (metadata_value >> (group % T.uint16(2) * T.uint16(4))) & T.uint8(15)
-                        else:
-                            scale = scales[r, T.uint16(part * entries // 8) + T.cast(e, "uint16") // T.uint16(8)]
-                        factors[r, e, p] = T.cast(scale, "int16") * T.int16(2) + T.int16(1)
-                    T.mac_groups(products, factors, scaled, n=2, into="int32", over="payload")
-                    grouped = T.alloc_local((rows, window_elements // 64, 16), "int32")
+                    flat_codes = T.reshape(codes, (rows, window_elements))
+                    flat_inputs = T.reshape(inputs, (rows, window_elements))
+                    scaled = T.alloc_local((rows, window_elements // 4), "int32")
+                    products = T.alloc_local((rows, window_elements // 2), "int16")
+                    factors = T.alloc_local((rows, window_elements // 2), "int16")
+                    T.mac_groups(flat_codes, flat_inputs, products, n=2, into="int16", over="pair")
+                    for r, p in T.Parallel(rows, window_elements // 2):
+                        factors[r, p] = entry_factors[r, T.cast(p, "uint16") // T.uint16(payload // 2)]
+                    T.mac_groups(products, factors, scaled, n=2, into="int32", over="pair")
+                    grouped = T.reshape(scaled, (rows, window_elements // 64, 16))
                     reduced = T.alloc_local((rows, 16), "int32")
-                    for r, g, p in T.Parallel(rows, window_elements // 64, 16):
-                        position = T.cast(g, "uint16") * T.uint16(16) + T.cast(p, "uint16")
-                        grouped[r, g, p] = scaled[r, position // T.uint16(payload // 4), position % T.uint16(payload // 4)]
                     T.reduce_sum(grouped, reduced, dim=1)
                     for r, p in T.Parallel(rows, 16):
                         integer[r, p] += reduced[r, p]
@@ -744,10 +748,11 @@ def k_group_rows(weights, values, output, M, K, format, rows, lanes, code_type, 
 @tilelang.jit(target="weft")
 def k_projection(M, N, K, format="Q4_K", rows=4, lanes=16, extreme_policy="first", inverse_policy="reciprocal"):
     """Complete projection, including activation quantization in this call."""
-    assert format in ("Q4_K", "Q5_K", "Q6_K") and lanes in (8, 16) and K > 0 and K % 256 == 0
+    assert format in ("Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K") and lanes in (8, 16) and K > 0 and K % 256 == 0
+    assert format not in ("Q2_K", "Q3_K") or lanes == 16
     encoding = getattr(F, format)
     weight_bytes, activation_bytes = K // 256 * (encoding.schema.storage_bits // 8), K // 256 * 292
-    code_type = "uint4" if format == "Q4_K" else "uint6"
+    code_type = "uint6" if format in ("Q5_K", "Q6_K") else "uint4"
 
     @T.prim_func
     def main(

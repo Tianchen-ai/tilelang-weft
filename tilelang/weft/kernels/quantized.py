@@ -56,33 +56,65 @@ def q6_k_q8_k(M, K, rows=1):
 
 
 @tilelang.jit(target="weft")
-def dequantize(M, K, format="Q4_0", rows=4, chunk=32):
+def dequantize(M, K, format="Q4_0", rows=4, chunk=32, records=1, cache_hint="normal"):
     if format not in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K", "TQ2_0"):
         raise ValueError(f"no integer-field author dequantizer for {format}")
     encoding = getattr(F, format)
     block = encoding.schema.elements
-    assert chunk in (32, 64, 128, 256) and block % chunk == 0
+    assert records in (1, 2, 4, 8) and (records == 1 or block == 32)
+    assert chunk in (4, 8, 16, 32, 64, 128, 256) and block % chunk == 0
     record_bytes = encoding.schema.storage_bits // 8
-    assert K > 0 and K % block == 0
+    assert K > 0 and K % (block * records) == 0
 
     @T.prim_func
     def main(Weights: T.Tensor((M, K // block * record_bytes), "uint8"), Output: T.Tensor((M, K), "float32")):
         T.func_attr({"weft.alias_groups": {"Weights": "input", "Output": "output"}})
-        wv = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
-        yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
+        if rows == 1:
+            wv = T.view(Weights, shape=(M * K,), encoding=encoding, axes=("k",))
+            yv = T.view(Output, shape=(M * K,), axes=("k",))
+        else:
+            wv = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+            yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
         with T.Kernel(1):
-            with T.level.rows(M, group=rows) as row:
-                with T.level.blocks(K, extent=block) as part:
-                    record = T.load(wv[row, part])
-                    if block > chunk:
+            if rows == 1:
+                with T.level.blocks(M * K, extent=block * records) as part:
+                    if format == "Q8_0" and records == 1:
+                        record = wv[part]
+                        scale = T.load(record.d)
                         for segment in T.unroll(block // chunk):
-                            values = T.alloc_local((rows, chunk), "float32")
-                            decode_dequantize(record, values, rows, format, block, 0, 0, 0, 0, 0, 0, offset=segment * chunk, width=chunk)
-                            T.copy(values, yv[row, part][:, segment * chunk : (segment + 1) * chunk])
+                            codes = T.load(record.q[segment * chunk : (segment + 1) * chunk])
+                            values = T.alloc_local((chunk,), "float32")
+                            for lane in T.Parallel(chunk):
+                                values[lane] = T.cast(codes[lane], "float32") * T.cast(scale[()], "float32")
+                            T.copy(values, yv[part][segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
+                    elif records > 1:
+                        record = T.reshape(T.load(wv[part]), (records, block), axes=("record", "k"))
+                        result = T.alloc_local((records, block), "float32")
+                        decode_dequantize(record, result, records, format, block, 0, 0, 0, 0, 0, 0)
+                        flattened = T.reshape(result, (records * block,))
+                        T.copy(flattened, yv[part], annotations={"cache_hint": cache_hint})
                     else:
-                        result = T.alloc_local((rows, block), "float32")
-                        decode_dequantize(record, result, rows, format, block, 0, 0, 0, 0, 0, 0)
-                        T.copy(result, yv[row, part])
+                        record = T.reshape(T.load(wv[part]), (1, block), axes=("record", "k"))
+                        for segment in T.unroll(block // chunk):
+                            values = T.alloc_local((1, chunk), "float32")
+                            decode_dequantize(record, values, 1, format, block, 0, 0, 0, 0, 0, 0,
+                                              offset=segment * chunk, width=chunk)
+                            T.copy(values[0, :], yv[part][segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
+            else:
+                with T.level.rows(M, group=rows) as row:
+                    with T.level.blocks(K, extent=block * records) as part:
+                        loaded = T.load(wv[row, part])
+                        if records > 1:
+                            record = T.reshape(loaded, (rows * records, block), axes=("record", "k"))
+                            result = T.alloc_local((rows * records, block), "float32")
+                            decode_dequantize(record, result, rows * records, format, block, 0, 0, 0, 0, 0, 0)
+                            flattened = T.reshape(result, (rows, block * records))
+                            T.copy(flattened, yv[row, part], annotations={"cache_hint": cache_hint})
+                        else:
+                            for segment in T.unroll(block // chunk):
+                                values = T.alloc_local((rows, chunk), "float32")
+                                decode_dequantize(loaded, values, rows, format, block, 0, 0, 0, 0, 0, 0, offset=segment * chunk, width=chunk)
+                                T.copy(values, yv[row, part][:, segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
 
     return main
 

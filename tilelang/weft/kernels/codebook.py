@@ -85,7 +85,7 @@ def iq2_s(M, K, rows=1):
 
 
 @tilelang.jit(target="weft")
-def iq2_indexed(M, K, format="IQ2_XS", rows=1, chunk=32):
+def iq2_indexed(M, K, format="IQ2_XS", rows=1, chunk=32, cache_hint="normal"):
     assert format in ("IQ2_XS", "IQ2_XXS") and K % 256 == 0
     assert chunk in (32, 64, 128, 256)
     encoding = getattr(F, format)
@@ -111,7 +111,7 @@ def iq2_indexed(M, K, format="IQ2_XS", rows=1, chunk=32):
                     for segment in T.unroll(256 // chunk):
                         values = T.alloc_local((rows, chunk), "float32")
                         decode_iq2_indexed(record, values, rows, format, 256, grid.values, signs.values, 0, 0, 0, 0, offset=segment * chunk, width=chunk)
-                        T.copy(values, yv[row, block][:, segment * chunk : (segment + 1) * chunk])
+                        T.copy(values, yv[row, block][:, segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
 
     return main
 
@@ -138,8 +138,8 @@ def iq3_s(M, K, rows=1):
 
 
 @tilelang.jit(target="weft")
-def iq3_xxs(M, K, rows=1):
-    assert K % 256 == 0
+def iq3_xxs(M, K, rows=1, chunk=32, cache_hint="normal"):
+    assert K % 256 == 0 and chunk in (32, 64, 128, 256)
 
     @T.prim_func
     def main(
@@ -151,14 +151,16 @@ def iq3_xxs(M, K, rows=1):
         T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Signs": "input", "Output": "output"}})
         wv = T.view(Weights, shape=(M, K), encoding=F.IQ3_XXS, axes=("m", "k"), abi=True)
         yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
+        grid = T.view(Grid, shape=(256, 4), encoding=F.I8X4, axes=("entry", "payload"), abi=True)
+        signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign_entry", "sign_payload"), abi=True)
         with T.Kernel(1):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=256) as block:
                     record = T.load(wv[row, block])
-                    for segment in T.unroll(8):
-                        chunk = T.alloc_local((rows, 32), "float32")
-                        decode_iq3_xxs(record, chunk, rows, "IQ3_XXS", 256, Grid, Signs, 0, 0, 0, 0, offset=segment * 32, width=32)
-                        T.copy(chunk, yv[row, block][:, segment * 32 : (segment + 1) * 32])
+                    for segment in T.unroll(256 // chunk):
+                        values = T.alloc_local((rows, chunk), "float32")
+                        decode_iq3_xxs(record, values, rows, "IQ3_XXS", 256, grid.values, signs.values, 0, 0, 0, 0, offset=segment * chunk, width=chunk)
+                        T.copy(values, yv[row, block][:, segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
 
     return main
 

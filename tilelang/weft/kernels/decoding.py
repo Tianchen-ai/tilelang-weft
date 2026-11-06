@@ -180,15 +180,30 @@ def decode_iq3_s(record, result, rows, format, elements, Grid, Signs, Codebook, 
 def decode_iq3_xxs(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None):
     width = elements if width is None else width
     (q, meta, d) = (record.q, record.metadata, record.d)
-    for r, lane in T.Parallel(rows, width):
-        k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
-        (entry, payload) = (k // 4, k % 4)
-        metadata = meta[r, entry // 8]
-        sign_index = metadata >> entry % 8 // 2 * 7 & 127
-        value = Grid[T.cast(q[r, entry], "uint32") * 4 + payload]
-        sign = Signs[sign_index * 8 + entry % 2 * 4 + payload]
-        scale = T.cast(d[r], "float32") * (0.5 + T.cast(metadata >> 28, "float32")) * 0.5
-        result[r, lane] = scale * T.cast(T.cast(value, "int32") * T.cast(sign, "int32"), "float32")
+    entries = width // 4
+    grid_entries = T.alloc_local((rows, entries), "uint32")
+    sign_entries = T.alloc_local((rows, entries), "uint32")
+    factors = T.alloc_local((rows, entries), "float32")
+    grid_indices = T.alloc_local((rows, entries, 4), "uint32")
+    sign_indices = T.alloc_local((rows, entries, 4), "uint32")
+    for r, local in T.Parallel(rows, entries):
+        entry = T.uint32(offset // 4) + T.cast(local, "uint32")
+        metadata = T.cast(meta[r, entry // T.uint32(8)], "uint32")
+        grid_entries[r, local] = T.cast(q[r, entry], "uint32")
+        sign_index = metadata >> (entry % T.uint32(8) // T.uint32(2) * T.uint32(7)) & T.uint32(127)
+        sign_entries[r, local] = sign_index * T.uint32(8) + entry % T.uint32(2) * T.uint32(4)
+        factors[r, local] = T.cast(d[r], "float32") * (0.5 + T.cast(metadata >> T.uint32(28), "float32")) * 0.5
+    for r, entry, payload in T.Parallel(rows, entries, 4):
+        grid_indices[r, entry, payload] = grid_entries[r, entry] * T.uint32(4) + T.cast(payload, "uint32")
+        sign_indices[r, entry, payload] = sign_entries[r, entry] + T.cast(payload, "uint32")
+    values = T.load(Grid, at=grid_indices, bounds="in_bounds")
+    signs = T.load(Signs, at=sign_indices, bounds="in_bounds")
+    decoded = T.alloc_local((rows, entries, 4), "float32")
+    for r, entry, payload in T.Parallel(rows, entries, 4):
+        decoded[r, entry, payload] = factors[r, entry] * T.cast(
+            T.cast(values[r, entry, payload], "int32") * T.cast(signs[r, entry, payload], "int32"), "float32")
+    flat = T.reshape(decoded, (rows, width))
+    T.copy(flat, result)
 
 
 @T.macro
@@ -217,22 +232,30 @@ def decode_fp4(record, result, rows, format, elements, Grid, Signs, Codebook, Sc
 
 
 @T.macro
+def ternary_digits(record, result, rows, width=256, offset=0, single=False):
+    """Positive radix-3 digits with an explicit byte-width product."""
+    q, high = record.q, record.qh
+    for r, lane in T.Parallel(rows, width):
+        k = T.int32(offset) + T.cast(lane, "int32")
+        index = T.if_then_else(k < 160, k % 32, 32 + k % 16)
+        packed = T.if_then_else(k < 240, q[(index,) if single else (r, index)],
+                               high[(k % 4,) if single else (r, k % 4)])
+        digit = T.if_then_else(k < 160, k // 32,
+                              T.if_then_else(k < 240, (k - 160) // 16, (k - 240) // 4))
+        power = T.if_then_else(digit == 0, T.uint8(1),
+                              T.if_then_else(digit == 1, T.uint8(3),
+                                             T.if_then_else(digit == 2, T.uint8(9),
+                                                            T.if_then_else(digit == 3, T.uint8(27), T.uint8(81)))))
+        wrapped = T.cast(power * packed, "uint8")
+        result[r, lane] = T.cast(T.cast(wrapped, "uint16") * T.uint16(3) >> T.uint16(8), "uint2")
+
+
+@T.macro
 def decode_tq1_0(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None):
     width = elements if width is None else width
-    (q, high, d) = (record.q, record.qh, record.d)
+    codes = T.alloc_local((rows, width), "uint2")
+    ternary_digits(record, codes, rows, width, offset)
+    d = record.d
     for r, lane in T.Parallel(rows, width):
-        k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
-        digit = T.alloc_var("int32", 0)
-        packed = T.alloc_var("uint8", 0)
-        if k < 160:
-            digit = k // 32
-            packed = q[r, k % 32]
-        elif k < 240:
-            digit = (k - 160) // 16
-            packed = q[r, 32 + (k - 160) % 16]
-        else:
-            digit = (k - 240) // 4
-            packed = high[r, (k - 240) % 4]
-        wrapped = T.cast(T.cast(Powers[digit], "uint8") * packed, "uint8")
-        decoded = T.cast(T.cast(wrapped, "uint16") * 3 >> 8, "int32") - 1
+        decoded = T.cast(codes[r, lane], "int32") - 1
         result[r, lane] = T.cast(d[r], "float32") * T.cast(decoded, "float32")

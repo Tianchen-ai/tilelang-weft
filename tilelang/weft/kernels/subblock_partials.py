@@ -4,6 +4,7 @@ import tilelang
 from tilelang.weft import language as T
 from . import ggml_formats as F
 from .preparation import quantize_rows
+from .decoding import ternary_digits
 
 
 @tilelang.jit(target="weft")
@@ -505,28 +506,14 @@ def ternary_rows(weights, values, output, Powers, M, K, format, rows, records, a
                 w = T.load(weights[row, block][:, part * 256 : (part + 1) * 256])
                 x = T.load(values[block][part * 256 : (part + 1) * 256])
                 q, d, activation, ds, sums = w.q, w.d, x.q, x.ds, x.bsum
-                if packed:
-                    high = w.qh
                 codes = T.alloc_local((rows, 256), "uint2")
                 products = T.alloc_local((rows, 64), "int32")
                 grouped = T.alloc_local((rows, 4, 16), "int32")
                 partial = T.alloc_local((rows, 16), "int32")
-                for r, k in T.Parallel(rows, 256):
-                    if packed:
-                        digit = T.alloc_var("int32", 0)
-                        byte = T.alloc_var("uint8", 0)
-                        if k < 160:
-                            digit = k // 32
-                            byte = q[r, k % 32]
-                        elif k < 240:
-                            digit = (k - 160) // 16
-                            byte = q[r, 32 + k % 16]
-                        else:
-                            digit = (k - 240) // 4
-                            byte = high[r, k % 4]
-                        wrapped = T.cast(T.cast(Powers[digit], "uint8") * byte, "uint8")
-                        codes[r, k] = T.cast(T.cast(wrapped, "uint16") * T.uint16(3) >> T.uint16(8), "uint2")
-                    else:
+                if packed:
+                    ternary_digits(w, codes, rows)
+                else:
+                    for r, k in T.Parallel(rows, 256):
                         codes[r, k] = q[r, k]
                 T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
                 for r, g, p in T.Parallel(rows, 4, 16):

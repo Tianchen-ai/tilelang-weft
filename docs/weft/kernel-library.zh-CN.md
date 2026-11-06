@@ -119,3 +119,16 @@ payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权�
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
 公开性能结果为 **测试中 / Under evaluation**。
+
+短 record 量化器支持 `records=1/2/4/8`。一个 cohort 显式区分 record 与 payload
+轴，每条 record 的极值和编码 scale 只计算一次，其量化 lanes 共享 inverse。
+公开 Tensor shape 和序列化 Encoding 保持不变。整数 field 反量化复用同一有限
+cohort；`rows=1` 直接遍历连续存储，更大的 row group 保留作者声明的跨行复用。
+
+`decoding.ternary_digits` 是行 dot、反量化和调用内面板共用的 radix-3 正数码宏。
+字节位宽回绕与五个常量幂直接写在 DSL 中。`panel_projection` 在普通准备与
+contraction 程序中消费这些码，面板准备仍计入调用耗时。
+
+`row_partials.k_projection` 在调用内完成 Q8_K 量化后，复用 Q2/Q3/Q4/Q5/Q6
+分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
+源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。

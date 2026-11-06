@@ -1,6 +1,7 @@
 """Packed author programs with explicit integer partial and scale boundaries."""
 
 from tilelang.weft import language as T
+from .decoding import ternary_digits
 
 
 @T.macro
@@ -241,23 +242,13 @@ def scaled_lookup(weight, activation, total, rows, format, Grid, Signs, Codebook
 
 @T.macro
 def ternary(weight, activation, total, rows, Powers):
-    q, high, d, x, xd = weight.q, weight.qh, weight.d, activation.q, activation.ds
+    d, x, xd = weight.d, activation.q, activation.ds
+    digits = T.alloc_local((rows, 256), "uint2")
+    ternary_digits(weight, digits, rows)
     codes = T.alloc_local((rows, 256), "int8")
     products = T.alloc_local((rows,), "int32")
     for r, k in T.Parallel(rows, 256):
-        digit = T.alloc_var("int32", 0)
-        packed = T.alloc_var("uint8", 0)
-        if k < 160:
-            digit = k // 32
-            packed = q[r, k % 32]
-        elif k < 240:
-            digit = (k - 160) // 16
-            packed = q[r, 32 + (k - 160) % 16]
-        else:
-            digit = (k - 240) // 4
-            packed = high[r, (k - 240) % 4]
-        wrapped = T.cast(T.cast(Powers[digit], "uint8") * packed, "uint8")
-        codes[r, k] = T.cast(T.cast(wrapped, "uint16") * 3 >> 8, "int8") - 1
+        codes[r, k] = T.cast(digits[r, k], "int8") - T.int8(1)
     T.reduce_dot(codes, x, products, over="k", acc_dtype="int32", engine="vector")
     for r in T.Parallel(rows):
         total[r] += T.cast(products[r], "float32") * (T.cast(d[r], "float32") * xd[()])

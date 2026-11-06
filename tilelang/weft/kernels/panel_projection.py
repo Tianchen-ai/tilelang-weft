@@ -4,6 +4,7 @@ import tilelang
 from tilelang.weft import language as T
 from . import ggml_formats as F
 from .preparation import quantize_rows
+from .decoding import ternary_digits
 
 
 @tilelang.jit(target="weft")
@@ -11,7 +12,7 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                engine="auto", extreme_policy="first", inverse_policy="direct"):
     """Decode each record once; retain integer groups and all preparation in-call."""
     assert format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL",
-                      "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ2_0")
+                      "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ1_0", "TQ2_0")
     assert M > 0 and N > 0 and M % rows == N % columns == 0
     encoding = getattr(F, format)
     elements = encoding.schema.elements
@@ -25,7 +26,7 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
     width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
     panel_dtype = "int16" if format in ("Q4_K", "Q5_K", "Q6_K") else "uint8"
     bias = {"Q4_0": 8, "Q5_0": 16, "Q8_0": 128, "IQ4_NL": 128,
-            "Q3_K": 124, "TQ2_0": 1}.get(format, 0)
+            "Q3_K": 124, "TQ1_0": 1, "TQ2_0": 1}.get(format, 0)
 
     @T.prim_func
     def main(
@@ -99,6 +100,9 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                             high = weight.qh
                         elif format == "Q3_K":
                             high = weight.hmask
+                        if format == "TQ1_0":
+                            digits = T.alloc_local((1, elements), "uint2")
+                            ternary_digits(weight, digits, 1, single=True)
                         codes = T.alloc_local((elements,), panel_dtype)
                         for k in T.Parallel(elements):
                             if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
@@ -108,6 +112,8 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                                 code = T.cast(low[k], "int16") + T.cast(high[k], "int16") * 4 - 4
                             elif format == "IQ4_NL":
                                 code = T.cast(table[T.cast(low[k], "uint8")], "int16")
+                            elif format == "TQ1_0":
+                                code = T.cast(digits[0, k], "int16") - 1
                             else:
                                 code = T.cast(low[k], "int16") - (8 if format == "Q4_0" else 1 if format == "TQ2_0" else 0)
                             group = T.cast(k, "uint32") // T.uint32(width)

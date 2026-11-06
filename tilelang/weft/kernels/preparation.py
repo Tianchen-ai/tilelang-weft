@@ -54,7 +54,7 @@ def quantize_k_record(value, source, output, part, extreme_policy, chunk):
             with T.level.subtiles(window, extent=16) as group:
                 selected = T.load(q, at=group)
                 wide = T.alloc_local((16,), "int16")
-                total = T.alloc_local((1,), "int16")
+                total = T.alloc_local((), "int16")
                 for i in T.Parallel(16):
                     wide[i] = T.cast(selected[i], "int16")
                 T.reduce_sum(wide, total, dim=0)
@@ -97,20 +97,59 @@ def quantize_rows(xv, yv, M, K, format, elements, extreme_policy, inverse_policy
 
 
 @tilelang.jit(target="weft")
-def quantize(M, K, format="Q8_0", extreme_policy="first", inverse_policy="reciprocal", rounding="dynamic", chunk=64):
+def quantize(M, K, format="Q8_0", extreme_policy="first", inverse_policy="reciprocal", rounding="dynamic", chunk=64, records=1):
     assert format in ("Q8_0", "Q8_1", "Q8_K")
     assert chunk in (32, 64, 128, 256)
+    assert records in (1, 2, 4, 8) and (records == 1 or format != "Q8_K")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
     record_bytes = encoding.schema.storage_bits // 8
-    assert K > 0 and K % elements == 0
+    assert K > 0 and K % (elements * records) == 0
 
     @T.prim_func
     def main(X: T.Tensor((M, K), "float32"), Output: T.Tensor((M, K // elements * record_bytes), "uint8")):
         T.func_attr({"tir.noalias": True})
-        xv = T.view(X, shape=(M, K), axes=("m", "k"), abi=True)
-        yv = T.view(Output, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        if records == 1:
+            xv = T.view(X, shape=(M, K), axes=("m", "k"), abi=True)
+            yv = T.view(Output, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        else:
+            xv = T.view(X, shape=(M, K // elements, elements), axes=("m", "record", "k"))
+            yv = T.view(Output, shape=(M, K // elements, elements), encoding=encoding, axes=("m", "record", "k"))
         with T.Kernel(1):
-            quantize_rows(xv, yv, M, K, format, elements, extreme_policy, inverse_policy, rounding, chunk)
+            if records == 1:
+                quantize_rows(xv, yv, M, K, format, elements, extreme_policy, inverse_policy, rounding, chunk)
+            else:
+                for row in T.serial(M):
+                    with T.level.rows(K // elements, group=records, axis="record") as cohort:
+                        values = T.load(xv[row, cohort, :])
+                        absolute = T.alloc_local((records, elements), "float32")
+                        maximum = T.alloc_local((records,), "float32")
+                        scale = T.alloc_local((records,), "float32")
+                        inverse = T.alloc_local((records,), "float32")
+                        q = T.alloc_local((records, elements), "int8")
+                        for record, lane in T.Parallel(records, elements):
+                            absolute[record, lane] = T.abs(values[record, lane])
+                        T.reduce_max(absolute, maximum, dim=1)
+                        for record in T.Parallel(records):
+                            scale[record] = maximum[record] / 127.0
+                            denominator = maximum[record] if inverse_policy == "direct" else scale[record]
+                            safe = T.if_then_else(denominator != 0, denominator, 1.0)
+                            inverse[record] = T.if_then_else(denominator != 0, (127.0 if inverse_policy == "direct" else 1.0) / safe, 0.0)
+                        for record, lane in T.Parallel(records, elements):
+                            q[record, lane] = T.narrow(values[record, lane] * inverse[record], "int8", rounding=rounding, saturation=False)
+                        for record in T.unroll(records):
+                            T.copy(q[record, :], yv[row, cohort, :][record, :].q)
+                            T.copy(scale[record], yv[row, cohort, :][record, :].d)
+                        if format == "Q8_1":
+                            wide = T.alloc_local((records, elements), "int32")
+                            total = T.alloc_local((records,), "int32")
+                            scaled = T.alloc_local((records,), "float32")
+                            for record, lane in T.Parallel(records, elements):
+                                wide[record, lane] = T.cast(q[record, lane], "int32")
+                            T.reduce_sum(wide, total, dim=1)
+                            for record in T.Parallel(records):
+                                scaled[record] = T.cast(total[record], "float32") * scale[record]
+                            for record in T.unroll(records):
+                                T.copy(scaled[record], yv[row, cohort, :][record, :].s)
 
     return main
