@@ -1,0 +1,148 @@
+"""Complete packed projections with invocation-local, shared integer panels."""
+
+import tilelang
+from tilelang.weft import language as T
+from . import ggml_formats as F
+from .preparation import quantize_rows
+
+
+@tilelang.jit(target="weft")
+def projection(M, N, K, format="Q2_K", rows=16, columns=16,
+               engine="auto", extreme_policy="first", inverse_policy="direct"):
+    """Decode each record once; retain integer groups and all preparation in-call."""
+    assert format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL",
+                      "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ2_0")
+    assert M > 0 and N > 0 and M % rows == N % columns == 0
+    encoding = getattr(F, format)
+    elements = encoding.schema.elements
+    assert K > 0 and K % elements == 0
+    short_affine = format in ("Q4_1", "Q5_1")
+    k_affine = format in ("Q2_K", "Q4_K", "Q5_K")
+    activation_format = "Q8_1" if short_affine else "Q8_0" if elements == 32 else "Q8_K"
+    partner = getattr(F, activation_format)
+    weight_bytes = K // elements * (encoding.schema.storage_bits // 8)
+    activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
+    width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
+    panel_dtype = "int16" if format in ("Q4_K", "Q5_K", "Q6_K") else "uint8"
+    bias = {"Q4_0": 8, "Q5_0": 16, "Q8_0": 128, "IQ4_NL": 128,
+            "Q3_K": 124, "TQ2_0": 1}.get(format, 0)
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, weight_bytes), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, activation_bytes), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Panel: T.Tensor((columns, elements), panel_dtype),
+        PackedActivation: T.Tensor((M, elements), "int8"),
+        ActivationSums: T.Tensor((M,) if bias else (0,), "int32"),
+        Codebook: T.Tensor((16 if format == "IQ4_NL" else 0,), "int8"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Quantized": "workspace", "Output": "output", "Codebook": "input",
+                     "Panel": "weights", "PackedActivation": "activation", "ActivationSums": "sums"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=partner, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        panel = T.view(Panel, shape=(columns, elements), axes=("n", "k"), abi=True)
+        packed_activation = T.view(PackedActivation, shape=(M, elements), axes=("m", "k"), abi=True)
+        if bias:
+            activation_sums = T.view(ActivationSums, shape=(M,), axes=("m",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, activation_format, partner.schema.elements,
+                          extreme_policy, inverse_policy, "rne" if elements == 256 else "dynamic", 64)
+            if format == "IQ4_NL":
+                table = T.alloc_local((16,), "int8")
+                T.copy(Codebook, table)
+            first = T.alloc_local((1,), "bool")
+            first[0] = True
+            with T.level.blocks(K, extent=elements) as block:
+                for m in T.serial(M):
+                    activation_codes = T.load(prepared[m, block].q)
+                    T.copy(activation_codes, packed_activation[m, :])
+                    if bias:
+                        stored_sums = T.load(prepared[m, block].bsum) if elements == 256 else activation_codes
+                        widened = T.alloc_local((16 if elements == 256 else 32,), "int32")
+                        total_sum = T.alloc_local((1,), "int32")
+                        for k in T.Parallel(16 if elements == 256 else 32):
+                            widened[k] = T.cast(stored_sums[k], "int32")
+                        T.reduce_sum(widened, total_sum, dim=0)
+                        T.copy(total_sum, activation_sums[m])
+                with T.level.cols(N, group=columns) as col:
+                    weight = weights[col, block]
+                    wd = T.load(weight.d)
+                    if short_affine:
+                        wm = T.load(weight.m)
+                    if k_affine:
+                        dmin = T.load(weight.dmin)
+                    if format == "Q2_K":
+                        metadata = T.load(weight.scales)
+                    elif format == "Q3_K":
+                        scale_low, scale_high = T.load(weight.scale_low), T.load(weight.scale_high)
+                    elif format in ("Q4_K", "Q5_K"):
+                        scales, minima = T.load(weight.sc), T.load(weight.m)
+                    elif format == "Q6_K":
+                        scales = T.load(weight.scales)
+                    low = T.load(weight.ql if format == "Q6_K" else weight.q)
+                    if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
+                        high = T.load(weight.qh)
+                    elif format == "Q3_K":
+                        high = T.load(weight.hmask)
+                    codes = T.alloc_local((columns, elements), panel_dtype)
+                    for c, k in T.Parallel(columns, elements):
+                        if format in ("Q5_0", "Q5_1", "Q5_K", "Q6_K"):
+                            code = T.cast(low[c, k], "int16") | (T.cast(high[c, k], "int16") << T.int16(4))
+                            code -= 16 if format == "Q5_0" else 32 if format == "Q6_K" else 0
+                        elif format == "Q3_K":
+                            code = T.cast(low[c, k], "int16") + T.cast(high[c, k], "int16") * 4 - 4
+                        elif format == "IQ4_NL":
+                            code = T.cast(table[T.cast(low[c, k], "uint8")], "int16")
+                        else:
+                            code = T.cast(low[c, k], "int16") - (8 if format == "Q4_0" else 1 if format == "TQ2_0" else 0)
+                        group = T.cast(k, "uint32") // T.uint32(width)
+                        if format == "Q2_K":
+                            coefficient = T.cast(metadata[c, group] & T.uint8(15), "int16")
+                        elif format == "Q3_K":
+                            coefficient = (T.cast(scale_low[c, group], "int16") | (T.cast(scale_high[c, group], "int16") << T.int16(4))) - 32
+                        elif format in ("Q4_K", "Q5_K", "Q6_K"):
+                            coefficient = T.cast(scales[c, group], "int16")
+                        else:
+                            coefficient = 1
+                        codes[c, k] = T.cast(code * coefficient + bias, panel_dtype)
+                    T.copy(codes, panel)
+                    weight_values = T.load(panel)
+                    if k_affine:
+                        minimum_values = T.alloc_local((columns, 16), "int16")
+                        for c, g in T.Parallel(columns, 16):
+                            minimum_values[c, g] = T.cast(metadata[c, g] >> T.uint8(4), "int16") if format == "Q2_K" else T.cast(minima[c, T.cast(g, "uint32") // T.uint32(2)], "int16")
+                    with T.level.rows(M, group=rows) as row:
+                        activation_values = T.load(packed_activation[row, :])
+                        products = T.alloc_local((rows, columns), "int32")
+                        T.reduce_dot(activation_values, weight_values, products, over="k", acc_dtype="int32", engine=engine)
+                        activation = prepared[row, block]
+                        xd = T.load(activation.d if elements == 32 else activation.ds)
+                        if bias:
+                            sums = T.load(activation_sums[row])
+                        if k_affine:
+                            block_sums = T.load(activation.bsum)
+                            correction = T.alloc_local((rows, columns), "int32")
+                            T.reduce_dot(block_sums, minimum_values, correction, over="k", acc_dtype="int32", engine="vector")
+                        elif short_affine:
+                            xs = T.load(activation.s)
+                        result = T.alloc_local((rows, columns), "float32")
+                        for r, c in T.Parallel(rows, columns):
+                            integer = products[r, c] - bias * sums[r] if bias else products[r, c]
+                            result[r, c] = T.cast(integer, "float32") * (T.cast(wd[c], "float32") * T.cast(xd[r], "float32"))
+                            if k_affine:
+                                result[r, c] -= T.cast(correction[r, c], "float32") * (T.cast(dmin[c], "float32") * xd[r])
+                            elif short_affine:
+                                result[r, c] += T.cast(wm[c], "float32") * T.cast(xs[r], "float32")
+                        if not first[0]:
+                            previous = T.load(output[row, col])
+                            for r, c in T.Parallel(rows, columns):
+                                result[r, c] += previous[r, c]
+                        T.copy(result, output[row, col])
+                first[0] = False
+
+    return main

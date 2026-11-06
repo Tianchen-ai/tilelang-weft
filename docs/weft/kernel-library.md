@@ -14,6 +14,8 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | Online attention | `attention.online_attention` | Query stage, m/l/o state, bounded key Levels and explicit tail score mask |
 | KV update and causal grouped-query attention | `attention` | Caller-owned cache, populated prefix and head/group mapping |
 | GEMM and batched projection | `linear` | Author blocks, transpose, bias/SiLU epilogue and local engine requirement |
+| Dense CPU panels | `panel_dense` | In-call panel transposes, optional F16 activation rounding and an explicit outer-product loop |
+| Batched packed and codebook projections | `panel_projection`, `indexed_projection` | Decode a weight record once, reuse across activation rows, and close integer scale/correction groups |
 | Q4_K/Q6_K × Q8_K | `quantized` | Shared Encoding fields, typed grouped partials, scale/correction branches |
 | Integer-field dequantization | `quantized.dequantize` | Q1, Q4/Q5/Q8, K formats and TQ2 fields; explicit numerical decoding |
 | Lookup and sub-byte formats | `codebook` | IQ1/IQ2/IQ3/IQ4, MXFP4/NVFP4 and TQ1 author programs with explicit tables |
@@ -59,6 +61,41 @@ integer products for x86. `scale_groups` in the single-row Q6_K factory bounds
 the author's simultaneously exposed scale groups; it does not select an ISA.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
+The indexed program reconstructs the stored even-parity signs from seven bits.
+`preparation.quantize(chunk=...)` exposes a finite 32/64/128/256-element source
+window: the block maximum is shared, while the author chooses the quantization
+and group-sum lifetime. Numeric View ranges such as `weights.q[:, 32:64]`
+retain their named axes and lower to Canonical subviews. `matrix.k_layout_projection`
+consumes the explicit GGML interleaved model layout and includes activation
+quantization in the same call.
+
+`subblock_partials` exposes independent record accumulators and typed integer
+partials for short records, Q6_K and nonlinear grids. NVFP4 retains unsigned
+biased codes and I32 quad products before scaling. IQ3_XXS shares metadata
+and sign rows across its explicit group, entry and payload axes. Indexed programs keep entry and
+payload axes separate through encoded table reads and flatten their result with
+ordinary `T.reshape`. Dequantizers write explicit bounded output windows; their
+`chunk` parameter selects the author window rather than an ISA. GGML programs
+declare the reference's disjoint-output contract while allowing read-only
+inputs to share storage, so snapshot and supply passes can use those facts.
+
+Panel workspaces are invocation storage. `panel_dense.projection` populates
+`Scratch` and `PackedActivation` during the call; `round_f16` chooses whether
+activation is rounded to F16 before F32 accumulation. Packed projections also
+quantize activation during the call. Codebook panels retain explicit integer
+corrections and populate `ScalePanel` and `CorrectionPanel` before their row
+consumers. `decode_columns` bounds the author's decoding cohort independently
+of the matrix tile. Loads after these writes capture the populated panels;
+`T.stage` instead defines a snapshot in its Level's initialization phase.
+`ActivationSums` and `GroupSums` retain each activation group's correction sum
+across output-column tiles. Their preparation remains inside the projection.
+Factories specialize optional workspaces to zero elements when unused, and
+native metadata retains those source Tensor extents.
+
+`subblock_partials.block32(partials=1)` expresses a scalar dot and scale update
+for each record. `partials=8` retains eight grouped products across records.
+These are explicit numerical organizations; target passes select the physical
+implementation of the requested organization.
 
 The product owns these normal programs. Bench owns workloads, external references,
 numerical comparisons and timing boundaries. Public comparative performance is

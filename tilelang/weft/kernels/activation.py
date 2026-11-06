@@ -55,14 +55,22 @@ def swiglu(N, block=128, cpu_num_threads=0):
 
 
 @tilelang.jit(target="weft")
-def affine(N, block=128, cpu_num_threads=0):
+def affine(N, block=128, cpu_num_threads=0, blocks_per_program=1):
+    assert block > 0 and blocks_per_program > 0
     @T.prim_func
     def main(X: T.Tensor((N,), "float32"), Y: T.Tensor((N,), "float32"), scale: T.float32, bias: T.float32):
-        with T.Kernel(T.ceildiv(N, block), cpu_num_threads=cpu_num_threads) as tile:
-            for lane in T.Parallel(block):
-                i = tile * block + lane
-                if i < N:
-                    Y[i] = X[i] * scale + bias
+        xv = T.view(X, shape=(N,), axes=("k",), abi=True)
+        yv = T.view(Y, shape=(N,), axes=("k",), abi=True)
+        with T.Kernel(T.ceildiv(N, block * blocks_per_program), cpu_num_threads=cpu_num_threads) as tile:
+            begin = 0 if N <= block * blocks_per_program else tile * block * blocks_per_program
+            source = xv[begin : begin + block * blocks_per_program]
+            output = yv[begin : begin + block * blocks_per_program]
+            with T.level.blocks(T.extent(source, 0), extent=block) as part:
+                value = T.load(source[part])
+                result = T.alloc_local((block,), "float32")
+                for lane in T.Parallel(block):
+                    result[lane] = value[lane] * scale + bias
+                T.copy(result, output[part])
 
     return main
 

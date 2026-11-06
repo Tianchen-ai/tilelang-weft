@@ -20,6 +20,8 @@ Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
 | Online attention | `attention.online_attention` | query stage、m/l/o 状态、key Level 和尾部 score mask |
 | KV 更新、causal GQA | `attention` | 调用者 cache、已填充前缀及 head/group 映射 |
 | GEMM、批量投影 | `linear` | 作者分块、转置、bias/SiLU 后处理及局部 engine 约束 |
+| CPU dense panel | `panel_dense` | 调用内转置 panel、可选 F16 activation 舍入及显式 outer-product 循环 |
+| 批量 packed 与 codebook 投影 | `panel_projection`、`indexed_projection` | 每个权重 record 解码一次，跨 activation 行复用，闭合整数 scale/correction 分组 |
 | Q4_K/Q6_K × Q8_K | `quantized` | 共同 Encoding 字段、有限位宽 partial、scale 与校正支路 |
 | 整数字段解码 | `quantized.dequantize` | Q1、Q4/Q5/Q8、K 格式和 TQ2 的显式数值解码 |
 | Lookup、sub-byte 格式 | `codebook` | IQ1/IQ2/IQ3/IQ4、MXFP4/NVFP4、TQ1 与显式表输入 |
@@ -59,6 +61,32 @@ scale/correction 支路。`composition.packed_projection` 的显式解码到 wor
 `scale_groups` 限定作者同时暴露的 scale group 数量，不选择 ISA。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
+索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`
+公开 32/64/128/256 元素的有限源码窗口：共享 block 极值，作者决定量化与分组和
+的生命周期。`weights.q[:, 32:64]` 等数值 View 范围保留具名轴并进入 Canonical
+subview。`matrix.k_layout_projection` 消费明确的 GGML interleaved 模型布局，
+在同一次调用中完成 activation 量化。
+
+`subblock_partials` 为短 record、Q6_K 和非线性 grid 显式表达独立 record 累加与
+整数 partial；NVFP4 使用无符号偏移编码和 I32 四项乘积后再缩放。IQ3_XXS 显式保留
+group、entry、payload 轴，让 metadata 和符号行在对应范围内复用。索引程序在编码表
+读取中分别保留 entry、payload 轴，最后通过普通 `T.reshape` 展平。行解码直接写出
+有界输出窗口，`chunk` 表示作者窗口，不选择 ISA。GGML 程序声明与参考一致的
+输出独立存储合同，同时允许只读输入共享存储，供快照与供给 passes 使用。
+
+Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用内填充
+`Scratch` 和 `PackedActivation`；`round_f16` 决定 activation 是否先舍入到 F16，
+之后均按 F32 累加。Packed 投影也在调用内量化 activation。Codebook panel 保留
+显式整数校正，在行消费者开始前填充 `ScalePanel` 与 `CorrectionPanel`。
+`decode_columns` 限定作者的解码 cohort，与矩阵 tile 分开。写入后的普通 load
+捕获已填充的 panel；`T.stage` 则在所属 Level 的初始化阶段定义读取快照。
+`ActivationSums` 与 `GroupSums` 将各 activation group 的校正和复用于多个输出列 tile，
+准备工作仍在 projection 调用内完成。Factory 将无需使用的可选 workspace 特化为零个
+元素，native metadata 保留相应的源码 Tensor 长度。
+
+`subblock_partials.block32(partials=1)` 表达每条 record 的标量 dot 与 scale 更新；
+`partials=8` 则跨 record 保留八个分组乘积。这些是作者明确选择的数值组织，目标 passes
+负责实现所选组织的物理计算。
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
 公开性能结果为 **测试中 / Under evaluation**。
