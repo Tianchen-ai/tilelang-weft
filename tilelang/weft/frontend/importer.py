@@ -496,12 +496,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if shape_of(index.type):
                 selectors.append("gather")
                 index = self.local_index(index)
+                shape, axes = self.domain_types(shape, axes, index)
             else:
                 selectors.append("index")
                 index = self.cast(index, dt.index)
             operands.append(index)
-        for index in operands:
-            shape, axes = self.domain_types(shape, axes, index)
         if all(selector == "all" for selector in selectors):
             return source
         return self.op(
