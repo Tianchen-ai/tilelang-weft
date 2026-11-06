@@ -466,33 +466,32 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
             with T.level.rows(M, group=1) as row:
                 total = T.state((lanes,), "float32", init=0)
                 with T.level.blocks(K, extent=256) as block:
-                    w = weights[row, block][0, :]
-                    x = values[block]
-                    ds, d = T.load(x.ds), T.load(w.d)
-                    low = T.load(w.q if format == "Q3_K" else w.ql)
-                    high = T.load(w.hmask if format == "Q3_K" else w.qh)
-                    activation = T.load(x.q)
+                    w = T.load(weights[row, block][0, :])
+                    x = T.load(values[block])
+                    ds, d = x.ds, w.d
+                    low = w.q if format == "Q3_K" else w.ql
+                    high, activation = w.hmask if format == "Q3_K" else w.qh, x.q
                     if format == "Q3_K":
-                        scale_low, scale_high = T.load(w.scale_low), T.load(w.scale_high)
+                        scale_low, scale_high = w.scale_low, w.scale_high
                     else:
-                        scales = T.load(w.scales)
+                        scales = w.scales
                     integer = T.alloc_local((lanes,), "int32")
                     T.fill(integer, 0)
-                    for group in T.serial(256 // lanes):
+                    for group in T.unroll(256 // lanes):
                         left = group * (lanes // 16)
-                        if format == "Q3_K":
-                            a = T.cast(T.cast(scale_low[left], "uint8") | (T.cast(scale_high[left], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                            if lanes == 32:
-                                b = T.cast(T.cast(scale_low[left + 1], "uint8") | (T.cast(scale_high[left + 1], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                        else:
-                            a = scales[left]
-                            if lanes == 32:
-                                b = scales[left + 1]
                         for k in T.Parallel(lanes):
-                            coordinate = T.cast(group, "uint32") * T.uint32(lanes) + T.cast(k, "uint32")
+                            coordinate = T.uint32(group * lanes) + T.cast(k, "uint32")
                             code = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
                             product = T.cast(code, "int16") * T.cast(activation[coordinate], "int16")
-                            scale = T.if_then_else(k < 16, a, b) if lanes == 32 else a
+                            if format == "Q3_K":
+                                a = T.cast(T.cast(scale_low[left], "uint8") | (T.cast(scale_high[left], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                                if lanes == 32:
+                                    b = T.cast(T.cast(scale_low[left + 1], "uint8") | (T.cast(scale_high[left + 1], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                            else:
+                                a = scales[left]
+                                if lanes == 32:
+                                    b = scales[left + 1]
+                            scale = a if lanes == 16 else T.if_then_else(T.cast(k, "uint32") < T.uint32(16), a, b)
                             integer[k] += T.cast(product, "int32") * T.cast(scale, "int32")
                     for k in T.Parallel(lanes):
                         total[k] += T.cast(integer[k], "float32") * (T.cast(d[()], "float32") * ds[()])
