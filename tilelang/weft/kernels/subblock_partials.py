@@ -188,15 +188,28 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
                     for part in T.unroll(records):
                         w = weights[row, block][0, part * 32 : (part + 1) * 32]
                         x = values[block][part * 32 : (part + 1) * 32]
-                        q, activation, xd = T.load(w.q), T.load(x.q), T.load(x.d)
-                        if format == "MXFP4":
-                            exponent = T.load(w.e)
+                        if partials == 1:
+                            q, activation, xd = T.load(w.q), T.load(x.q), T.load(x.d)
+                            if format == "MXFP4":
+                                exponent = T.load(w.e)
+                            else:
+                                d = T.load(w.d)
+                            if format in ("Q5_0", "Q5_1"):
+                                high = T.load(w.qh)
+                            if affine:
+                                minimum, activation_sum = T.load(w.m), T.load(x.s)
                         else:
-                            d = T.load(w.d)
-                        if format in ("Q5_0", "Q5_1"):
-                            high = T.load(w.qh)
+                            weight_record, input_record = T.load(w), T.load(x)
+                            q, activation, xd = weight_record.q, input_record.q, input_record.d
+                            if format == "MXFP4":
+                                exponent = weight_record.e
+                            else:
+                                d = weight_record.d
+                            if format in ("Q5_0", "Q5_1"):
+                                high = weight_record.qh
+                            if affine:
+                                minimum, activation_sum = weight_record.m, input_record.s
                         if affine:
-                            minimum, activation_sum = T.load(w.m), T.load(x.s)
                             weight_meta = T.alloc_local((2,), "float16")
                             activation_meta = T.alloc_local((2,), "float16")
                             metadata = T.alloc_local((2,), "float32")

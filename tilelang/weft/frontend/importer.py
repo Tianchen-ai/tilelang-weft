@@ -202,11 +202,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 coordinate = self.iota(size, axis)
                 predicate = self.binary("and", predicate, self.binary("eq", coordinate, coordinate, predicate=True))
             return self.op("select", (predicate, value, value), target)
-        # Select broadcasts its scalar true branch over the false value and
-        # explicit domain mask without arithmetic that could alter signed zero.
+        # The predicate supplies coordinates; both arms retain the same saved
+        # value and its active domain, including signed zero and partial tiles.
         condition = self.broadcast(self.constant(True, dt.i1), shape, axes)
-        zero = self.constant(0, element_type(value.type).dtype)
-        selected = self.op("select", (condition, value, zero), value_type(element_type(value.type), *self.domain(value, condition)))
+        selected = self.op("select", (condition, value, value), value_type(element_type(value.type), *self.domain(value, condition)))
         return self.rename(selected, shape, axes)
 
     def rename(self, value, shape, axes, order=None):

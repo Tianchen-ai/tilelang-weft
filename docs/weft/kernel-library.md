@@ -94,6 +94,9 @@ native metadata retains those source Tensor extents.
 
 `subblock_partials.block32(partials=1)` expresses a scalar dot and scale update
 for each record. `partials=8` retains eight grouped products across records.
+The grouped program reads each complete record once and projects its fields,
+retaining packed sign planes alongside the payload. The scalar program reads
+the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
 

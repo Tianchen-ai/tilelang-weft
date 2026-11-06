@@ -85,7 +85,9 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 元素，native metadata 保留相应的源码 Tensor 长度。
 
 `subblock_partials.block32(partials=1)` 表达每条 record 的标量 dot 与 scale 更新；
-`partials=8` 则跨 record 保留八个分组乘积。这些是作者明确选择的数值组织，目标 passes
+`partials=8` 则跨 record 保留八个分组乘积。分组程序一次读取完整 record，再投影字段，
+使 packed sign plane 与 payload 一起保留；标量程序直接读取选定字段。两者均明确保留
+源码的读取边界。这些是作者明确选择的数值组织，目标 passes
 负责实现所选组织的物理计算。
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
