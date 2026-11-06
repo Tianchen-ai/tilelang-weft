@@ -104,6 +104,14 @@ of the numerical program. See the complete
 [Packed32 example](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/04_encoding_levels.py) and
 [Q4_K/Q6_K programs](https://github.com/Tianchen-ai/tilelang-weft/blob/main/tilelang/weft/kernels/quantized.py).
 
+For ordinary positional tiles, named contraction axes bind their trailing
+dimensions: `over=("entry", "payload")` contracts both trailing dimensions.
+Existing named View axes retain their identities. `T.mac_groups` keeps its
+grouped axis last in the result, after the independent free axes of both
+operands; an `(N, 4)` by `(M, 4)` quad product therefore writes `(N, M, 1)`
+integer partials. The declared destination distinguishes independent matrix
+axes from shared batch axes, including equal-sized dimensions.
+
 ## Layout, engines and scheduling
 
 `T.gemm(a, b, c, engine="auto")` prefers a legal matrix realization, then vector.

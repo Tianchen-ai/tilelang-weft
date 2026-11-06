@@ -80,6 +80,12 @@ class Packed32:
 [Packed32](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/04_encoding_levels.py) 和
 [Q4_K/Q6_K](https://github.com/Tianchen-ai/tilelang-weft/blob/main/tilelang/weft/kernels/quantized.py)。
 
+普通位置 tile 的具名 contraction 轴绑定到末尾维度，例如
+`over=("entry", "payload")` 归约最后两个维度；已有具名 View 轴保留原身份。
+`T.mac_groups` 的结果先排列两侧独立自由轴，最后保留分组轴，因此
+`(N, 4)` 与 `(M, 4)` 的四项乘积写入 `(N, M, 1)` 整数 partial。
+显式 destination 区分独立矩阵轴与共享 batch 轴，两个维度大小相等时也遵守该规则。
+
 ## 布局、engine 和流水
 
 `T.load(table, at=indices, bounds="in_bounds")` 使用整数索引 tile 读取 dense 数值

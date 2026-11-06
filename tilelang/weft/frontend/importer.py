@@ -192,6 +192,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
     def broadcast(self, value, shape, axes):
         if (shape_of(value.type), axes_of(value.type)) == (tuple(shape), tuple(axes)):
             return value
+        if dict(zip(axes_of(value.type), shape_of(value.type))) == dict(zip(axes, shape)):
+            # A different traversal order of the same coordinates is a
+            # transpose, not a broadcast. Preserve the saved payload and its
+            # validity instead of introducing a predicate with another order.
+            return self.rename(value, shape, axes)
         target = value_type(element_type(value.type), tuple(shape), tuple(axes))
         if not shape_of(value.type):
             # A numerical broadcast is not a source state birth. Build its
@@ -205,7 +210,9 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         # The predicate supplies coordinates; both arms retain the same saved
         # value and its active domain, including signed zero and partial tiles.
         condition = self.broadcast(self.constant(True, dt.i1), shape, axes)
-        selected = self.op("select", (condition, value, value), value_type(element_type(value.type), *self.domain(value, condition)))
+        domain_shape, domain_axes = self.domain(value, condition)
+        condition = self.rename(condition, domain_shape, domain_axes)
+        selected = self.op("select", (condition, value, value), value_type(element_type(value.type), domain_shape, domain_axes))
         return self.rename(selected, shape, axes)
 
     def rename(self, value, shape, axes, order=None):
@@ -929,18 +936,20 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if not isinstance(node, tirx.Call):
                 return
             if node.op.name == "tl.weft.mac_groups":
-                name = str(node.args[5].value)
-            elif node.op.name == "tl.weft.reduce_dot" and len(node.annotations["axes"]) == 1:
-                name = str(node.annotations["axes"][0].value)
+                names = (str(node.args[5].value),)
+            elif node.op.name == "tl.weft.reduce_dot":
+                names = tuple(str(axis.value) for axis in node.annotations["axes"])
             else:
                 return
-            identity = self.named_axis(name)
+            identities = tuple(self.named_axis(name) for name in names)
             for argument in node.args[:2]:
                 buffer, _, shape = self.region(argument)
                 if not shape or not buffer.scope().startswith("local"):
                     continue
-                key = (buffer, len(shape) - 1)
-                axis_requests.setdefault(key, set()).add(identity)
+                if len(shape) < len(identities):
+                    self.error("reduction axes exceed the positional tile rank", node)
+                for position, identity in enumerate(identities, start=len(shape) - len(identities)):
+                    axis_requests.setdefault((buffer, position), set()).add(identity)
 
         # Explicit named contractions constrain the positional tiles that
         # feed them. Resolve these declarations before importing Parallel

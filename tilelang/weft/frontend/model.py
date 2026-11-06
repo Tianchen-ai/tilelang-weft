@@ -388,12 +388,16 @@ class ModelOperations:
             group = self.static(call.args[3])
             into = dtype(string(call.args[4]))
             axis, left, right = self.bind_group_axis(left, right, string(call.args[5]))
-            left, right = self.align_anonymous_batches(left, right)
+            left, right = self.align_contraction_batches(left, right, (axis,), output[2][:-1])
             shape, axes = self.domain(left, right)
             position = axes.index(axis)
             if shape[position] <= 0 or shape[position] % group:
                 self.error("mac_groups requires a complete group domain")
-            shape = shape[:position] + (shape[position] // group,) + shape[position + 1 :]
+            # As in Triton's mac_groups, independent free axes precede the
+            # grouped axis. A pointwise union would place the right free axis
+            # after the left operand's group and change the partial layout.
+            shape = shape[:position] + shape[position + 1 :] + (shape[position] // group,)
+            axes = axes[:position] + axes[position + 1 :] + (axis,)
             result = self.op(
                 "mac_groups",
                 (left, right),
