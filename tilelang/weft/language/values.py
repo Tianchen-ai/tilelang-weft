@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import json
+import math
 
 from tvm import tirx
 from tvm.script.ir_builder import tirx as I
@@ -163,24 +164,48 @@ class RecordValue:
         return output
 
 
+def reshape(source, shape, *, axes=None):
+    """Reshape a saved encoded value, or use TileLang's ordinary Tensor view."""
+    if not isinstance(source, RecordValue):
+        if axes is not None:
+            raise TypeError("ordinary Tensor reshape retains positional axes")
+        from tilelang.language.customize import reshape as tensor_reshape
+
+        return tensor_reshape(source, shape)
+    shape = tuple(shape)
+    axes = tuple(axes) if axes is not None else None
+    if not shape or any(type(size) is not int or size <= 0 for size in shape):
+        raise ValueError("encoded reshape requires a positive static shape")
+    if axes is None or len(axes) != len(shape) or len(set(axes)) != len(axes):
+        raise ValueError("encoded reshape requires one distinct logical axis per dimension")
+    if math.prod(source.shape) != math.prod(shape) or shape[-1] != source.encoding.schema.elements:
+        raise ValueError("encoded reshape must preserve complete records and the logical element count")
+    variable = bind(intrinsic("reshape", source.var, *shape, axes=list(axes)))
+    return RecordValue(variable, shape, axes, source.encoding, source.__tilelang_immutable_value__)
+
+
 def load(source, *, at=None, axis=-1, bounds=None):
     from .derived import DerivedEncodingInstance
 
-    if at is not None and isinstance(source, LogicalView):
+    if at is not None and not isinstance(at, Point):
         from tilelang.utils.language import retrieve_shape, _get_buffer
 
         if bounds != "in_bounds":
-            raise ValueError("indexed View loads require the explicit bounds='in_bounds' contract")
-        if isinstance(source.encoding, (EncodingDefinition, DerivedEncodingInstance)):
-            raise TypeError("indexed View loads require a numeric field or dense table")
+            raise ValueError("indexed loads require the explicit bounds='in_bounds' contract")
+        if isinstance(source, LogicalView):
+            if isinstance(source.encoding, (EncodingDefinition, DerivedEncodingInstance)):
+                raise TypeError("indexed loads require a numeric field, dense table or saved Value")
+            source_region, scalar = source.var, source.encoding
+        else:
+            source_region, scalar = to_tile_region(source), _get_buffer(source).dtype
         indices = _get_buffer(at)
         if not str(indices.dtype).startswith(("int", "uint")):
-            raise TypeError("indexed View loads require an integer index tile")
-        output = alloc_local(retrieve_shape(at), source.encoding)
-        I.evaluate(intrinsic("load_value", to_tile_region(output), source.var, to_tile_region(at), bounds=bounds))
+            raise TypeError("indexed loads require an integer index tile")
+        output = alloc_local(retrieve_shape(at), scalar)
+        I.evaluate(intrinsic("load_value", to_tile_region(output), source_region, to_tile_region(at), bounds=bounds))
         return output
     if bounds is not None:
-        raise ValueError("bounds is only valid for indexed View loads")
+        raise ValueError("bounds is only valid for indexed loads")
     if at is not None:
         from tilelang.utils.language import retrieve_shape, _get_buffer
 

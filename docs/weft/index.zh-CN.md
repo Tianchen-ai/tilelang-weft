@@ -55,6 +55,11 @@ TileLang。`T.Kernel` 声明独立的 CPU tile 实例，`cpu_num_threads` 指定
 allocation 或 state/stage 生命周期。[tile 示例](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
 通过重塑后的局部 tile 逐行写入，再完成归约。
 
+编码值快照也可带显式逻辑轴重塑：
+`T.reshape(record, (records, 32), axes=("record", "k"))`。
+它保留原读取快照，拆出完整序列化 record；标量字段成为每条 record 一个值，
+payload 字段保留 lane 轴，不增加读取或新的 state/stage 声明。
+
 Encoding 定义序列化存储；解码公式由作者程序表达：
 
 ```python
@@ -148,6 +153,14 @@ llama.cpp integration 还需核对 GGML 角色、序列化布局、参数顺序�
 提供实际构建命令与 typed runtime 加载。`T.extent(view, axis)` 查询尾部 View 的真实可访问
 范围，作者据此屏蔽非线性运算中的无效位置；`T.narrow(value, dtype, rounding="rne",
 saturation=False)` 保留显式窄化。`output[part].q` 等字段 View 支持 typed 写入，用于 Q8 preparation。
+
+`T.load(table, at=codes, bounds="in_bounds")` 可以读取数值 View，也可以索引
+`table = T.stage(T.load(view))` 保存的数值快照。后一种用法继续消费原读取时刻的值；
+普通 buffer 索引仍表示位置提取。
+
+`T.copy(value, output_view, annotations={"cache_hint": "streaming"})`
+把作者的存储 hint 保留到 Canonical IR。x86 后端只对合法对齐、独立且只写的输出
+选择 non-temporal store；`"normal"` 使用普通缓存策略。该 hint 不改变数值或所有权。
 
 可选模块 `tilelang.weft.integrations.llama_cpp` 在创建 package 前按共享合同校验精确 GGML
 角色，包括参数、record 布局、shape dimensions、量化方式和线程边界。

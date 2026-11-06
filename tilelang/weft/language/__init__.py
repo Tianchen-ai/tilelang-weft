@@ -6,7 +6,7 @@ from .kernel import Kernel
 from .gemm import gemm, reduce_dot
 from .encoding import Field, grouped, bit_layers, pack_fields, bitorder, byteorder, lo_first, hi_first, padding
 from .levels import level
-from .values import view, load, state, stage, mac_groups, extent, narrow
+from .values import view, load, state, stage, mac_groups, extent, narrow, reshape
 from .copy import copy
 from .helpers import macro
 from .derived import View, interleave
@@ -31,6 +31,7 @@ __all__ = [
     "padding",
     "level",
     "view",
+    "reshape",
     "extent",
     "narrow",
     "load",

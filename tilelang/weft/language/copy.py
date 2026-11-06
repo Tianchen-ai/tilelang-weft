@@ -11,7 +11,10 @@ def copy(source, destination, **kwargs):
     if isinstance(source, LogicalView):
         source = load(source)
     if isinstance(destination, LogicalView):
+        annotations = kwargs.pop("annotations", {}) or {}
         if kwargs:
             raise TypeError("logical View copies do not accept GPU transfer hints")
-        return I.evaluate(intrinsic("store_value", to_tile_region(source), destination.var))
+        if set(annotations) - {"cache_hint"} or annotations.get("cache_hint", "normal") not in ("normal", "streaming"):
+            raise ValueError("logical View copy annotations support cache_hint='normal' or 'streaming'")
+        return I.evaluate(intrinsic("store_value", to_tile_region(source), destination.var, **annotations))
     return _copy(source, destination, **kwargs)

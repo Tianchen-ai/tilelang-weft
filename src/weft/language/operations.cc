@@ -20,6 +20,7 @@ using tirx::TScriptPrinterName;
 
 WEFT_OP("view", kPure);
 WEFT_OP("slice", kPure);
+WEFT_OP("reshape", kPure);
 WEFT_OP("extent", kPure);
 WEFT_OP("field_view", kPure);
 WEFT_OP("narrow", kPure);

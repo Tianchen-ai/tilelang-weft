@@ -244,6 +244,16 @@ class ModelOperations:
         if name == "tl.weft.load_record":
             view = self.expr(call.args[0])
             return self.op("admit", (view,), LocalValueType(view.type.encoding, shape_of(view.type), axes_of(view.type)))
+        if name == "tl.weft.reshape":
+            from .importer import integers
+
+            value = self.expr(call.args[0])
+            shape = tuple(self.static(extent) for extent in call.args[1:])
+            axes = tuple(self.named_axis(str(axis)) for axis in call.annotations["axes"])
+            return self.op(
+                "reshape", (value,), LocalValueType(element_type(value.type), shape, axes),
+                {"order": integers(axes_of(value.type))},
+            )
         if name == "tl.weft.stage":
             value = self.expr(call.args[0])
             result = self.op("materialize", (value,), value.type)
@@ -275,15 +285,22 @@ class ModelOperations:
             return True
         if name == "tl.weft.load_value":
             if len(call.args) == 3:
-                table = self.expr(call.args[1])
+                if isinstance(call.args[1], tirx.Var):
+                    table = self.expr(call.args[1])
+                    if not isinstance(table.type, (ViewType, SliceType)) or table.type.encoding.kind != "dense":
+                        self.error("indexed View loads require a numeric field or dense table")
+                    scalar = ScalarType(getattr(dt, table.type.encoding.family))
+                    numeric = value_type(scalar, shape_of(table.type), axes_of(table.type))
+                    table = self.op("admit", (table,), numeric)
+                else:
+                    saved = self.region(call.args[1])
+                    table = self.read_region(saved, self.local_axes_for(saved[0]))
+                    scalar = element_type(table.type)
                 indices = self.region(call.args[2])
                 index = self.read_region(indices, self.local_axes[indices[0]])
                 bounds = string(call.annotations["bounds"])
-                if bounds != "in_bounds" or not isinstance(table.type, (ViewType, SliceType)) or table.type.encoding.kind != "dense":
-                    self.error("indexed View loads require a numeric table and the in_bounds contract")
-                scalar = ScalarType(getattr(dt, table.type.encoding.family))
-                numeric = value_type(scalar, shape_of(table.type), axes_of(table.type))
-                table = self.op("admit", (table,), numeric)
+                if bounds != "in_bounds" or not isinstance(scalar, ScalarType):
+                    self.error("indexed loads require a numeric table and the in_bounds contract")
                 value = self.op(
                     "lookup", (table, index), value_type(scalar, shape_of(index.type), axes_of(index.type)), {"bounds": json.dumps(bounds)}
                 )
@@ -452,7 +469,8 @@ class ModelOperations:
             if destination.type.encoding.kind == "dense":
                 value = self.cast(value, dtype(destination.type.encoding.family))
             value = self.rename(value, shape_of(destination.type), axes_of(destination.type))
-            self.op("commit", (value, destination))
+            attrs = {"cache_hint": json.dumps(string(call.annotations["cache_hint"]))} if "cache_hint" in call.annotations else None
+            self.op("commit", (value, destination), attrs=attrs)
             return True
         return False
 

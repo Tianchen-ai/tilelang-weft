@@ -76,6 +76,12 @@ the original allocation or state/stage lifetime. The
 [tile example](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
 loads rows through a reshaped local tile before reducing them.
 
+A saved encoded value can also be reshaped with explicit logical axes:
+`T.reshape(record, (records, 32), axes=("record", "k"))`. This preserves the
+original read snapshot and splits complete serialized records, so a scalar
+field becomes one value per record and a payload field retains its lane axis.
+It creates neither another read nor another state/stage declaration.
+
 Encoding describes serialized storage. It does not implement dequantization:
 
 ```python
@@ -193,6 +199,16 @@ Field Views such as `output[part].q` support typed writes, including packed Q8 p
 numeric field with an integer index tile. Indices address its row-major logical
 table; the result retains the index tile's domain. Field projections retain
 Encoding group relationships, including one sum per 16-element Q8_K group.
+
+The same indexed load accepts a saved numeric tile, for example
+`T.load(table, at=codes, bounds="in_bounds")` after `table = T.stage(T.load(view))`.
+It looks up that snapshot, retaining its read epoch. Ordinary buffer indexing
+continues to express a positional extraction.
+
+`T.copy(value, output_view, annotations={"cache_hint": "streaming"})` carries the
+author's store hint through Canonical IR. The x86 backend selects non-temporal
+stores only for a legal aligned, disjoint write-only output. `"normal"` uses
+ordinary cache policy. The hint changes neither numerical values nor ownership.
 
 The optional `tilelang.weft.integrations.llama_cpp` module validates exported
 artifacts against exact GGML roles before creating a native package. A kernel's
