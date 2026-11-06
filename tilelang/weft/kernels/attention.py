@@ -5,21 +5,26 @@ from tilelang.weft import language as T
 
 
 @tilelang.jit(target="weft")
-def softmax(M, N, cpu_num_threads=0):
+def softmax(M, N, cpu_num_threads=0, rows_per_program=1):
+    assert rows_per_program > 0
     @T.prim_func
     def main(X: T.Tensor((M, N), "float32"), Y: T.Tensor((M, N), "float32")):
         rows = T.view(X, shape=(M, N), axes=("m", "k"))
-        with T.Kernel(M, cpu_num_threads=cpu_num_threads) as row:
-            value = T.stage(T.load(rows[row, :]))
-            maximum = T.alloc_local((1,), "float32")
-            probability = T.alloc_local((N,), "float32")
-            denominator = T.alloc_local((1,), "float32")
-            T.reduce_max(value, maximum, dim=0)
-            for k in T.Parallel(N):
-                probability[k] = T.exp(value[k] - maximum[0])
-            T.reduce_sum(probability, denominator, dim=0)
-            for k in T.Parallel(N):
-                Y[row, k] = probability[k] / denominator[0]
+        with T.Kernel(T.ceildiv(M, rows_per_program), cpu_num_threads=cpu_num_threads) as program:
+            base = 0 if rows_per_program >= M else program * rows_per_program
+            count = rows_per_program if M % rows_per_program == 0 else T.min(rows_per_program, M - base)
+            for r in T.serial(count):
+                row = base + r
+                value = T.stage(T.load(rows[row, :]))
+                maximum = T.alloc_local((1,), "float32")
+                probability = T.alloc_local((N,), "float32")
+                denominator = T.alloc_local((1,), "float32")
+                T.reduce_max(value, maximum, dim=0)
+                for k in T.Parallel(N):
+                    probability[k] = T.exp(value[k] - maximum[0])
+                T.reduce_sum(probability, denominator, dim=0)
+                for k in T.Parallel(N):
+                    Y[row, k] = probability[k] / denominator[0]
 
     return main
 

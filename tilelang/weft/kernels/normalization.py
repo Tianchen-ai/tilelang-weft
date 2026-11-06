@@ -1,4 +1,4 @@
-"""One row snapshot shared by its reductions and affine epilogue."""
+"""Explicit row reductions and bounded affine epilogues."""
 
 import tilelang
 from tilelang.weft import language as T
@@ -21,15 +21,22 @@ def rms_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction_w
             for local_row in T.serial(count):
                 row = base + local_row
                 total = T.alloc_local((1,), "float32")
-                partial = T.alloc_local((reduction_width,), "float32")
-                T.fill(partial, 0)
-                with T.level.blocks(N, extent=reduction_width) as part:
-                    value = T.load(rows[row, part])
-                    active = T.extent(rows[row, part], axis=0)
-                    for k in T.Parallel(reduction_width):
-                        if k < active:
-                            partial[k] += value[k] * value[k]
-                T.reduce_sum(partial, total, dim=0)
+                if reduction_width == N:
+                    full_values = T.load(rows[row, :])
+                    square = T.alloc_local((N,), "float32")
+                    for k in T.Parallel(N):
+                        square[k] = full_values[k] * full_values[k]
+                    T.reduce_sum(square, total, dim=0)
+                else:
+                    partial = T.alloc_local((reduction_width,), "float32")
+                    T.fill(partial, 0)
+                    with T.level.blocks(N, extent=reduction_width) as part:
+                        value = T.load(rows[row, part])
+                        active = T.extent(rows[row, part], axis=0)
+                        for k in T.Parallel(reduction_width):
+                            if k < active:
+                                partial[k] += value[k] * value[k]
+                    T.reduce_sum(partial, total, dim=0)
                 factor = T.alloc_local((1,), "float32")
                 factor[0] = T.rsqrt(total[0] / N + epsilon)
                 with T.level.blocks(N, extent=block) as part:
@@ -70,25 +77,34 @@ def layer_norm(M, N, cpu_num_threads=0, block=128, rows_per_program=1, reduction
                 variance = T.alloc_local((1,), "float32")
                 mean = T.alloc_local((1,), "float32")
                 factor = T.alloc_local((1,), "float32")
-                partial = T.alloc_local((reduction_width,), "float32")
-                T.fill(partial, 0)
-                with T.level.blocks(N, extent=reduction_width) as part:
-                    value = T.load(rows[row, part])
-                    active = T.extent(rows[row, part], axis=0)
-                    for k in T.Parallel(reduction_width):
-                        if k < active:
-                            partial[k] += value[k]
-                T.reduce_sum(partial, total, dim=0)
+                if reduction_width == N:
+                    values = T.load(rows[row, :])
+                    T.reduce_sum(values, total, dim=0)
+                else:
+                    partial = T.alloc_local((reduction_width,), "float32")
+                    T.fill(partial, 0)
+                    with T.level.blocks(N, extent=reduction_width) as part:
+                        value = T.load(rows[row, part])
+                        active = T.extent(rows[row, part], axis=0)
+                        for k in T.Parallel(reduction_width):
+                            if k < active:
+                                partial[k] += value[k]
+                    T.reduce_sum(partial, total, dim=0)
                 mean[0] = total[0] / N
                 square = T.alloc_local((reduction_width,), "float32")
-                T.fill(square, 0)
-                with T.level.blocks(N, extent=reduction_width) as part:
-                    value = T.load(rows[row, part])
-                    active = T.extent(rows[row, part], axis=0)
-                    for k in T.Parallel(reduction_width):
-                        if k < active:
-                            centered = value[k] - mean[0]
-                            square[k] += centered * centered
+                if reduction_width == N:
+                    for k in T.Parallel(N):
+                        centered = values[k] - mean[0]
+                        square[k] = centered * centered
+                else:
+                    T.fill(square, 0)
+                    with T.level.blocks(N, extent=reduction_width) as part:
+                        value = T.load(rows[row, part])
+                        active = T.extent(rows[row, part], axis=0)
+                        for k in T.Parallel(reduction_width):
+                            if k < active:
+                                centered = value[k] - mean[0]
+                                square[k] += centered * centered
                 T.reduce_sum(square, variance, dim=0)
                 factor[0] = T.rsqrt(variance[0] / N + epsilon)
                 with T.level.blocks(N, extent=block) as part:
