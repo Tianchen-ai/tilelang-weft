@@ -64,7 +64,7 @@ def projection(M, N, K, format="NVFP4", columns=8,
                                 wide = T.alloc_local((width,), "int32")
                                 total = T.alloc_local((1,), "int32")
                                 for k in T.Parallel(width):
-                                    wide[k] = T.cast(values[k], "int32")
+                                    wide[k] = T.cast(activation.q[part * width % 32 + k], "int32")
                                 T.reduce_sum(wide, total, dim=0)
                             prior = T.load(output[m, col])
                             result = T.alloc_local((columns,), "float32")
