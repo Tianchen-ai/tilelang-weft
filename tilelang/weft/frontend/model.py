@@ -51,6 +51,24 @@ class ModelOperations:
                 right_axes[-offset] = left_axes[-offset]
         return left, self.rename(right, right_shape, tuple(right_axes))
 
+    def align_contraction_batches(self, left, right, reduction, output_shape):
+        """Use the declared destination to distinguish matrix and grouped tiles."""
+        def fits(a, b):
+            shape, axes = self.domain(a, b)
+            free = tuple(size for size, axis in zip(shape, axes) if axis not in reduction)
+            return free == output_shape or (not free and output_shape == (1,))
+
+        if fits(left, right):
+            return left, right
+        # Ordinary matrix tiles share leading batches; grouped elementwise
+        # partials can also share the coordinate immediately before K. Neither
+        # rule replaces an explicit named axis or changes a tile's extent.
+        for matrix in (True, False):
+            a, b = self.align_anonymous_batches(left, right, matrix=matrix)
+            if fits(a, b):
+                return a, b
+        return left, right
+
     def bind_group_axis(self, left, right, name):
         named = set(self.named_axes.values())
         left_axes, right_axes = axes_of(left.type), axes_of(right.type)
@@ -396,7 +414,7 @@ class ModelOperations:
             if len(names) == 1:
                 axis, left, right = self.bind_group_axis(left, right, names[0])
                 reduction = (axis,)
-                left, right = self.align_anonymous_batches(left, right, matrix=True)
+                left, right = self.align_contraction_batches(left, right, reduction, output[2])
             else:
                 reduction = tuple(self.named_axis(name) for name in names)
             if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
