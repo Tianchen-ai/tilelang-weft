@@ -30,10 +30,38 @@ class TileOperations:
 
     def read_region(self, region, axes):
         buffer, starts, shape = region
-        if self.buffer_owner(buffer) in self.locals and all(self.analyzer.can_prove_equal(start, 0) for start in starts):
+        if self.buffer_owner(buffer) in self.locals:
             value = self.local_value(buffer)
-            if shape == shape_of(value.type):
+            source_shape = shape_of(value.type)
+            source_axes = self.local_axes_for(buffer)
+            if shape == source_shape and all(self.analyzer.can_prove_equal(start, 0) for start in starts):
                 return self.rename(value, shape, axes)
+            if len(shape) == len(source_shape):
+                selectors, operands, selected_shape, selected_axes = [], [], [], []
+                from weft_core import dtypes as dt
+
+                for start, extent, size, axis in zip(starts, shape, source_shape, source_axes):
+                    if extent == size and self.analyzer.can_prove_equal(start, 0):
+                        selectors.append("all")
+                        selected_shape.append(size)
+                        selected_axes.append(axis)
+                    elif extent == 1:
+                        selectors.append("index")
+                        operands.append(self.cast(self.expr(start), dt.index))
+                    else:
+                        selectors.append("gather")
+                        coordinate = self.iota(extent, axis)
+                        if not self.analyzer.can_prove_equal(start, 0):
+                            coordinate = self.binary("add", self.cast(self.expr(start), element_type(coordinate.type).dtype), coordinate)
+                        operands.append(self.local_index(coordinate))
+                        selected_shape.append(extent)
+                        selected_axes.append(axis)
+                selected = self.op(
+                    "extract", (value, *operands),
+                    value_type(element_type(value.type), tuple(selected_shape), tuple(selected_axes)),
+                    {"selectors": json.dumps(selectors)},
+                )
+                return self.rename(selected, shape, axes)
         return self.load(buffer, self.region_indices(region, axes))
 
     def write_region(self, region, value, axes):

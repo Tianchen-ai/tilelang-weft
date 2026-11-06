@@ -79,6 +79,10 @@ loads rows through a reshaped local tile before reducing them.
 Fixed-width TIRx vector slices retain their lane domain through import.
 Their Ramp indices become typed coordinates, and Broadcast shares the same
 positional lane axis; saved buffer reads keep their original storage effects.
+Local tile regions preserve this distinction too: a complete dimension is an
+identity, a fixed element is an index, and only a selected coordinate domain
+becomes a gather. `T.load(table, at=indices, bounds="in_bounds")` reads the
+selected numeric elements from either a Tensor region or a saved value.
 
 A saved encoded value can also be reshaped with explicit logical axes:
 `T.reshape(record, (records, 32), axes=("record", "k"))`. This preserves the

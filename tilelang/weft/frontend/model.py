@@ -1,6 +1,7 @@
 """Import explicit source-model regions and operations into Canonical IR."""
 
 import json
+import math
 
 from tvm import tirx
 from weft_core import dtypes as dt
@@ -40,16 +41,18 @@ class ModelOperations:
 
     def align_anonymous_batches(self, left, right, *, matrix=False):
         left_shape, right_shape = shape_of(left.type), shape_of(right.type)
-        left_axes, right_axes = axes_of(left.type), list(axes_of(right.type))
+        left_axes, right_axes = list(axes_of(left.type)), list(axes_of(right.type))
         named = set(self.named_axes.values())
         # Matrix operands have independent free row/column axes immediately
         # before K. Only their leading batch axes align positionally.
         for offset in range(3 if matrix else 2, min(len(left_shape), len(right_shape)) + 1):
             if left_shape[-offset] != right_shape[-offset] and 1 not in (left_shape[-offset], right_shape[-offset]):
                 continue
-            if right_axes[-offset] not in named:
+            if left_axes[-offset] not in named and right_axes[-offset] in named:
+                left_axes[-offset] = right_axes[-offset]
+            elif right_axes[-offset] not in named:
                 right_axes[-offset] = left_axes[-offset]
-        return left, self.rename(right, right_shape, tuple(right_axes))
+        return self.rename(left, left_shape, tuple(left_axes)), self.rename(right, right_shape, tuple(right_axes))
 
     def align_contraction_batches(self, left, right, reduction, output_shape):
         """Use the declared destination to distinguish matrix and grouped tiles."""
@@ -285,6 +288,11 @@ class ModelOperations:
             return True
         if name == "tl.weft.load_value":
             if len(call.args) == 3:
+                indices = self.region(call.args[2])
+                index = self.read_region(indices, self.local_axes_for(indices[0]))
+                bounds = string(call.annotations["bounds"])
+                if bounds != "in_bounds":
+                    self.error("indexed loads require the in_bounds contract")
                 if isinstance(call.args[1], tirx.Var):
                     table = self.expr(call.args[1])
                     if not isinstance(table.type, (ViewType, SliceType)) or table.type.encoding.kind != "dense":
@@ -294,12 +302,23 @@ class ModelOperations:
                     table = self.op("admit", (table,), numeric)
                 else:
                     saved = self.region(call.args[1])
+                    if self.buffer_owner(saved[0]) in self.pointers:
+                        coordinates, stride = [], math.prod(saved[2])
+                        index_dtype = element_type(index.type).dtype
+                        for start, extent in zip(saved[1], saved[2]):
+                            stride //= extent
+                            coordinate = index
+                            if stride != 1:
+                                coordinate = self.binary("div", coordinate, self.constant(stride, index_dtype))
+                            coordinate = self.binary("mod", coordinate, self.constant(extent, index_dtype))
+                            coordinate = self.binary("add", self.cast(self.expr(start), index_dtype), coordinate)
+                            coordinates.append(coordinate)
+                        value = self.load(saved[0], coordinates)
+                        self.write_region(self.region(call.args[0]), value, axes_of(value.type))
+                        return True
                     table = self.read_region(saved, self.local_axes_for(saved[0]))
                     scalar = element_type(table.type)
-                indices = self.region(call.args[2])
-                index = self.read_region(indices, self.local_axes[indices[0]])
-                bounds = string(call.annotations["bounds"])
-                if bounds != "in_bounds" or not isinstance(scalar, ScalarType):
+                if not isinstance(scalar, ScalarType):
                     self.error("indexed loads require a numeric table and the in_bounds contract")
                 value = self.op(
                     "lookup", (table, index), value_type(scalar, shape_of(index.type), axes_of(index.type)), {"bounds": json.dumps(bounds)}
@@ -422,7 +441,7 @@ class ModelOperations:
                 {"group": str(group), "overflow": json.dumps("wrap")},
             )
             if shape != output[2]:
-                self.error("mac_groups destination shape must match its explicit partial groups")
+                self.error(f"mac_groups produces {shape}, but its explicit destination has shape {output[2]}")
             self.write_region(output, result, axes)
             return True
         if name == "tl.weft.reduce_dot":

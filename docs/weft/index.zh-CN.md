@@ -57,6 +57,9 @@ allocation 或 state/stage 生命周期。[tile 示例](https://github.com/Tianc
 
 固定宽度的 TIRx 向量切片在导入时保留 lane 域。Ramp 索引成为有类型的坐标，
 Broadcast 共享同一位置 lane 轴；保存值的读取保留原存储 effects。
+局部 tile region 同样保留这种区别：完整维度是恒等投影，固定元素是 index，
+选择一组坐标才形成 gather。`T.load(table, at=indices, bounds="in_bounds")`
+可以从 Tensor region 或保存值读取所选数值元素。
 
 编码值快照也可带显式逻辑轴重塑：
 `T.reshape(record, (records, 32), axes=("record", "k"))`。
