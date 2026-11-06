@@ -82,6 +82,248 @@ def block32(M, K, format="Q4_0", activation="Q8_0", rows=1, lanes=8):
     return main
 
 
+@T.macro
+def indexed_xxs_record(w, x, total, rows, parity, grid):
+    """Expose metadata groups, codebook entries and sign payload reuse."""
+    q, metadata, d, activation, sums, ds = w.q, w.metadata, w.d, x.q, x.bsum, x.ds
+    scales = T.alloc_local((rows, 8), "int32")
+    indices = T.alloc_local((rows, 8, 8, 4), "uint32")
+    sign_rows = T.alloc_local((rows, 8, 4), "uint8")
+    for r, group in T.Parallel(rows, 8):
+        scales[r, group] = T.cast(metadata[r, group] >> T.uint32(28), "int32") * 2 + 1
+    for r, group, entry, payload in T.Parallel(rows, 8, 8, 4):
+        index = T.cast(q[r, T.cast(group, "uint32") * T.uint32(8) + T.cast(entry, "uint32")], "uint32")
+        indices[r, group, entry, payload] = index * T.uint32(4) + T.cast(payload, "uint32")
+    selected = T.load(grid.values, at=indices, bounds="in_bounds")
+    for r, group, entry in T.Parallel(rows, 8, 4):
+        stored = T.cast(metadata[r, group] >> (T.cast(entry, "uint32") * T.uint32(7)), "uint8") & T.uint8(127)
+        folded = (stored ^ (stored >> T.uint8(4))) & T.uint8(15)
+        sign_rows[r, group, entry] = stored | parity[folded]
+    signs = T.alloc_local((rows, 8, 4, 8), "bool")
+    for r, group, entry, payload in T.Parallel(rows, 8, 4, 8):
+        signs[r, group, entry, payload] = (sign_rows[r, group, entry] & (T.uint8(1) << T.cast(payload, "uint8"))) != T.uint8(0)
+    expanded_signs = T.reshape(signs, (rows, 8, 8, 4))
+    codes = T.alloc_local((rows, 8, 8, 4), "uint8")
+    inputs = T.alloc_local((rows, 8, 8, 4), "int8")
+    for r, group, entry, payload in T.Parallel(rows, 8, 8, 4):
+        value = selected[r, group, entry, payload]
+        signed = T.if_then_else(expanded_signs[r, group, entry, payload], -value, value)
+        codes[r, group, entry, payload] = T.cast(signed, "uint8") + T.uint8(128)
+        coordinate = T.cast(group, "uint32") * T.uint32(32) + T.cast(entry, "uint32") * T.uint32(4) + T.cast(payload, "uint32")
+        inputs[r, group, entry, payload] = activation[coordinate]
+    products = T.alloc_local((rows, 8, 8, 1), "int32")
+    T.mac_groups(codes, inputs, products, n=4, into="int32", over="payload")
+    scaled = T.alloc_local((rows, 8, 8), "int32")
+    for r, group, entry in T.Parallel(rows, 8, 8):
+        scaled[r, group, entry] = products[r, group, entry, 0] * scales[r, group]
+    grouped = T.reshape(scaled, (rows, 4, 16))
+    integer = T.alloc_local((rows, 16), "int32")
+    T.reduce_sum(grouped, integer, dim=1)
+    for r, lane in T.Parallel(rows, 16):
+        correction = T.cast(sums[lane], "int32") * 128 * scales[r, T.cast(lane, "uint32") // T.uint32(2)]
+        total[r, lane] += T.cast(integer[r, lane] - correction, "float32") * (T.cast(d[r], "float32") * ds[()])
+
+
+@tilelang.jit(target="weft")
+def indexed_subgroups(M, K, format="IQ2_S", rows=1, windows=4):
+    """Retain codebook geometry and explicitly grouped I32 scale partials.
+
+    IQ2_S/IQ3_S transfer signs to prepared Q8_K in [-127, 127] before
+    I16 pairs. IQ3_XXS exposes group/entry/payload and reuses its block sums.
+    """
+    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS") and K > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
+    assert windows in (1, 2, 4)
+    payload = 8 if format == "IQ2_S" else 4
+    window_elements = 256 // windows
+    entries = window_elements // payload
+    grid_bytes = {"IQ2_S": 8192, "IQ3_S": 2048, "IQ3_XXS": 1024}[format]
+    grid_encoding = F.I8X8 if payload == 8 else F.I8X4
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, weight_bytes), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((grid_bytes,), "int8"),
+        Signs: T.Tensor((1024 if format == "IQ3_XXS" else 0,), "int8"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        grid = T.view(Grid, shape=(grid_bytes // payload, payload), encoding=grid_encoding, axes=("entry", "payload"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            if format == "IQ3_XXS":
+                parity = T.alloc_local((16,), "uint8")
+                for i in T.Parallel(16):
+                    bits = T.cast(i, "uint8")
+                    parity[i] = ((bits ^ (bits >> T.uint8(1)) ^ (bits >> T.uint8(2)) ^ (bits >> T.uint8(3))) & T.uint8(1)) << T.uint8(7)
+            with T.level.rows(M, group=rows) as row:
+                total = T.state((rows, 16), "float32", init=0)
+                result = T.alloc_local((rows,), "float32")
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block]), T.load(values[block])
+                    if format == "IQ3_XXS":
+                        indexed_xxs_record(w, x, total, rows, parity, grid)
+                    else:
+                        activation, d, ds = x.q, w.d, x.ds
+                        quantized = w.q
+                        high, signs, scales = w.qh, w.signs, w.scales
+                        integer = T.alloc_local((rows, 16), "int32")
+                        T.fill(integer, 0)
+                        for part in T.unroll(windows):
+                            indices = T.alloc_local((rows, entries, payload), "uint16")
+                            inputs = T.alloc_local((rows, entries, payload), "int8")
+                            codes = T.alloc_local((rows, entries, payload), "uint6")
+                            for r, e, p in T.Parallel(rows, entries, payload):
+                                code = T.uint16(part * entries) + T.cast(e, "uint16")
+                                if format == "IQ2_S":
+                                    upper = (high[r, code // T.uint16(4)] >> (code % T.uint16(4) * T.uint16(2))) & T.uint8(3)
+                                    index = T.cast(quantized[r, code], "uint16") | (T.cast(upper, "uint16") << T.uint16(8))
+                                else:
+                                    index = T.cast(quantized[r, code], "uint16") | (T.cast(high[r, code], "uint16") << T.uint16(8))
+                                indices[r, e, p] = index * T.uint16(payload) + T.cast(p, "uint16")
+                            selected = T.load(grid.values, at=indices, bounds="in_bounds")
+                            for r, e, p in T.Parallel(rows, entries, payload):
+                                position = T.uint16(part * window_elements) + T.cast(e, "uint16") * T.uint16(payload) + T.cast(p, "uint16")
+                                value = activation[position]
+                                negative = signs[r, position] != 0
+                                codes[r, e, p] = T.cast(selected[r, e, p], "uint6")
+                                inputs[r, e, p] = T.if_then_else(negative, -value, value)
+                            scaled = T.alloc_local((rows, entries, payload // 4), "int32")
+                            products = T.alloc_local((rows, entries, payload // 2), "int16")
+                            factors = T.alloc_local((rows, entries, payload // 2), "int16")
+                            T.mac_groups(codes, inputs, products, n=2, into="int16", over="payload")
+                            for r, e, p in T.Parallel(rows, entries, payload // 2):
+                                if format == "IQ2_S":
+                                    group = T.uint16(part * entries // 2) + T.cast(e, "uint16") // T.uint16(2)
+                                    metadata_value = scales[r, group // T.uint16(2)]
+                                    scale = (metadata_value >> (group % T.uint16(2) * T.uint16(4))) & T.uint8(15)
+                                else:
+                                    scale = scales[r, T.uint16(part * entries // 8) + T.cast(e, "uint16") // T.uint16(8)]
+                                factors[r, e, p] = T.cast(scale, "int16") * T.int16(2) + T.int16(1)
+                            T.mac_groups(products, factors, scaled, n=2, into="int32", over="payload")
+                            grouped = T.alloc_local((rows, window_elements // 64, 16), "int32")
+                            reduced = T.alloc_local((rows, 16), "int32")
+                            for r, g, p in T.Parallel(rows, window_elements // 64, 16):
+                                position = T.cast(g, "uint16") * T.uint16(16) + T.cast(p, "uint16")
+                                grouped[r, g, p] = scaled[r, position // T.uint16(payload // 4), position % T.uint16(payload // 4)]
+                            T.reduce_sum(grouped, reduced, dim=1)
+                            for r, p in T.Parallel(rows, 16):
+                                integer[r, p] += reduced[r, p]
+                        for r, p in T.Parallel(rows, 16):
+                            total[r, p] += T.cast(integer[r, p], "float32") * (T.cast(d[r], "float32") * ds[()])
+                T.reduce_sum(total, result, dim=1)
+                if format in ("IQ2_S", "IQ3_XXS"):
+                    for r in T.Parallel(rows):
+                        result[r] *= 0.125 if format == "IQ2_S" else 0.25
+                T.copy(result, output[row])
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def iq1_groups(M, K, format="IQ1_S", rows=1):
+    """Keep the exact eighth correction and integer scaling before float lanes."""
+    assert format in ("IQ1_S", "IQ1_M") and K > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    record_bytes = encoding.schema.storage_bits // 8
+    medium = format == "IQ1_M"
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * record_bytes), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((16384,), "int8"),
+        HalfBits: T.Tensor((65536 if medium else 0,), "float32"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.rows(M, group=rows) as row:
+                total = T.state((rows, 16), "float32", init=0)
+                result = T.alloc_local((rows,), "float32")
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block]), T.load(values[block])
+                    q, high, activation, ds, sums = w.q, w.qh, x.q, x.ds, x.bsum
+                    if medium:
+                        metadata = w.scales
+                    else:
+                        d = w.d
+                    indices = T.alloc_local((rows, 32, 8), "uint16")
+                    factors = T.alloc_local((rows, 32), "int16")
+                    deltas = T.alloc_local((rows, 32), "int16")
+                    for r, e in T.Parallel(rows, 32):
+                        entry = T.cast(e, "uint16")
+                        if medium:
+                            bits = T.cast(high[r, entry // T.uint16(2)], "uint16") >> (entry % T.uint16(2) * T.uint16(4))
+                            group = entry // T.uint16(4)
+                            sc = T.cast(metadata[r, group // T.uint16(2) * T.uint16(2)], "uint16")
+                            sc |= T.cast(metadata[r, group // T.uint16(2) * T.uint16(2) + T.uint16(1)], "uint16") << T.uint16(8)
+                            shift = group % T.uint16(2) * T.uint16(6) + entry % T.uint16(4) // T.uint16(2) * T.uint16(3)
+                            scale = (sc >> shift) & T.uint16(7)
+                            delta = T.int16(1) - T.cast((bits >> T.uint16(3)) & T.uint16(1), "int16") * T.int16(2)
+                        else:
+                            bits = T.cast(high[r, entry // T.uint16(4)], "uint16")
+                            scale = (bits >> T.uint16(12)) & T.uint16(7)
+                            delta = T.int16(1) - T.cast(bits >> T.uint16(15), "int16") * T.int16(2)
+                        factors[r, e] = T.cast(scale, "int16") * T.int16(2) + T.int16(1)
+                        deltas[r, e] = delta
+                    for r, e, p in T.Parallel(rows, 32, 8):
+                        entry = T.cast(e, "uint16")
+                        bits = T.cast(high[r, entry // T.uint16(2 if medium else 4)], "uint16")
+                        upper = ((bits >> (entry % T.uint16(2) * T.uint16(4))) if medium else (bits >> (entry % T.uint16(4) * T.uint16(3)))) & T.uint16(7)
+                        index = T.cast(q[r, e], "uint16") | (upper << T.uint16(8))
+                        indices[r, e, p] = index * T.uint16(8) + T.cast(p, "uint16")
+                    selected = T.load(grid.values, at=indices, bounds="in_bounds")
+                    codes = T.alloc_local((rows, 32, 8), "int16" if medium else "uint2")
+                    inputs = T.alloc_local((32, 8), "int16" if medium else "int8")
+                    products = T.alloc_local((rows, 32, 4 if medium else 2), "int32")
+                    grouped = T.alloc_local((rows, 8 if medium else 4, 16), "int32")
+                    integer = T.alloc_local((rows, 16), "int32")
+                    for e, p in T.Parallel(32, 8):
+                        inputs[e, p] = T.cast(activation[T.cast(e, "uint16") * T.uint16(8) + T.cast(p, "uint16")], "int16" if medium else "int8")
+                    for r, e, p in T.Parallel(rows, 32, 8):
+                        if medium:
+                            codes[r, e, p] = (T.cast(selected[r, e, p], "int16") * T.int16(8) + deltas[r, e]) * factors[r, e]
+                        else:
+                            codes[r, e, p] = T.cast(selected[r, e, p] + T.int8(1), "uint2")
+                    T.mac_groups(codes, inputs, products, n=2 if medium else 4, into="int32", over="payload")
+                    for r, g, p in T.Parallel(rows, 8 if medium else 4, 16):
+                        position = T.cast(g, "uint16") * T.uint16(16) + T.cast(p, "uint16")
+                        if medium:
+                            grouped[r, g, p] = products[r, position // T.uint16(4), position % T.uint16(4)]
+                        else:
+                            grouped[r, g, p] = products[r, position // T.uint16(2), position % T.uint16(2)] * T.cast(factors[r, position // T.uint16(2)], "int32") * 8
+                    T.reduce_sum(grouped, integer, dim=1)
+                    for r, p in T.Parallel(rows, 16):
+                        if medium:
+                            sc0 = T.cast(metadata[r, 0], "uint16") | (T.cast(metadata[r, 1], "uint16") << T.uint16(8))
+                            sc1 = T.cast(metadata[r, 2], "uint16") | (T.cast(metadata[r, 3], "uint16") << T.uint16(8))
+                            sc2 = T.cast(metadata[r, 4], "uint16") | (T.cast(metadata[r, 5], "uint16") << T.uint16(8))
+                            sc3 = T.cast(metadata[r, 6], "uint16") | (T.cast(metadata[r, 7], "uint16") << T.uint16(8))
+                            bits = (sc0 >> T.uint16(12)) | ((sc1 >> T.uint16(8)) & T.uint16(240))
+                            bits |= ((sc2 >> T.uint16(4)) & T.uint16(3840)) | (sc3 & T.uint16(61440))
+                            scale = HalfBits[bits]
+                            contribution = integer[r, p]
+                        else:
+                            scale = T.cast(d[r], "float32")
+                            contribution = integer[r, p] - (T.int32(8) - T.cast(deltas[r, p * 2], "int32")) * T.cast(factors[r, p * 2], "int32") * T.cast(sums[p], "int32")
+                        total[r, p] += T.cast(contribution, "float32") * (scale * ds[()])
+                T.reduce_sum(total, result, dim=1)
+                for r in T.Parallel(rows):
+                    result[r] *= 0.125
+                T.copy(result, output[row])
+
+    return main
+
+
 @tilelang.jit(target="weft")
 def k_groups(M, K, format="Q4_K", rows=1, lanes=16):
     """Retain scaled pair partials and the affine correction independently."""
@@ -102,6 +344,52 @@ def k_groups(M, K, format="Q4_K", rows=1, lanes=16):
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             k_group_rows(weights, values, output, M, K, format, rows, lanes, code_type, "m")
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def q6_planes(M, K, rows=1, lanes=64, planes=4):
+    """Retain explicitly scaled signed products across the encoded row."""
+    assert M == rows == 1
+    assert lanes in (32, 64, 128) and planes >= 2 and 256 % (lanes * planes) == 0
+    assert K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * 210), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=F.Q6_K, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(1,), axes=("m",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            total = T.alloc_local((lanes,), "float32")
+            T.fill(total, 0)
+            result = T.alloc_local((1,), "float32")
+            with T.level.blocks(K, extent=256) as block:
+                w, x = T.load(weights[0, block]), T.load(values[block])
+                low, high, scales, d, activation, ds = w.ql, w.qh, w.scales, w.d, x.q, x.ds
+                accumulated = T.alloc_local((lanes,), "int32")
+                T.fill(accumulated, 0)
+                for group in T.unroll(256 // (lanes * planes)):
+                    scaled = T.alloc_local((planes, lanes), "int32")
+                    partial = T.alloc_local((lanes,), "int32")
+                    for p, k in T.Parallel(planes, lanes):
+                        coordinate = T.uint32(group * planes * lanes) + T.cast(p, "uint32") * T.uint32(lanes) + T.cast(k, "uint32")
+                        code = T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(4))
+                        centered = T.cast(code, "int8") - T.int8(32)
+                        product = T.cast(centered, "int16") * T.cast(activation[coordinate], "int16")
+                        scaled[p, k] = T.cast(product, "int32") * T.cast(scales[coordinate // T.uint32(16)], "int32")
+                    T.reduce_sum(scaled, partial, dim=0)
+                    for k in T.Parallel(lanes):
+                        accumulated[k] += partial[k]
+                for k in T.Parallel(lanes):
+                    total[k] += T.cast(accumulated[k], "float32") * (T.cast(d[()], "float32") * ds[()])
+            T.reduce_sum(total, result, dim=0)
+            T.copy(result, output)
 
     return main
 
@@ -139,6 +427,14 @@ def k_group_rows(weights, values, output, M, K, format, rows, lanes, code_type, 
             d = T.load(weight.d)
             activation = T.load(values[block])
             x, xd, sums = activation.q, activation.ds, activation.bsum
+            if format in ("Q2_K", "Q4_K", "Q5_K"):
+                metadata = T.alloc_local((rows, 2), "float16")
+                block_scales = T.alloc_local((rows, 2), "float32")
+                for r in T.Parallel(rows):
+                    metadata[r, 0] = d[r]
+                    metadata[r, 1] = dmin[r]
+                for r, part in T.Parallel(rows, 2):
+                    block_scales[r, part] = T.cast(metadata[r, part], "float32") * xd[()]
             if format == "Q5_K":
                 high = T.load(weight.qh)
             for group in T.unroll(64 // lanes):
@@ -194,9 +490,13 @@ def k_group_rows(weights, values, output, M, K, format, rows, lanes, code_type, 
                     integer[r, p] -= correction[r, p] * (4 if format == "Q3_K" else 32)
             else:
                 for r, p in T.Parallel(rows, 16 if format == "Q2_K" else 8):
-                    minimum[r, p] += (T.cast(dmin[r], "float32") * xd[()]) * T.cast(correction[r, p], "float32")
+                    minimum[r, p] += block_scales[r, 1] * T.cast(correction[r, p], "float32")
             for r, p in T.Parallel(rows, lanes):
-                total[r, p] += (T.cast(d[r], "float32") * xd[()]) * T.cast(integer[r, p], "float32")
+                if format in ("Q2_K", "Q4_K", "Q5_K"):
+                    scale = block_scales[r, 0]
+                else:
+                    scale = T.cast(d[r], "float32") * xd[()]
+                total[r, p] += scale * T.cast(integer[r, p], "float32")
         result = T.alloc_local((rows,), "float32")
         T.reduce_sum(total, result, dim=1)
         if format in ("Q2_K", "Q4_K", "Q5_K"):
@@ -228,7 +528,7 @@ def k_projection(M, N, K, format="Q4_K", rows=4, lanes=16, extreme_policy="first
         values = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
         output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne")
+            quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
                 k_group_rows(weights, values[m, :], output[m, :], N, K, format, rows, lanes, code_type, "n")
 
@@ -260,8 +560,11 @@ def indexed_groups(M, K, format="IQ2_XXS", rows=1):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         grid = T.view(Grid, shape=(entries, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
-        signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign_entry", "sign_payload"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
+            parity = T.alloc_local((16,), "uint8")
+            for i in T.Parallel(16):
+                nibble = T.cast(i, "uint8")
+                parity[i] = ((nibble ^ (nibble >> T.uint8(1)) ^ (nibble >> T.uint8(2)) ^ (nibble >> T.uint8(3))) & T.uint8(1)) << T.uint8(7)
             with T.level.rows(M, group=rows) as row:
                 total = T.state((rows, 16), "float32", init=0)
                 with T.level.blocks(K, extent=256) as block:
@@ -270,7 +573,7 @@ def indexed_groups(M, K, format="IQ2_XXS", rows=1):
                     if format == "IQ2_XS":
                         metadata = w.scales
                     grid_index = T.alloc_local((rows, 32, 8), "uint16")
-                    sign_index = T.alloc_local((rows, 32, 8), "uint16")
+                    negative = T.alloc_local((rows, 32, 8), "bool")
                     codes = T.alloc_local((rows, 32, 8), "uint6")
                     inputs = T.alloc_local((rows, 32, 8), "int8")
                     products = T.alloc_local((rows, 32, 4), "int16")
@@ -292,12 +595,14 @@ def indexed_groups(M, K, format="IQ2_XXS", rows=1):
                             index = word >> (entry % T.uint16(2) * T.uint16(8)) & T.uint16(255)
                             sign = T.cast(bits >> (T.cast(entry % T.uint16(4), "uint32") * T.uint32(7)), "uint16") & T.uint16(127)
                         grid_index[r, e, p] = index * T.uint16(8) + payload
-                        sign_index[r, e, p] = sign * T.uint16(8) + payload
+                        stored = T.cast(sign, "uint8")
+                        folded = (stored ^ (stored >> T.uint8(4))) & T.uint8(15)
+                        bits = stored | parity[folded]
+                        negative[r, e, p] = (bits & (T.uint8(1) << T.cast(payload, "uint8"))) != T.uint8(0)
                     positive = T.load(grid.values, at=grid_index, bounds="in_bounds")
-                    sign = T.load(signs.values, at=sign_index, bounds="in_bounds")
                     for r, e, p in T.Parallel(rows, 32, 8):
                         value = activation[T.cast(e, "uint16") * T.uint16(8) + T.cast(p, "uint16")]
-                        inputs[r, e, p] = T.if_then_else(sign[r, e, p] < T.int8(0), -value, value)
+                        inputs[r, e, p] = T.if_then_else(negative[r, e, p], -value, value)
                         codes[r, e, p] = T.cast(positive[r, e, p], "uint6")
                     T.mac_groups(codes, inputs, products, n=2, into="int16", over="payload")
                     for r, entry, p in T.Parallel(rows, 32, 4):
@@ -315,7 +620,7 @@ def indexed_groups(M, K, format="IQ2_XXS", rows=1):
                         scaled[r, segment, lane] = quarters[r, entry, quad % 2]
                     T.reduce_sum(scaled, integer, dim=1)
                     for r, lane in T.Parallel(rows, 16):
-                        total[r, lane] += T.cast(integer[r, lane], "float32") * (T.cast(d[r], "float32") * ds[()]) * 0.125
+                        total[r, lane] += T.cast(integer[r, lane], "float32") * ((T.cast(d[r], "float32") * 0.125) * ds[()])
                 result = T.alloc_local((rows,), "float32")
                 T.reduce_sum(total, result, dim=1)
                 T.copy(result, output[row])

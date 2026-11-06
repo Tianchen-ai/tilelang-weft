@@ -7,36 +7,9 @@ the block lifetime; no persistent dense weight matrix is introduced.
 import tilelang
 from tilelang.weft import language as T
 from . import ggml_formats as F
-from . import decoding as D
 from .preparation import quantize_rows
 from . import partials
 from . import integer_dot
-
-
-def decoder(format):
-    if format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K", "TQ2_0"):
-        return D.decode_dequantize
-    elif format == "IQ4_NL":
-        return D.decode_dequantize_iq4_nl
-    elif format == "IQ1_S":
-        return D.decode_iq1_s
-    elif format == "IQ1_M":
-        return D.decode_iq1_m
-    elif format == "IQ2_S":
-        return D.decode_iq2_s
-    elif format in ("IQ2_XS", "IQ2_XXS"):
-        return D.decode_iq2_indexed
-    elif format == "IQ3_S":
-        return D.decode_iq3_s
-    elif format == "IQ3_XXS":
-        return D.decode_iq3_xxs
-    elif format == "IQ4_XS":
-        return D.decode_iq4_xs
-    elif format == "TQ1_0":
-        return D.decode_tq1_0
-    elif format in ("MXFP4", "NVFP4"):
-        return D.decode_fp4
-    raise ValueError(f"no packed decoder for {format}")
 
 
 @T.macro
@@ -46,11 +19,8 @@ def accumulate(
     part,
     total,
     rows,
-    block,
     format,
-    activation,
     partner,
-    decode,
     Grid,
     Signs,
     Codebook,
@@ -69,7 +39,7 @@ def accumulate(
     if format == "Q6_K":
         x = T.load(activation_view[part])
         if single:
-            partials.q6_k_single(weight, x, total, scale_groups)
+            partials.q6_k_single(weight, x, total, scale_groups, part)
         else:
             partials.q6_k(weight, x, total, rows)
     if format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "IQ4_NL", "MXFP4"):
@@ -139,7 +109,6 @@ def vec_dot(M, K, format="Q4_0", activation="Q8_0", rows=1, scale_groups=1):
     activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
     assert K > 0 and K % block == 0 and K % partner.schema.elements == 0
     grid_size, signs_size, codebook_size, scale_size, half_size, powers_size = table_sizes(format)
-    decode = decoder(format)
     accumulator = "float32"
 
     @T.prim_func
@@ -169,7 +138,7 @@ def vec_dot(M, K, format="Q4_0", activation="Q8_0", rows=1, scale_groups=1):
                 codebook = T.alloc_local((codebook_size,), "int8")
                 T.copy(Codebook, codebook)
             with T.level.rows(M, group=rows) as row:
-                total = T.state((rows,), accumulator, init=0)
+                total = T.state(() if format in ("Q4_K", "Q6_K") and M == rows == 1 else (rows,), accumulator, init=0)
                 with T.level.blocks(K, extent=block) as part:
                     if format in ("Q4_K", "Q6_K") and M == rows == 1:
                         weight = T.load(weights[0, part])
@@ -181,11 +150,8 @@ def vec_dot(M, K, format="Q4_0", activation="Q8_0", rows=1, scale_groups=1):
                         part,
                         total,
                         rows,
-                        block,
                         format,
-                        activation,
                         partner,
-                        decode,
                         grid,
                         signs,
                         codebook,
@@ -201,14 +167,15 @@ def vec_dot(M, K, format="Q4_0", activation="Q8_0", rows=1, scale_groups=1):
 
 
 @tilelang.jit(target="weft")
-def projection(M, N, K, format="Q4_0", activation="Q8_0", rows=4, extreme_policy="first", inverse_policy="reciprocal"):
+def projection(M, N, K, format="Q4_0", activation="Q8_0", rows=4, extreme_policy="first", inverse_policy="reciprocal", scale_groups=1):
+    assert scale_groups in (1, 2, 4, 8, 16)
     encoding, partner = getattr(F, format), getattr(F, activation)
     block = encoding.schema.elements
     weight_bytes = K // block * (encoding.schema.storage_bits // 8)
     activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
     grid_size, signs_size, codebook_size, scale_size, half_size, powers_size = table_sizes(format)
-    decode = decoder(format)
     accumulator = "float32"
+    single = rows == 1 and format in ("Q4_K", "Q6_K")
 
     @T.prim_func
     def main(
@@ -241,26 +208,28 @@ def projection(M, N, K, format="Q4_0", activation="Q8_0", rows=4, extreme_policy
             quantize_rows(source, quantized, M, K, activation, partner.schema.elements, extreme_policy, inverse_policy, "rne")
             for m in T.serial(M):
                 with T.level.cols(N, group=rows) as column:
-                    total = T.state((rows,), accumulator, init=0)
+                    total = T.state(() if single else (rows,), accumulator, init=0)
                     with T.level.blocks(K, extent=block) as part:
-                        weight = T.load(weights[column, part])
+                        if single:
+                            weight = T.load(weights[column, part][0, :])
+                        else:
+                            weight = T.load(weights[column, part])
                         accumulate(
                             weight,
                             quantized[m, :],
                             part,
                             total,
                             rows,
-                            block,
                             format,
-                            activation,
                             partner,
-                            decode,
                             grid,
                             signs,
                             codebook,
                             Scale,
                             HalfBits,
                             Powers,
+                            single=single,
+                            scale_groups=scale_groups,
                         )
                     T.copy(total, output[m, column])
 

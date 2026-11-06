@@ -4,7 +4,7 @@ from tilelang.weft import language as T
 
 
 @T.macro
-def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None):
+def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None, single=False):
     width = elements if width is None else width
     if format == "Q6_K":
         (q, high, scales, d) = (record.ql, record.qh, record.scales, record.d)
@@ -25,42 +25,42 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
     for r, lane in T.Parallel(rows, width):
         k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
         if format == "Q1_0":
-            value = T.cast(q[r, k], "int32") * 2 - 1
+            value = T.cast(q[(k,) if single else (r, k)], "int32") * 2 - 1
         elif format in ("Q5_0", "Q5_1"):
-            value = T.cast(q[r, k], "int32") | T.cast(high[r, k], "int32") << 4
+            value = T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4
             if format == "Q5_0":
                 value = value - 16
         elif format == "Q3_K":
-            value = T.cast(q[r, k], "int32") - (1 - T.cast(high[r, k], "int32")) * 4
+            value = T.cast(q[(k,) if single else (r, k)], "int32") - (1 - T.cast(high[(k,) if single else (r, k)], "int32")) * 4
         elif format == "Q5_K":
-            value = T.cast(q[r, k], "int32") | T.cast(high[r, k], "int32") << 4
+            value = T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4
         elif format == "Q6_K":
-            value = (T.cast(q[r, k], "int32") | T.cast(high[r, k], "int32") << 4) - 32
+            value = (T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4) - 32
         else:
-            value = T.cast(q[r, k], "int32")
+            value = T.cast(q[(k,) if single else (r, k)], "int32")
             if format == "Q4_0":
                 value = value - 8
             elif format == "TQ2_0":
                 value = value - 1
         if format == "Q2_K":
-            scale = T.cast(scales[r, k // 16], "int32") & 15
-            minimum_value = T.cast(scales[r, k // 16], "int32") >> 4
-            result[r, lane] = T.cast(d[r], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[r], "float32") * T.cast(
+            scale = T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") & 15
+            minimum_value = T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") >> 4
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[() if single else (r,)], "float32") * T.cast(
                 minimum_value, "float32"
             )
         elif format == "Q3_K":
-            scale = (T.cast(scale_low[r, k // 16], "int32") | T.cast(scale_high[r, k // 16], "int32") << 4) - 32
-            result[r, lane] = T.cast(d[r], "float32") * T.cast(scale * value, "float32")
+            scale = (T.cast(scale_low[(k // 16,) if single else (r, k // 16)], "int32") | T.cast(scale_high[(k // 16,) if single else (r, k // 16)], "int32") << 4) - 32
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32")
         elif format in ("Q4_K", "Q5_K"):
-            result[r, lane] = T.cast(d[r], "float32") * T.cast(scales[r, k // 32], "float32") * T.cast(value, "float32") - T.cast(
-                dmin[r], "float32"
-            ) * T.cast(minimum[r, k // 32], "float32")
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scales[(k // 32,) if single else (r, k // 32)], "float32") * T.cast(value, "float32") - T.cast(
+                dmin[() if single else (r,)], "float32"
+            ) * T.cast(minimum[(k // 32,) if single else (r, k // 32)], "float32")
         elif format == "Q6_K":
-            result[r, lane] = T.cast(d[r], "float32") * T.cast(T.cast(scales[r, k // 16], "int32") * value, "float32")
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") * value, "float32")
         else:
-            result[r, lane] = T.cast(d[r], "float32") * T.cast(value, "float32")
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(value, "float32")
         if format in ("Q4_1", "Q5_1"):
-            result[r, lane] += T.cast(minimum[r], "float32")
+            result[r, lane] += T.cast(minimum[() if single else (r,)], "float32")
 
 
 @T.macro
@@ -128,9 +128,14 @@ def decode_iq2_indexed(record, result, rows, format, elements, Grid, Signs, Code
     (q, d) = (record.q, record.d)
     if format == "IQ2_XS":
         scales = record.scales
-    for r, lane in T.Parallel(rows, width):
-        k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
-        (entry, payload) = (k // 8, k % 8)
+    entries = width // 8
+    grid_entries = T.alloc_local((rows, entries), "uint32")
+    sign_entries = T.alloc_local((rows, entries), "uint32")
+    grid_indices = T.alloc_local((rows, entries, 8), "uint32")
+    sign_indices = T.alloc_local((rows, entries, 8), "uint32")
+    factors = T.alloc_local((rows, entries), "float32")
+    for r, local in T.Parallel(rows, entries):
+        entry = T.uint32(offset // 8) + T.cast(local, "uint32")
         if format == "IQ2_XS":
             word = T.cast(q[r, entry], "uint32")
             (index, sign_index) = (word & 511, word >> 9)
@@ -142,10 +147,20 @@ def decode_iq2_indexed(record, result, rows, format, elements, Grid, Signs, Code
             index = word >> entry % 2 * 8 & 255
             sign_index = metadata >> entry % 4 * 7 & 127
             sc = metadata >> 28
-        scale = T.cast(d[r], "float32") * (0.5 + T.cast(sc, "float32")) * 0.25
-        result[r, lane] = scale * T.cast(
-            T.cast(Grid[index * 8 + payload], "int32") * T.cast(Signs[sign_index * 8 + payload], "int32"), "float32"
-        )
+        grid_entries[r, local] = index
+        sign_entries[r, local] = sign_index
+        factors[r, local] = T.cast(d[r], "float32") * (0.5 + T.cast(sc, "float32")) * 0.25
+    for r, entry, payload in T.Parallel(rows, entries, 8):
+        grid_indices[r, entry, payload] = grid_entries[r, entry] * T.uint32(8) + T.cast(payload, "uint32")
+        sign_indices[r, entry, payload] = sign_entries[r, entry] * T.uint32(8) + T.cast(payload, "uint32")
+    values = T.load(Grid, at=grid_indices, bounds="in_bounds")
+    signs = T.load(Signs, at=sign_indices, bounds="in_bounds")
+    decoded = T.alloc_local((rows, entries, 8), "float32")
+    for r, entry, payload in T.Parallel(rows, entries, 8):
+        decoded[r, entry, payload] = factors[r, entry] * T.cast(
+            T.cast(values[r, entry, payload], "int32") * T.cast(signs[r, entry, payload], "int32"), "float32")
+    flat = T.reshape(decoded, (rows, width))
+    T.copy(flat, result)
 
 
 @T.macro
