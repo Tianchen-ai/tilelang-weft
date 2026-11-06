@@ -7,6 +7,7 @@ import math
 from tvm import tirx
 from tvm.script.ir_builder import tirx as I
 from tilelang.language.allocate import alloc_local
+from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_tile_region
 
 from .encoding import EncodingDefinition
@@ -14,7 +15,7 @@ from .levels import Point
 
 
 def intrinsic(name, *args, dtype="handle", **annotations):
-    return tirx.call_intrin(dtype, tirx.op.Op.get("tl.weft." + name), *args, annotations=annotations)
+    return tirx.call_intrin(dtype, tirx.op.Op.get("tl.weft." + name), *args, annotations=_normalize_annotations(annotations))
 
 
 def bind(expression):
