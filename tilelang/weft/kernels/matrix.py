@@ -8,7 +8,7 @@ from .preparation import quantize_rows
 
 
 @T.macro
-def k_layout_row(weights, activation, output, N, K, format, columns, cohort=32):
+def k_layout_row(weights, activation, output, N, K, format, columns, cohort=32, groups_per_step=16):
     """Consume the explicitly prepared interleaved model layout by scale group."""
     width = 32 if format == "Q4_K" else 16
     cohort_size = min(columns, cohort)
@@ -25,28 +25,32 @@ def k_layout_row(weights, activation, output, N, K, format, columns, cohort=32):
                 record = weights[col, block][cohort * cohort_size : (cohort + 1) * cohort_size, :]
                 integer = T.alloc_local((cohort_size,), "int32")
                 T.fill(integer, 0)
-                scales = T.load(record.scales)
-                for group in T.unroll(256 // width):
-                    low = T.load(record.q[:, group * width : (group + 1) * width] if format == "Q4_K" else record.low[:, group * width : (group + 1) * width])
-                    inputs = T.alloc_local((width,), "int8")
-                    for k in T.Parallel(width):
-                        inputs[k] = activation_codes[T.uint32(group * width) + T.cast(k, "uint32")]
-                    codes = T.alloc_local((cohort_size, width), "uint4" if format == "Q4_K" else "uint6")
-                    products = T.alloc_local((cohort_size,), "int32")
-                    if format == "Q6_K":
-                        high = T.load(record.high[:, group * width : (group + 1) * width])
-                    for c, k in T.Parallel(cohort_size, width):
-                        codes[c, k] = (
-                            low[c, k]
-                            if format == "Q4_K"
-                            else T.cast(low[c, k], "uint8") | (T.cast(high[c, k], "uint8") << T.uint8(4))
-                        )
-                    T.reduce_dot(codes, inputs, products, over="k", acc_dtype="int32", engine="vector")
-                    for c in T.Parallel(cohort_size):
-                        if format == "Q4_K":
-                            integer[c] += products[c] * T.cast(scales[c, group], "int32")
-                        else:
-                            integer[c] += (products[c] - T.int32(32) * T.cast(sums[group], "int32")) * T.cast(scales[c, group], "int32")
+                if format == "Q4_K":
+                    scales = T.load(record.scales)
+                for first in T.serial((256 // width + groups_per_step - 1) // groups_per_step):
+                    for offset in T.unroll(min(groups_per_step, 256 // width)):
+                        group = first * groups_per_step + offset
+                        low = T.load(record.q[:, group * width : (group + 1) * width] if format == "Q4_K" else record.low[:, group * width : (group + 1) * width])
+                        inputs = T.alloc_local((width,), "int8")
+                        for k in T.Parallel(width):
+                            inputs[k] = activation_codes[T.uint32(group * width) + T.cast(k, "uint32")]
+                        codes = T.alloc_local((cohort_size, width), "uint4" if format == "Q4_K" else "uint6")
+                        products = T.alloc_local((cohort_size,), "int32")
+                        if format == "Q6_K":
+                            high = T.load(record.high[:, group * width : (group + 1) * width])
+                            scale_column = T.load(record.scales[:, group])
+                        for c, k in T.Parallel(cohort_size, width):
+                            codes[c, k] = (
+                                low[c, k]
+                                if format == "Q4_K"
+                                else T.cast(low[c, k], "uint8") | (T.cast(high[c, k], "uint8") << T.uint8(4))
+                            )
+                        T.reduce_dot(codes, inputs, products, over="k", acc_dtype="int32", engine="vector")
+                        for c in T.Parallel(cohort_size):
+                            if format == "Q4_K":
+                                integer[c] += products[c] * T.cast(scales[c, group], "int32")
+                            else:
+                                integer[c] += (products[c] - T.int32(32) * T.cast(sums[group], "int32")) * T.cast(scale_column[c], "int32")
                 d = T.load(record.d)
                 if format == "Q4_K":
                     dmin = T.load(record.dmin)
@@ -161,7 +165,7 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
 
 
 @T.macro
-def q4_0_decode_tiles(wv, xv, yv, N, K, columns):
+def q4_0_decode_tiles(wv, xv, yv, N, K, columns, sums=None):
     with T.level.cols(N, group=columns) as col:
         total = T.state((columns,), "float32", init=0)
         with T.level.blocks(K, extent=32) as part:
@@ -170,35 +174,64 @@ def q4_0_decode_tiles(wv, xv, yv, N, K, columns):
             wd = T.load(wv[col, part].d)
             xd = T.load(xv[part].d)
             products = T.alloc_local((columns,), "int32")
-            widened = T.alloc_local((32,), "int32")
-            activation_sum = T.alloc_local((1,), "int32")
             T.reduce_dot(weight, activation, products, over="k", acc_dtype="int32", engine="vector")
-            for k in T.Parallel(32):
-                widened[k] = T.cast(activation[k], "int32")
-            T.reduce_sum(widened, activation_sum, dim=0)
+            if sums is None:
+                widened = T.alloc_local((32,), "int32")
+                activation_sum = T.alloc_local((), "int32")
+                for k in T.Parallel(32):
+                    widened[k] = T.cast(activation[k], "int32")
+                T.reduce_sum(widened, activation_sum, dim=0)
+            else:
+                activation_sum = T.load(sums[part].value)
             for c in T.Parallel(columns):
-                centered = products[c] - 8 * activation_sum[0]
+                centered = products[c] - 8 * T.cast(activation_sum[()], "int32")
                 total[c] += T.cast(centered, "float32") * (T.cast(wd[c], "float32") * T.cast(xd[()], "float32"))
         T.copy(total, yv[col])
 
 
 
 @tilelang.jit(target="weft")
-def q4_0_decode(M, N, K, columns=64):
+def q4_0_decode(M, N, K, columns=64, reuse_sums=False):
     assert M == 1 and K % 32 == 0 and N % 16 == 0
+
+    if not reuse_sums:
+        @T.prim_func
+        def main(
+            W: T.Tensor((N * (K // 32) * 18,), "uint8"),
+            Xq: T.Tensor((M, K // 32 * 34), "uint8"),
+            Y: T.StridedTensor((N,), (1,), "float32"),
+        ):
+            T.func_attr({"tir.noalias": True})
+            wv = T.view(W, shape=(N, K), encoding=L.AMXQ4_0Rows[16], axes=("n", "k"), abi=True)
+            xv = T.view(Xq, shape=(K,), encoding=F.Q8_0, axes=("k",), abi=True)
+            yv = T.view(Y, shape=(N,), axes=("n",), strides=(1,), abi=True)
+            with T.Kernel(1, cpu_num_threads=1):
+                q4_0_decode_tiles(wv, xv, yv, N, K, columns)
+
+        return main
 
     @T.prim_func
     def main(
         W: T.Tensor((N * (K // 32) * 18,), "uint8"),
         Xq: T.Tensor((M, K // 32 * 34), "uint8"),
         Y: T.StridedTensor((N,), (1,), "float32"),
+        Sums: T.Tensor((K // 32,), "int16"),
     ):
         T.func_attr({"tir.noalias": True})
         wv = T.view(W, shape=(N, K), encoding=L.AMXQ4_0Rows[16], axes=("n", "k"), abi=True)
         xv = T.view(Xq, shape=(K,), encoding=F.Q8_0, axes=("k",), abi=True)
         yv = T.view(Y, shape=(N,), axes=("n",), strides=(1,), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            q4_0_decode_tiles(wv, xv, yv, N, K, columns)
+            sums = T.view(Sums, shape=(K,), encoding=L.BlockSum32, axes=("k",), abi=True)
+            with T.level.blocks(K, extent=32) as part:
+                activation = T.load(xv[part].q)
+                widened = T.alloc_local((32,), "int16")
+                total = T.alloc_local((), "int16")
+                for k in T.Parallel(32):
+                    widened[k] = T.cast(activation[k], "int16")
+                T.reduce_sum(widened, total, dim=0)
+                T.copy(total, sums[part].value)
+            q4_0_decode_tiles(wv, xv, yv, N, K, columns, sums)
 
     return main
 
@@ -304,8 +337,9 @@ def q6_k_scaled_tiles(weights, activation, output, M, N, K, rows, columns, reduc
 
 
 @tilelang.jit(target="weft")
-def packed_x86(M, N, K, format="Q4_K", LDC=None, decode=False, rows=16, columns=32, reduction_window=64):
+def packed_x86(M, N, K, format="Q4_K", LDC=None, decode=False, rows=16, columns=32, reduction_window=64, groups_per_step=16):
     assert reduction_window in (32, 64, 128, 256)
+    assert groups_per_step in (1, 2, 4, 8, 16)
     LDC = N if LDC is None else LDC
     block = 32 if format == "Q4_0" else 256
     record_bytes = {"Q4_0": 18, "Q4_K": 148, "Q6_K": 210}[format]
@@ -337,7 +371,7 @@ def packed_x86(M, N, K, format="Q4_K", LDC=None, decode=False, rows=16, columns=
                 else:
                     q4_0_prefill_tiles(wv, xv, yv, M, N, K, rows, columns)
             elif decode:
-                k_layout_row(wv, xv, yv, N, K, format, columns, columns)
+                k_layout_row(wv, xv, yv, N, K, format, columns, columns, groups_per_step)
             elif format == "Q6_K":
                 q6_k_scaled_tiles(wv, xv, yv, M, N, K, rows, columns, reduction_window)
             else:
