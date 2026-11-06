@@ -1,4 +1,4 @@
-"""Author-declared IME and AMX serialized operand layouts."""
+"""Author-declared persistent vector and matrix operand layouts."""
 
 import tilelang
 from tilelang.weft import language as T
@@ -28,6 +28,16 @@ def Q5_1Rows(W: T.View[F.Q5_1], *, rows: int):
 @tilelang.derive
 def Q8_0Rows(W: T.View[F.Q8_0], *, rows: int):
     return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 4})
+
+
+@tilelang.derive
+def IQ4_NLRows(W: T.View[F.IQ4_NL], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "q": 4})
+
+
+@tilelang.derive
+def MXFP4Rows(W: T.View[F.MXFP4], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"e": 1, "q": 4})
 
 
 @tilelang.encoding

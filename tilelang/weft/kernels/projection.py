@@ -67,3 +67,34 @@ def f16_f32_projection(M, N, K, rows=4, block_k=None, batch_rows=1):
             project(weights, source, output, M, N, K, rows, block_k, batch_rows)
 
     return main
+
+
+@tilelang.jit(target="weft")
+def row_projection(M, N, K, lanes=128):
+    """Retain F32 numerical lane sums across K before the final row reduction."""
+    assert M > 0 and N > 0 and K > 0 and K % lanes == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K), "float16"),
+        Activation: T.Tensor((M, K), "float32"),
+        Output: T.Tensor((M, N), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), axes=("n", "k"), abi=True)
+        activation = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            for m in T.serial(M):
+                with T.level.cols(N, group=1) as col:
+                    partial = T.state((lanes,), "float32", init=0)
+                    with T.level.blocks(K, extent=lanes) as block:
+                        x = T.load(activation[m, block])
+                        w = T.load(weights[col, block][0, :])
+                        for k in T.Parallel(lanes):
+                            partial[k] += x[k] * T.cast(w[k], "float32")
+                    result = T.alloc_local((1,), "float32")
+                    T.reduce_sum(partial, result, dim=0)
+                    T.copy(result, output[m, col])
+
+    return main

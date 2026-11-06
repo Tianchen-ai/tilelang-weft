@@ -92,11 +92,15 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 负责实现所选组织的物理计算。
 
 `short_projection.projection` 消费 `Q4_0Rows`、`Q4_1Rows`、`Q5_0Rows`、
-`Q5_1Rows` 或 `Q8_0Rows` 派生 Encoding。这些布局保留原 GGML record，并明确以四字节
+`Q5_1Rows`、`Q8_0Rows`、`IQ4_NLRows` 或 `MXFP4Rows` 派生 Encoding。这些布局保留原 GGML record，并明确以四字节
 payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权重；projection 自身
 量化 activation、计算所需整数 block sum，再跨全部 K record 保留输出 tile 的 state。
 `rows`、`columns` 表达作者复用结构，`engine="vector"` 约束局部 dot。它与普通 Tensor
 程序使用同一个编译核心。
+查表格式显式读取一次 codebook，以带偏置的无符号 dot 和精确 activation sum 修正保留
+有符号值。MXFP4 还消费传入的指数表；这些表均不内嵌到后端。
+`projection.row_projection` 使用原 F32 activation 与 F16 权重，跨 K 保留 F32 lane 累加，
+最后才进行归约。
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
 公开性能结果为 **测试中 / Under evaluation**。

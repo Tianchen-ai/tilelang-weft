@@ -102,13 +102,18 @@ These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
 
 `short_projection.projection` consumes the `Q4_0Rows`, `Q4_1Rows`, `Q5_0Rows`,
-`Q5_1Rows` or `Q8_0Rows` derived Encoding. These layouts retain each GGML
+`Q5_1Rows`, `Q8_0Rows`, `IQ4_NLRows` or `MXFP4Rows` derived Encoding. These layouts retain each GGML
 record and explicitly interleave four-byte payload chunks across a row cohort.
 The caller prepares that persistent weight object before invocation. The
 projection itself quantizes activation, computes any required integer block
 sums, then retains an output tile's state across all K records. Its `rows` and
 `columns` parameters describe author reuse, while `engine="vector"` constrains
 the local dot. This program shares the same core as ordinary Tensor programs.
+The indexed formats load their explicit codebook once and retain the signed
+values through a biased unsigned dot plus the exact activation-sum correction.
+MXFP4 also consumes its supplied exponent table; neither table is embedded in
+the backend. `projection.row_projection` retains F32 lane sums over F16 weights
+and the original F32 activation until the final reduction.
 
 The product owns these normal programs. Bench owns workloads, external references,
 numerical comparisons and timing boundaries. Public comparative performance is
