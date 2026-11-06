@@ -76,6 +76,10 @@ the original allocation or state/stage lifetime. The
 [tile example](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
 loads rows through a reshaped local tile before reducing them.
 
+Fixed-width TIRx vector slices retain their lane domain through import.
+Their Ramp indices become typed coordinates, and Broadcast shares the same
+positional lane axis; saved buffer reads keep their original storage effects.
+
 A saved encoded value can also be reshaped with explicit logical axes:
 `T.reshape(record, (records, 32), axes=("record", "k"))`. This preserves the
 original read snapshot and splits complete serialized records, so a scalar

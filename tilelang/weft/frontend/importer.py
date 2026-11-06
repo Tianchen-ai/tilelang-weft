@@ -33,6 +33,10 @@ from .reduction import CombinedReductions
 
 def dtype(name):
     name = str(name)
+    if "x" in name:
+        scalar, lanes = name.rsplit("x", 1)
+        if lanes.isdecimal() and int(lanes) > 1:
+            name = scalar
     aliases = {"bool": "i1", "int": "i32", "float": "f32", "bfloat16": "bf16"}
     name = aliases.get(name, name.replace("uint", "u").replace("int", "i").replace("float", "f"))
     result = getattr(dt, name, None)
@@ -55,6 +59,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         self.pointers = {}
         self.local_axes = {}
         self.operation_axes = {}
+        self.vector_axes = {}
         self.next_axis = 1
         self.mask = None
         self.grid = []
@@ -257,6 +262,18 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             return value
         if isinstance(node, tirx.Cast):
             return self.cast(self.expr(node.value), dtype(node.dtype))
+        if isinstance(node, (tirx.Ramp, tirx.Broadcast)):
+            lanes = self.static(node.lanes)
+            if lanes <= 0:
+                self.error("TIRx vectors require a positive fixed lane count", node)
+            if lanes not in self.vector_axes:
+                self.vector_axes[lanes] = self.axis()
+            axis = self.vector_axes[lanes]
+            if isinstance(node, tirx.Broadcast):
+                return self.broadcast(self.expr(node.value), (lanes,), (axis,))
+            value = self.expr(node.base)
+            indices = self.cast(self.iota(lanes, axis), element_type(value.type).dtype)
+            return self.binary("add", value, self.binary("mul", indices, self.expr(node.stride)))
         if isinstance(node, tirx.BufferLoad):
             axes = self.complete_local_domain(node.buffer, node.indices)
             if node.buffer in getattr(self, "field_record_extents", {}) and axes != axes_of(self.locals[node.buffer].type):

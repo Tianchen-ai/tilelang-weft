@@ -55,6 +55,9 @@ TileLang。`T.Kernel` 声明独立的 CPU tile 实例，`cpu_num_threads` 指定
 allocation 或 state/stage 生命周期。[tile 示例](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/02_tiles.py)
 通过重塑后的局部 tile 逐行写入，再完成归约。
 
+固定宽度的 TIRx 向量切片在导入时保留 lane 域。Ramp 索引成为有类型的坐标，
+Broadcast 共享同一位置 lane 轴；保存值的读取保留原存储 effects。
+
 编码值快照也可带显式逻辑轴重塑：
 `T.reshape(record, (records, 32), axes=("record", "k"))`。
 它保留原读取快照，拆出完整序列化 record；标量字段成为每条 record 一个值，
