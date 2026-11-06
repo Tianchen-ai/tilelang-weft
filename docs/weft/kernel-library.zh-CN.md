@@ -22,6 +22,7 @@ Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
 | GEMM、批量投影 | `linear` | 作者分块、转置、bias/SiLU 后处理及局部 engine 约束 |
 | CPU dense panel | `panel_dense` | 调用内转置 panel、可选 F16 activation 舍入及显式 outer-product 循环 |
 | 批量 packed 与 codebook 投影 | `panel_projection`、`indexed_projection` | 每个权重 record 解码一次，跨 activation 行复用，闭合整数 scale/correction 分组 |
+| Packed 子块投影 | `subblock_projection` | 跨 activation 行保留 Q1/NVFP4 权重 cohort，显式子块缩放和调用内量化 |
 | 短 record 交错投影 | `short_projection`、`layouts` | 作者声明持久行 cohort，调用内准备 Q8 activation，state 跨 K record 保留 |
 | Q4_K/Q6_K × Q8_K | `quantized` | 共同 Encoding 字段、有限位宽 partial、scale 与校正支路 |
 | 整数字段解码 | `quantized.dequantize` | Q1、Q4/Q5/Q8、K 格式和 TQ2 的显式数值解码 |
@@ -74,6 +75,11 @@ group、entry、payload 轴，让 metadata 和符号行在对应范围内复用�
 读取中分别保留 entry、payload 轴，最后通过普通 `T.reshape` 展平。行解码直接写出
 有界输出窗口，`chunk` 表示作者窗口，不选择 ISA。GGML 程序声明与参考一致的
 输出独立存储合同，同时允许只读输入共享存储，供快照与供给 passes 使用。
+
+`codebook.short_records(records=1/2/4/8)` 选择显式短 record cohort。单条 record 保留
+标量 metadata 和一条 payload 轴；多条 record 通过 Encoding-aware reshape 分离
+record 与 payload 轴。Codebook 是保存的 stage；`cache_hint="streaming"` 表达源码
+store 提示，目标访存 pass 仍会检查 alignment 和 alias 合法性。
 
 Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用内填充
 `Scratch` 和 `PackedActivation`；`round_f16` 决定 activation 是否先舍入到 F16，

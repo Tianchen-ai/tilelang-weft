@@ -16,6 +16,7 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | GEMM and batched projection | `linear` | Author blocks, transpose, bias/SiLU epilogue and local engine requirement |
 | Dense CPU panels | `panel_dense` | In-call panel transposes, optional F16 activation rounding and an explicit outer-product loop |
 | Batched packed and codebook projections | `panel_projection`, `indexed_projection` | Decode a weight record once, reuse across activation rows, and close integer scale/correction groups |
+| Packed subblock projection | `subblock_projection` | Keep a Q1/NVFP4 weight cohort across activation rows, with explicit subblock scales and in-call quantization |
 | Short-record interleaved projections | `short_projection`, `layouts` | Author-declared persistent row cohorts, in-call Q8 activation preparation and state retained across K records |
 | Q4_K/Q6_K × Q8_K | `quantized` | Shared Encoding fields, typed grouped partials, scale/correction branches |
 | Integer-field dequantization | `quantized.dequantize` | Q1, Q4/Q5/Q8, K formats and TQ2 fields; explicit numerical decoding |
@@ -79,6 +80,12 @@ ordinary `T.reshape`. Dequantizers write explicit bounded output windows; their
 `chunk` parameter selects the author window rather than an ISA. GGML programs
 declare the reference's disjoint-output contract while allowing read-only
 inputs to share storage, so snapshot and supply passes can use those facts.
+
+`codebook.short_records(records=1/2/4/8)` selects an explicit short-record
+cohort. A single record retains scalar metadata and one payload axis; a cohort
+uses the Encoding-aware reshape to keep its record and payload axes separate.
+The codebook is a saved stage. `cache_hint="streaming"` is a source store hint
+whose alignment and alias legality are checked by the target memory pass.
 
 Panel workspaces are invocation storage. `panel_dense.projection` populates
 `Scratch` and `PackedActivation` during the call; `round_f16` chooses whether
