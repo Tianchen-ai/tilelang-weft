@@ -30,7 +30,7 @@ class TileOperations:
 
     def read_region(self, region, axes):
         buffer, starts, shape = region
-        if self.buffer_owner(buffer) in self.locals and all(self.static(start) == 0 for start in starts):
+        if self.buffer_owner(buffer) in self.locals and all(self.analyzer.can_prove_equal(start, 0) for start in starts):
             value = self.local_value(buffer)
             if shape == shape_of(value.type):
                 return self.rename(value, shape, axes)
@@ -48,7 +48,7 @@ class TileOperations:
         original = self.local_value(buffer) if owner in self.locals else None
         if (
             original is not None
-            and all(self.static(start) == 0 for start in starts)
+            and all(self.analyzer.can_prove_equal(start, 0) for start in starts)
             and shape == shape_of(original.type)
             and self.mask is None
         ):
