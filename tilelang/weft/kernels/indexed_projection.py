@@ -321,10 +321,12 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                         codes = T.alloc_local((groups, words, 4), "uint8")
                         for g, widx, p in T.Parallel(groups, words, 4):
                             if format == "IQ3_XXS":
-                                code = values[g, widx, p] * sign_values[g, widx, p]
+                                value = values[g, widx, p]
+                                code = T.if_then_else(sign_values[g, widx, p] < 0, -value, value)
                             else:
                                 position = T.cast(g, "uint32") * T.uint32(words * 4) + T.cast(widx, "uint32") * T.uint32(4) + T.cast(p, "uint32")
-                                code = values[g, widx, p] * (T.int8(1) - T.cast(sign_bits[position], "int8") * T.int8(2))
+                                value = values[g, widx, p]
+                                code = T.if_then_else(sign_bits[position] != 0, -value, value)
                             codes[g, widx, p] = T.cast(code, "uint8") + T.uint8(128)
                         T.copy(codes, panel[c, :, :, :])
                         T.copy(factors, scales[:, c])
