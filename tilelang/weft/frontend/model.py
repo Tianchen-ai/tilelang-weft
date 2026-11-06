@@ -358,7 +358,8 @@ class ModelOperations:
             destination, _, shape = self.region(call.args[0])
             initial = self.cast(self.expr(call.args[1]), dtype(destination.dtype))
             axes = self.local_axes[destination]
-            if len(shape) == 1 and self.active_domain.type.domain_id:
+            if (len(shape) == 1 and self.active_domain.type.domain_id
+                    and shape[0] == self.domain_partitions[self.active_domain.type.domain_id]):
                 axes = (self.active_domain.type.axis_id,)
             ty = value_type(ScalarType(dtype(destination.dtype)), shape, axes)
             result = self.op("new", (initial,), ty, {"initialized": "true"})

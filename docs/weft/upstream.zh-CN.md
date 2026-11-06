@@ -25,3 +25,11 @@ TIRx 在 tile 展开前保留 Encoding、Level、state/stage 和数值边界；i
 `libweft_compiler` 通过 C handle 持有自己的 MLIR context/module，TVM 与 MLIR
 的 C++ 对象不跨 ABI。共同 native runtime 与编译器和两种前端相互独立。
 目标 passes 的唯一源码归属为 Triton–Weft 的 `third_party/weft` 子项目。
+
+局部 Tensor 索引保留 Canonical extraction 坐标，包括 Encoding 字段。
+显式 `T.load(table, at=indices, bounds="in_bounds")` 继续表示索引表读取。
+state 的诞生 Level 规定生命周期；只有数值长度与该 Level 的分区相同时，才使用其坐标。
+在单行 Level 内建立的 16-lane partial 保留自己的数值轴。
+
+原生产物分别保存源 Tensor 形状与逻辑 View 布局。这也能表示特化后零长度、没有访存
+effect 的可选参数，无需增加虚假的读取或写入。

@@ -465,19 +465,6 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if not set(axes_of(source.type)) <= set(axes):
                 source = self.rename(source, (), ())
             return source
-        if (
-            len(buffer.shape) == 1
-            and len(indices) == 1
-            and shape_of(indices[0].type)
-            and buffer not in getattr(self, "field_record_extents", {})
-        ):
-            index = self.local_index(indices[0])
-            return self.op(
-                "lookup",
-                (source, index),
-                value_type(element_type(source.type), shape_of(index.type), axes_of(index.type)),
-                {"bounds": json.dumps("in_bounds")},
-            )
         selectors, operands = [], []
         shape, axes = (), ()
         source_shape, source_axes = shape_of(source.type), axes_of(source.type)
@@ -1054,6 +1041,16 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
 
 
 def import_module(module):
+    from tvm import transform
+
+    # T.unroll is an author request, like Triton's static_range. Expand it
+    # with the native TIRx transform before inventing loop-carried SSA for
+    # local tiles. Ordinary serial/Level and pipelined loops stay structured.
+    with transform.PassContext(config={"tirx.UnrollLoop": {
+        "auto_max_step": 0, "auto_max_extent": 0, "explicit_unroll": True,
+        "unroll_local_access": False,
+    }}):
+        module = tirx.transform.UnrollLoop()(module)
     functions = [function for function in module.functions.values() if isinstance(function, tirx.PrimFunc)]
     if len(functions) != 1:
         raise NotImplementedError("one TileLang JITKernel must contain one entry PrimFunc; helpers are imported within that entry")

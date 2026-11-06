@@ -23,3 +23,14 @@ MLIR C++ objects do not cross the boundary. The shared native runtime is indepen
 of the compiler and both frontends. Target passes have one source owner in
 Triton–Weft's `third_party/weft` subproject.
 
+Local Tensor indexing retains Canonical extraction coordinates, including
+Encoding fields. Explicit `T.load(table, at=indices, bounds="in_bounds")` remains
+the indexed-table operation. A state's birth Level determines its lifetime;
+its numerical lanes use that Level's coordinate only when their extent matches
+the declared partition. A 16-lane partial born in a one-row Level keeps its own
+numerical axis.
+
+Native artifacts retain the source Tensor shapes separately from logical View
+layouts. This also represents specialized zero-sized optional arguments with
+no memory effects, without introducing a dummy read or write.
+

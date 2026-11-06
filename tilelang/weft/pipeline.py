@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from tvm_ffi.container import Map, Array
 
 from tilelang import tvm
+from tvm import tirx
 from tilelang.transform import get_pass_context, PassConfigKey
 from tilelang.engine.param import CompiledArtifact
 from weft_core import compiler
@@ -62,6 +63,13 @@ def compile_artifact(mod, context, *, params, runtime_only, enable_device_compil
         "compilation": report,
         "source_bindings": options.meta,
         "source_storage": imported.storage_contracts,
+        "source_tensors": {
+            buffer.name: {
+                "shape": [int(n.value) if isinstance(n, tirx.IntImm) else str(n) for n in buffer.shape],
+                "dtype": str(buffer.dtype),
+            }
+            for buffer in imported.function.buffer_map.values()
+        },
         "launch_args": [a["name"] for a in abi["arguments"] if not a["name"].startswith("__triton_")],
         "num_cpu_threads": imported.threads,
         "tilelang": {
