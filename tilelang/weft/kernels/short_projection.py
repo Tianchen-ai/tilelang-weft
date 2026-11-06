@@ -108,3 +108,103 @@ def projection(M, N, K, format="Q4_0", rows=4, columns=16,
                     T.copy(total, output[row, col])
 
     return main
+
+
+@tilelang.jit(target="weft")
+def affine_projection(M, N, K, format="Q4_K", columns=16):
+    """Keep grouped integer branches over an explicitly interleaved record tile."""
+    assert format in ("Q2_K", "Q4_K", "Q5_K", "IQ4_XS")
+    assert M > 0 and N > 0 and N % columns == 0 and K > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    persistent = {"Q2_K": layouts.Q2KRows, "Q4_K": layouts.Q4KRows,
+                  "Q5_K": layouts.Q5KRows, "IQ4_XS": layouts.IQ4XSRows}[format][columns]
+    terms = 16 if format == "Q2_K" else 32
+    groups = 256 // terms
+    record_bytes = encoding.schema.storage_bits // 8
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // 256 * record_bytes), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Codebook: T.Tensor((16 if format == "IQ4_XS" else 0,), "int8"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Codebook": "input", "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=persistent, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        if format == "IQ4_XS":
+            codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            if format == "IQ4_XS":
+                table = T.load(codebook)
+                biased = T.alloc_local((16,), "uint8")
+                for i in T.Parallel(16):
+                    biased[i] = T.cast(table[i], "uint8") + T.uint8(128)
+            quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 256)
+            for m in T.serial(M):
+                with T.level.cols(N, group=columns) as col:
+                    total = T.state((columns,), "float32", init=0)
+                    correction = T.state((columns,), "float32", init=0)
+                    with T.level.blocks(K, extent=256) as block:
+                        weight = weights[col, block]
+                        x = T.load(prepared[m, block])
+                        activation, sums, xd = x.q, x.bsum, x.ds
+                        wd = T.load(weight.d)
+                        if format != "IQ4_XS":
+                            dmin = T.load(weight.dmin)
+                        if format == "Q2_K":
+                            metadata = T.load(weight.scales)
+                        elif format == "IQ4_XS":
+                            scale_low, scale_high = T.load(weight.scales_l), T.load(weight.scales_h)
+                        else:
+                            scales, minima = T.load(weight.sc), T.load(weight.m)
+                        integer = T.state((columns,), "int32", init=0)
+                        minimum = T.state((columns,), "int32", init=0)
+                        for group in T.unroll(groups):
+                            low = T.load(weight.q[:, group * terms : (group + 1) * terms])
+                            if format == "Q5_K":
+                                high = T.load(weight.qh[:, group * terms : (group + 1) * terms])
+                            if format == "IQ4_XS":
+                                codes = T.load(biased, at=low, bounds="in_bounds")
+                            else:
+                                codes = T.alloc_local((columns, terms), "uint6" if format == "Q5_K" else "uint4" if format == "Q4_K" else "uint2")
+                                for c, k in T.Parallel(columns, terms):
+                                    code = T.cast(low[c, k], "uint8")
+                                    if format == "Q5_K":
+                                        code |= T.cast(high[c, k], "uint8") << T.uint8(4)
+                                    codes[c, k] = code
+                            inputs = T.alloc_local((terms,), "int8")
+                            for k in T.Parallel(terms):
+                                inputs[k] = activation[T.uint32(group * terms) + T.cast(k, "uint32")]
+                            products = T.alloc_local((columns,), "int32")
+                            T.reduce_dot(codes, inputs, products, over="k", acc_dtype="int32", engine="vector")
+                            for c in T.Parallel(columns):
+                                if format == "Q2_K":
+                                    factor = T.cast(metadata[c, group] & T.uint8(15), "int32")
+                                    subtract = T.cast(metadata[c, group] >> T.uint8(4), "int32")
+                                elif format == "IQ4_XS":
+                                    lower = (scale_low[c, group // 2] >> T.uint8(group % 2 * 4)) & T.uint8(15)
+                                    upper = (scale_high[c] >> T.uint16(group * 2)) & T.uint16(3)
+                                    factor = T.cast(lower | (T.cast(upper, "uint8") << T.uint8(4)), "int32") - 32
+                                    subtract = factor * 128
+                                else:
+                                    factor, subtract = T.cast(scales[c, group], "int32"), T.cast(minima[c, group], "int32")
+                                group_sum = T.cast(sums[group], "int32") if terms == 16 else T.cast(sums[group * 2], "int32") + T.cast(sums[group * 2 + 1], "int32")
+                                integer[c] += products[c] * factor
+                                minimum[c] += group_sum * subtract
+                        for c in T.Parallel(columns):
+                            if format == "IQ4_XS":
+                                total[c] += (T.cast(wd[c], "float32") * xd[()]) * T.cast(integer[c] - minimum[c], "float32")
+                            else:
+                                total[c] += (T.cast(wd[c], "float32") * xd[()]) * T.cast(integer[c], "float32")
+                                correction[c] += (T.cast(dmin[c], "float32") * xd[()]) * T.cast(minimum[c], "float32")
+                    result = T.alloc_local((columns,), "float32")
+                    for c in T.Parallel(columns):
+                        result[c] = total[c] - correction[c]
+                    T.copy(result, output[m, col])
+
+    return main

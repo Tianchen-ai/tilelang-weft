@@ -40,6 +40,26 @@ def MXFP4Rows(W: T.View[F.MXFP4], *, rows: int):
     return T.interleave(W, rows=rows, field_chunks={"e": 1, "q": 4})
 
 
+@tilelang.derive
+def Q2KRows(W: T.View[F.Q2_K], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "dmin": 2, "scales": 4, "q": 4})
+
+
+@tilelang.derive
+def Q4KRows(W: T.View[F.Q4_K], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "dmin": 2, "sc": 1, "m": 1, "q": 4})
+
+
+@tilelang.derive
+def Q5KRows(W: T.View[F.Q5_K], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "dmin": 2, "sc": 6, "m": 6, "qh": 4, "q": 4})
+
+
+@tilelang.derive
+def IQ4XSRows(W: T.View[F.IQ4_XS], *, rows: int):
+    return T.interleave(W, rows=rows, field_chunks={"d": 2, "scales_h": 2, "scales_l": 4, "q": 4})
+
+
 @tilelang.encoding
 class BlockSum32:
     layout = (T.bitorder.lsb_first, T.byteorder.little)

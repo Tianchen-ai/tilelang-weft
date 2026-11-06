@@ -41,9 +41,12 @@ def projection(M, N, K, format="NVFP4", columns=8,
             if format == "NVFP4":
                 table = T.stage(T.load(codebook))
             with T.level.cols(N, group=columns) as col:
-                for m in T.serial(M):
-                    zero = T.state((columns,), "float32", init=0)
-                    T.copy(zero, output[m, col])
+                if M == 1:
+                    accumulated = T.state((columns,), "float32", init=0)
+                else:
+                    for m in T.serial(M):
+                        zero = T.state((columns,), "float32", init=0)
+                        T.copy(zero, output[m, col])
                 with T.level.blocks(K, extent=elements) as block:
                     weight = T.load(weights[col, block])
                     q, d = weight.q, weight.d
@@ -66,11 +69,16 @@ def projection(M, N, K, format="NVFP4", columns=8,
                                 for k in T.Parallel(width):
                                     wide[k] = T.cast(activation.q[part * width % 32 + k], "int32")
                                 T.reduce_sum(wide, total, dim=0)
-                            prior = T.load(output[m, col])
+                            prior = accumulated if M == 1 else T.load(output[m, col])
                             result = T.alloc_local((columns,), "float32")
                             for c in T.Parallel(columns):
                                 integer = products[c] * 2 - total[0] if format == "Q1_0" else products[c]
                                 result[c] = prior[c] + (T.cast(factors[c], "float32") * T.cast(activation.d[()], "float32")) * T.cast(integer, "float32")
-                            T.copy(result, output[m, col])
+                            if M == 1:
+                                T.copy(result, accumulated)
+                            else:
+                                T.copy(result, output[m, col])
+                if M == 1:
+                    T.copy(accumulated, output[0, col])
 
     return main
