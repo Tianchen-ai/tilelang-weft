@@ -9,6 +9,7 @@ from weft_core.types import (
     DomainType,
     DomainPointType,
     EncodingType,
+    PointerType,
     ViewType,
     SliceType,
     LocalValueType,
@@ -37,11 +38,13 @@ class ModelOperations:
             self.named_axes[name] = self.axis()
         return self.named_axes[name]
 
-    def align_anonymous_batches(self, left, right):
+    def align_anonymous_batches(self, left, right, *, matrix=False):
         left_shape, right_shape = shape_of(left.type), shape_of(right.type)
         left_axes, right_axes = axes_of(left.type), list(axes_of(right.type))
         named = set(self.named_axes.values())
-        for offset in range(2, min(len(left_shape), len(right_shape)) + 1):
+        # Matrix operands have independent free row/column axes immediately
+        # before K. Only their leading batch axes align positionally.
+        for offset in range(3 if matrix else 2, min(len(left_shape), len(right_shape)) + 1):
             if left_shape[-offset] != right_shape[-offset] and 1 not in (left_shape[-offset], right_shape[-offset]):
                 continue
             if right_axes[-offset] not in named:
@@ -154,6 +157,8 @@ class ModelOperations:
                 self.declare_encoding(schema)
             strides = tuple(self.cast(self.expr(s), dt.index) for s in call.annotations["strides"])
             storage = self.expr(call.args[0])
+            if not isinstance(storage.type, PointerType):
+                self.error("T.view requires pointer storage; use slices of an existing ABI View rather than rebinding its storage")
             if schema is not None and encoding.kind != "dense" and storage.name_hint:
                 contract = {
                     "encoding": encoding.layout_identity,
@@ -345,7 +350,8 @@ class ModelOperations:
             return True
         if name == "tl.weft.stage":
             destination = self.region(call.args[0])[0]
-            value = self.locals[self.region(call.args[1])[0]]
+            source = self.region(call.args[1])
+            value = self.read_region(source, self.local_axes_for(source[0]))
             result = self.op("materialize", (value,), value.type)
             self.locals[destination] = result
             self.local_axes[destination] = axes_of(result.type)
@@ -356,9 +362,10 @@ class ModelOperations:
         if name == "tl.weft.mac_groups":
             from .importer import dtype
 
-            left = self.locals[self.region(call.args[0])[0]]
-            right = self.locals[self.region(call.args[1])[0]]
-            destination = self.region(call.args[2])[0]
+            left_region, right_region = (self.region(arg) for arg in call.args[:2])
+            left = self.read_region(left_region, self.local_axes_for(left_region[0]))
+            right = self.read_region(right_region, self.local_axes_for(right_region[0]))
+            output = self.region(call.args[2])
             group = self.static(call.args[3])
             into = dtype(string(call.args[4]))
             axis, left, right = self.bind_group_axis(left, right, string(call.args[5]))
@@ -374,22 +381,22 @@ class ModelOperations:
                 value_type(ScalarType(into), shape, axes),
                 {"group": str(group), "overflow": json.dumps("wrap")},
             )
-            if shape != tuple(self.static(n) for n in destination.shape):
+            if shape != output[2]:
                 self.error("mac_groups destination shape must match its explicit partial groups")
-            self.locals[destination], self.local_axes[destination] = result, axes
+            self.write_region(output, result, axes)
             return True
         if name == "tl.weft.reduce_dot":
             from .importer import dtype, integers
             from weft_core.types import emit_type
 
             left_region, right_region, output = (self.region(arg) for arg in call.args)
-            left = self.read_region(left_region, self.local_axes[left_region[0]])
-            right = self.read_region(right_region, self.local_axes[right_region[0]])
+            left = self.read_region(left_region, self.local_axes_for(left_region[0]))
+            right = self.read_region(right_region, self.local_axes_for(right_region[0]))
             names = tuple(string(axis) for axis in call.annotations["axes"])
             if len(names) == 1:
                 axis, left, right = self.bind_group_axis(left, right, names[0])
                 reduction = (axis,)
-                left, right = self.align_anonymous_batches(left, right)
+                left, right = self.align_anonymous_batches(left, right, matrix=True)
             else:
                 reduction = tuple(self.named_axis(name) for name in names)
             if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
@@ -414,11 +421,11 @@ class ModelOperations:
             self.local_axes[output[0]] = output_axes
             return True
         if name == "tl.weft.store_value":
-            source = self.region(call.args[0])[0]
+            source = self.region(call.args[0])
             destination = self.expr(call.args[1])
             from .importer import dtype
 
-            value = self.locals[source]
+            value = self.read_region(source, self.local_axes_for(source[0]))
             if destination.type.encoding.kind == "dense":
                 value = self.cast(value, dtype(destination.type.encoding.family))
             value = self.rename(value, shape_of(destination.type), axes_of(destination.type))
