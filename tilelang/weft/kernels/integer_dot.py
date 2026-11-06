@@ -11,16 +11,17 @@ def block32(weight, activation, total, rows, format, Codebook, Scale):
         high = weight.qh
     if format in ("Q4_1", "Q5_1"):
         minimum, activation_sum = weight.m, activation.s
-    codes = T.alloc_local((rows, 32), "int8")
     product = T.alloc_local((rows,), "int32")
-    for r, k in T.Parallel(rows, 32):
-        if format in ("IQ4_NL", "MXFP4"):
-            codes[r, k] = Codebook[T.cast(q[r, k], "int32")]
-        elif format in ("Q5_0", "Q5_1"):
-            value = T.cast(q[r, k], "int8") | (T.cast(high[r, k], "int8") << 4)
-            codes[r, k] = value - (16 if format == "Q5_0" else 0)
-        else:
-            codes[r, k] = T.cast(q[r, k], "int8") - (8 if format == "Q4_0" else 0)
+    if format in ("IQ4_NL", "MXFP4"):
+        codes = T.load(Codebook, at=q, bounds="in_bounds")
+    else:
+        codes = T.alloc_local((rows, 32), "int8")
+        for r, k in T.Parallel(rows, 32):
+            if format in ("Q5_0", "Q5_1"):
+                value = T.cast(q[r, k], "int8") | (T.cast(high[r, k], "int8") << 4)
+                codes[r, k] = value - (16 if format == "Q5_0" else 0)
+            else:
+                codes[r, k] = T.cast(q[r, k], "int8") - (8 if format == "Q4_0" else 0)
     T.reduce_dot(codes, x, product, over="k", acc_dtype="int32", engine="vector")
     for r in T.Parallel(rows):
         scale = Scale[T.cast(d[r], "int32")] if format == "MXFP4" else T.cast(d[r], "float32")
