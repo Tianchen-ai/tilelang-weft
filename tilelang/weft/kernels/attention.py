@@ -91,7 +91,9 @@ def causal_attention(B, Tokens, Heads, Groups, D, Capacity):
 
 
 @tilelang.jit(target="weft")
-def rope(M, H, P, interleaved=False, cpu_num_threads=0):
+def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pair_tile=None, rows_per_program=1):
+    pair_tile = P if pair_tile is None else pair_tile
+    assert heads_per_program > 0 and pair_tile > 0 and rows_per_program > 0
     @T.prim_func
     def main(
         X: T.Tensor((M, H, 2 * P), "float32"),
@@ -99,14 +101,38 @@ def rope(M, H, P, interleaved=False, cpu_num_threads=0):
         Sin: T.Tensor((M, P), "float32"),
         Y: T.Tensor((M, H, 2 * P), "float32"),
     ):
-        with T.Kernel(M, H, cpu_num_threads=cpu_num_threads) as (row, head):
-            for k in T.Parallel(P):
-                first = 2 * k if interleaved else k
-                second = 2 * k + 1 if interleaved else k + P
-                a = X[row, head, first]
-                b = X[row, head, second]
-                Y[row, head, first] = a * Cos[row, k] - b * Sin[row, k]
-                Y[row, head, second] = a * Sin[row, k] + b * Cos[row, k]
+        T.func_attr({"weft.alias_groups": {"X": "activation", "Y": "activation", "Cos": "coefficients", "Sin": "coefficients"}})
+        cosine_view = T.view(Cos, shape=(M, P), axes=("m", "k"))
+        sine_view = T.view(Sin, shape=(M, P), axes=("m", "k"))
+        if interleaved:
+            inputs = T.view(X, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"))
+            outputs = T.view(Y, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"))
+        else:
+            inputs = T.view(X, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"))
+            outputs = T.view(Y, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"))
+        with T.Kernel(T.ceildiv(M, rows_per_program), T.ceildiv(H, heads_per_program), cpu_num_threads=cpu_num_threads) as (tile, cohort):
+            for token in T.serial(rows_per_program):
+                row = token if rows_per_program >= M else tile * rows_per_program + token
+                if row < M:
+                    with T.level.blocks(P, extent=pair_tile) as part:
+                        cosine = T.stage(T.load(cosine_view[row, part]))
+                        sine = T.stage(T.load(sine_view[row, part]))
+                        for offset in T.serial(heads_per_program):
+                            head = offset if heads_per_program >= H else cohort * heads_per_program + offset
+                            if head < H:
+                                if interleaved:
+                                    first, second = inputs[row, head, part, 0], inputs[row, head, part, 1]
+                                    first_output, second_output = outputs[row, head, part, 0], outputs[row, head, part, 1]
+                                else:
+                                    first, second = inputs[row, head, 0, part], inputs[row, head, 1, part]
+                                    first_output, second_output = outputs[row, head, 0, part], outputs[row, head, 1, part]
+                                a, b = T.load(first), T.load(second)
+                                left, right = T.alloc_local((pair_tile,), "float32"), T.alloc_local((pair_tile,), "float32")
+                                for k in T.Parallel(pair_tile):
+                                    left[k] = a[k] * cosine[k] - b[k] * sine[k]
+                                    right[k] = a[k] * sine[k] + b[k] * cosine[k]
+                                T.copy(left, first_output)
+                                T.copy(right, second_output)
 
     return main
 

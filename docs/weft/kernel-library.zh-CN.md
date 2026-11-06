@@ -91,6 +91,15 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 源码的读取边界。这些是作者明确选择的数值组织，目标 passes
 负责实现所选组织的物理计算。
 
+`indexed_projection.packed_words` 在调用内生成 byte panel，跨 activation 行复用。
+分组 factor、带偏置的乘积与精确 activation sum 校正保持独立的整数表达式。
+`rows`、`columns` 表达这层复用，共同编译器选择 VNNI 或其他合法向量实现。
+`ternary_planes` 与 `iq1_planes` 保留 group/entry/payload 轴，直到作者指定的最终归约。
+
+`attention.rope` 公开 `rows_per_program`、`heads_per_program` 与 `pair_tile`，grid
+覆盖这些显式 cohort。每个 pair Level 的系数 stage 跨 head 复用，每个 head 在写出前
+先读取 activation 的两半。行、head 与 pair tile 的尾部继续受有效范围约束。
+
 `short_projection.projection` 消费 `Q4_0Rows`、`Q4_1Rows`、`Q5_0Rows`、
 `Q5_1Rows`、`Q8_0Rows`、`IQ4_NLRows` 或 `MXFP4Rows` 派生 Encoding。这些布局保留原 GGML record，并明确以四字节
 payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权重；projection 自身

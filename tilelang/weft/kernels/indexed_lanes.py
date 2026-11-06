@@ -17,6 +17,59 @@ def lookup_pair(table, first, second, output):
 
 
 @tilelang.jit(target="weft")
+def iq1_planes(M, K):
+    """Expose independent record groups, codebook entries and payload lanes."""
+    assert M > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * 50), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((16384,), "int8"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M, K), encoding=F.IQ1_S, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.rows(M, group=1) as row:
+                total = T.alloc_var("float32", init=0)
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+                    q, metadata, d, activation, sums, ds = w.q, w.qh, w.d, x.q, x.bsum, x.ds
+                    indices = T.alloc_local((8, 4, 8), "uint16")
+                    inputs = T.alloc_local((8, 4, 8), "int8")
+                    for group, entry, payload in T.Parallel(8, 4, 8):
+                        g, e, p = T.cast(group, "uint16"), T.cast(entry, "uint16"), T.cast(payload, "uint16")
+                        high = (metadata[g] >> (e * T.uint16(3))) & T.uint16(7)
+                        index = T.cast(q[g * T.uint16(4) + e], "uint16") | (high << T.uint16(8))
+                        indices[group, entry, payload] = index * T.uint16(8) + p
+                        inputs[group, entry, payload] = activation[g * T.uint16(32) + e * T.uint16(8) + p]
+                    codes = T.load(grid.values, at=indices, bounds="in_bounds")
+                    products = T.alloc_local((8,), "int32")
+                    T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                    main_terms, corrections = T.alloc_local((8,), "int32"), T.alloc_local((8,), "int32")
+                    for group in T.Parallel(8):
+                        g = T.cast(group, "uint16")
+                        scale = T.cast(((metadata[g] >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
+                        delta = T.cast((T.cast(metadata[g], "int16") >> T.int16(15)) | T.int16(1), "int32")
+                        main_terms[group] = scale * products[group]
+                        corrections[group] = scale * delta * (T.cast(sums[g * T.uint16(2)], "int32") + T.cast(sums[g * T.uint16(2) + T.uint16(1)], "int32"))
+                    main_sum, correction_sum = T.alloc_local((1,), "int32"), T.alloc_local((1,), "int32")
+                    T.reduce_sum(main_terms, main_sum, dim=0)
+                    T.reduce_sum(corrections, correction_sum, dim=0)
+                    combined = T.cast(main_sum[0], "float32") + T.cast(correction_sum[0], "float32") * 0.125
+                    total += (T.cast(d[()], "float32") * ds[()]) * combined
+                result = T.alloc_local((1,), "float32")
+                result[0] = total
+                T.copy(result, output[row])
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def vec_dot(M, K, format="IQ1_S", groups_per_step=1):
     """Keep exact integer groups separate from each record's float scaling.
 

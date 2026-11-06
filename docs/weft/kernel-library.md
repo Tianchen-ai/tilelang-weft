@@ -101,6 +101,18 @@ the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
 
+`indexed_projection.packed_words` builds byte panels during the call and reuses
+them across activation rows. Group factors, biased products and the exact
+activation-sum correction remain separate integer expressions. Its `rows` and
+`columns` parameters describe that reuse; the common compiler selects VNNI or
+another legal vector implementation. `ternary_planes` and `iq1_planes` retain
+their group/entry/payload axes until the author's final reduction.
+
+`attention.rope` exposes `rows_per_program`, `heads_per_program` and `pair_tile`.
+The grid covers those explicit cohorts. Within each pair Level, coefficient
+stages are shared across heads, while each head reads both activation halves
+before writing either result. Partial rows, heads and pair tiles retain bounds.
+
 `short_projection.projection` consumes the `Q4_0Rows`, `Q4_1Rows`, `Q5_0Rows`,
 `Q5_1Rows`, `Q8_0Rows`, `IQ4_NLRows` or `MXFP4Rows` derived Encoding. These layouts retain each GGML
 record and explicitly interleave four-byte payload chunks across a row cohort.
