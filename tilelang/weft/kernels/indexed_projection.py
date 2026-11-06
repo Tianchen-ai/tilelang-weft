@@ -216,14 +216,14 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
     use (column, row). All panels are invocation-local, including the final
     transpose. Group widths and numerical partials remain author declarations.
     """
-    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS")
+    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
     assert M > 0 and N > 0 and K > 0 and M % rows == N % columns == K % 256 == 0
     encoding = getattr(F, format)
     weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
     groups = 16 if format == "IQ2_S" else 8
     words = 64 // groups
     payload = 8 if format == "IQ2_S" else 4
-    entries = {"IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256}[format]
+    entries = {"IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 0}[format]
     grid_encoding = F.I8X8 if payload == 8 else F.I8X4
 
     @T.prim_func
@@ -241,8 +241,9 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
         Transposed: T.Tensor((N, M), "float32"),
         Grid: T.Tensor((entries * payload,), "int8"),
         Signs: T.Tensor((1024 if format == "IQ3_XXS" else 0,), "int8"),
+        Codebook: T.Tensor((16 if format == "IQ4_XS" else 0,), "int8"),
     ):
-        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input",
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Codebook": "input",
                      "Signs": "input", "Quantized": "quantized", "Output": "output", "Panel": "panel",
                      "PackedActivation": "activation", "Scales": "scales", "BlockScale": "block_scale",
                      "Sums": "sums", "ActivationScale": "activation_scale", "Transposed": "transposed"}})
@@ -257,11 +258,16 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
         sums = T.view(Sums, shape=(groups, M), axes=("g", "m"), abi=True)
         activation_scale = T.view(ActivationScale, shape=(M,), axes=("m",), abi=True)
         transposed = T.view(Transposed, shape=(N, M), axes=("n", "m"), abi=True)
-        grid = T.view(Grid, shape=(entries, payload), encoding=grid_encoding, axes=("entry", "payload"), abi=True)
+        if format == "IQ4_XS":
+            codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        else:
+            grid = T.view(Grid, shape=(entries, payload), encoding=grid_encoding, axes=("entry", "payload"), abi=True)
         if format == "IQ3_XXS":
             signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "payload"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 256)
+            if format == "IQ4_XS":
+                table = T.stage(T.load(codebook))
             with T.level.cols(N, group=columns) as col:
                 with T.level.rows(M, group=rows) as row:
                     empty = T.state((columns, rows), "float32", init=0)
@@ -286,41 +292,59 @@ def packed_words(M, N, K, format="IQ3_XXS", rows=16, columns=8):
                     for c in T.serial(columns):
                         w = T.load(weights[col, block][c, :])
                         q, d = w.q, w.d
-                        if format != "IQ3_XXS":
+                        if format == "IQ4_XS":
+                            scale_low, scale_high = w.scales_l, w.scales_h
+                        elif format != "IQ3_XXS":
                             high, sign_bits, metadata = w.qh, w.signs, w.scales
                         else:
                             metadata = w.metadata
-                        indices = T.alloc_local((groups, words, 4), "uint32")
                         factors = T.alloc_local((groups,), "int32")
-                        if format == "IQ3_XXS":
-                            sign_indices = T.alloc_local((groups, words, 4), "uint32")
                         for g in T.Parallel(groups):
                             if format == "IQ2_S":
                                 factors[g] = T.cast((metadata[T.cast(g, "uint32") // T.uint32(2)] >> (T.cast(g, "uint32") % T.uint32(2) * T.uint32(4))) & T.uint8(15), "int32") * 2 + 1
                             elif format == "IQ3_XXS":
                                 factors[g] = T.cast(metadata[g] >> T.uint32(28), "int32") * 2 + 1
+                            elif format == "IQ4_XS":
+                                lower = (scale_low[T.cast(g, "uint32") // T.uint32(2)] >> T.cast(g % 2 * 4, "uint8")) & T.uint8(15)
+                                upper = T.cast((scale_high[()] >> T.cast(g * 2, "uint16")) & T.uint16(3), "uint8")
+                                factors[g] = T.cast(lower | (upper << T.uint8(4)), "int32") - 32
                             else:
                                 factors[g] = T.cast(metadata[g], "int32") * 2 + 1
-                        for g, widx, p in T.Parallel(groups, words, 4):
-                            position = T.cast(g, "uint32") * T.uint32(words * 4) + T.cast(widx, "uint32") * T.uint32(4) + T.cast(p, "uint32")
-                            entry = position // T.uint32(payload)
-                            if format == "IQ2_S":
-                                upper = (T.cast(high[entry // T.uint32(4)], "uint32") >> (entry % T.uint32(4) * T.uint32(2))) & T.uint32(3)
-                                index = T.cast(q[entry], "uint32") | (upper << T.uint32(8))
-                            elif format == "IQ3_S":
-                                index = T.cast(q[entry], "uint32") | (T.cast(high[entry], "uint32") << T.uint32(8))
-                            else:
-                                index = T.cast(q[entry], "uint32")
-                                word = metadata[g]
-                                sign_entry = (word >> (T.cast(widx, "uint32") // T.uint32(2) * T.uint32(7))) & T.uint32(127)
-                                sign_indices[g, widx, p] = sign_entry * T.uint32(8) + T.cast(widx, "uint32") % T.uint32(2) * T.uint32(4) + T.cast(p, "uint32")
-                            indices[g, widx, p] = index * T.uint32(payload) + position % T.uint32(payload)
-                        values = T.load(grid.values, at=indices, bounds="in_bounds")
+                        if format == "IQ4_XS":
+                            decoded = T.load(table, at=q, bounds="in_bounds")
+                            values = T.reshape(decoded, (groups, words, 4))
+                        else:
+                            entries_per_group = 2 if format == "IQ2_S" else 8
+                            entry_indices = T.alloc_local((groups, entries_per_group), "uint32")
+                            indices = T.alloc_local((groups, entries_per_group, payload), "uint32")
+                            for g, e in T.Parallel(groups, entries_per_group):
+                                entry = T.cast(g, "uint32") * T.uint32(entries_per_group) + T.cast(e, "uint32")
+                                if format == "IQ2_S":
+                                    upper = (T.cast(high[entry // T.uint32(4)], "uint32") >> (entry % T.uint32(4) * T.uint32(2))) & T.uint32(3)
+                                    index = T.cast(q[entry], "uint32") | (upper << T.uint32(8))
+                                elif format == "IQ3_S":
+                                    index = T.cast(q[entry], "uint32") | (T.cast(high[entry], "uint32") << T.uint32(8))
+                                else:
+                                    index = T.cast(q[entry], "uint32")
+                                entry_indices[g, e] = index
+                            for g, e, p in T.Parallel(groups, entries_per_group, payload):
+                                indices[g, e, p] = entry_indices[g, e] * T.uint32(payload) + T.cast(p, "uint32")
+                            decoded = T.load(grid.values, at=indices, bounds="in_bounds")
+                            values = T.reshape(decoded, (groups, words, 4))
                         if format == "IQ3_XXS":
-                            sign_values = T.load(signs.values, at=sign_indices, bounds="in_bounds")
+                            sign_entries = T.alloc_local((groups, 4), "uint32")
+                            sign_indices = T.alloc_local((groups, 4, 8), "uint32")
+                            for g, e in T.Parallel(groups, 4):
+                                sign_entries[g, e] = (metadata[g] >> (T.cast(e, "uint32") * T.uint32(7))) & T.uint32(127)
+                            for g, e, p in T.Parallel(groups, 4, 8):
+                                sign_indices[g, e, p] = sign_entries[g, e] * T.uint32(8) + T.cast(p, "uint32")
+                            selected_signs = T.load(signs.values, at=sign_indices, bounds="in_bounds")
+                            sign_values = T.reshape(selected_signs, (groups, words, 4))
                         codes = T.alloc_local((groups, words, 4), "uint8")
                         for g, widx, p in T.Parallel(groups, words, 4):
-                            if format == "IQ3_XXS":
+                            if format == "IQ4_XS":
+                                code = values[g, widx, p]
+                            elif format == "IQ3_XXS":
                                 value = values[g, widx, p]
                                 code = T.if_then_else(sign_values[g, widx, p] < 0, -value, value)
                             else:
