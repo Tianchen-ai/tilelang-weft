@@ -163,6 +163,8 @@ Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `col
 `quantized.field_windows` 通过显式 Level 子块解码整数格式 record。scale-group 窗口
 从同一读取快照选择 payload 与标量 metadata，复用常规解码宏。这种作者结构直接表达
 Encoding 的字段关系，不另建解码后的完整 record 数组，也不改变调用方存储布局。
+Q2_K/Q3_K/Q6_K 的窗口程序先转换标量 group scale，再乘 payload。作者在源码中
+明确这项数值组织，使一次标量 scale 转换可供整个窗口使用。
 
 `indexed_lanes.vec_dot` 与 `indexed_lanes.projection` 复用普通 `indexed_rows`
 宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的 I16 pair partial、

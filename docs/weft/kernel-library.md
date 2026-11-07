@@ -62,6 +62,9 @@ Level subtiles. A scale-group window selects its payload and scalar metadata
 from the same record snapshot, reusing the regular decoding macro. This source
 organization exposes the Encoding's field relation without creating a separate
 decoded record array or changing the caller's stored layout.
+For Q2_K/Q3_K/Q6_K the window program converts the scalar group scale before
+the payload multiplication. The author makes that numerical organization
+explicit, allowing one scalar scale conversion to serve the whole window.
 `packed.projection` uses explicit integer block partials and F32 scale updates.
 Q4_K and Q6_K retain typed integer
 partials and separate scale/correction branches through the shared `partials`

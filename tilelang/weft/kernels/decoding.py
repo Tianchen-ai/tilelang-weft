@@ -56,14 +56,18 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
             metadata = scales[()] if point is not None else scales[(k // 16,) if single else (r, k // 16)]
             scale = T.cast(metadata, "int32") & 15
             minimum_value = T.cast(metadata, "int32") >> 4
-            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[() if single else (r,)], "float32") * T.cast(
-                minimum_value, "float32"
-            )
+            if point is not None:
+                result[r, lane] = (T.cast(d[()], "float32") * T.cast(scale, "float32")) * T.cast(value, "float32") - T.cast(dmin[()], "float32") * T.cast(minimum_value, "float32")
+            else:
+                result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[() if single else (r,)], "float32") * T.cast(minimum_value, "float32")
         elif format == "Q3_K":
             low_scale = scale_low[()] if point is not None else scale_low[(k // 16,) if single else (r, k // 16)]
             high_scale = scale_high[()] if point is not None else scale_high[(k // 16,) if single else (r, k // 16)]
             scale = (T.cast(low_scale, "int32") | T.cast(high_scale, "int32") << 4) - 32
-            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32")
+            if point is not None:
+                result[r, lane] = (T.cast(d[()], "float32") * T.cast(scale, "float32")) * T.cast(value, "float32")
+            else:
+                result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32")
         elif format in ("Q4_K", "Q5_K"):
             scale = scales[()] if point is not None else scales[(k // 32,) if single else (r, k // 32)]
             minimum_value = minimum[()] if point is not None else minimum[(k // 32,) if single else (r, k // 32)]
@@ -72,7 +76,10 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
             ) * T.cast(minimum_value, "float32")
         elif format == "Q6_K":
             scale = scales[()] if point is not None else scales[(k // 16,) if single else (r, k // 16)]
-            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scale, "int32") * value, "float32")
+            if point is not None:
+                result[r, lane] = (T.cast(d[()], "float32") * T.cast(scale, "float32")) * T.cast(value, "float32")
+            else:
+                result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scale, "int32") * value, "float32")
         else:
             result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(value, "float32")
         if format in ("Q4_1", "Q5_1"):
