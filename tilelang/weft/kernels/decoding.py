@@ -4,7 +4,7 @@ from tilelang.weft import language as T
 
 
 @T.macro
-def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None, single=False):
+def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None, single=False, point=None):
     width = elements if width is None else width
     if format == "Q6_K":
         (q, high, scales, d) = (record.ql, record.qh, record.scales, record.d)
@@ -22,6 +22,16 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
         (high, scale_low, scale_high) = (record.hmask, record.scale_low, record.scale_high)
     if format in ("Q4_K", "Q5_K"):
         (scales, minimum, dmin) = (record.sc, record.m, record.dmin)
+    if point is not None:
+        q = T.load(q, at=point)
+        if format in ("Q5_0", "Q5_1", "Q3_K", "Q5_K", "Q6_K"):
+            high = T.load(high, at=point)
+        if format in ("Q2_K", "Q6_K", "Q4_K", "Q5_K"):
+            scales = T.load(scales, at=point)
+        if format == "Q3_K":
+            scale_low, scale_high = T.load(scale_low, at=point), T.load(scale_high, at=point)
+        if format in ("Q4_K", "Q5_K"):
+            minimum = T.load(minimum, at=point)
     for r, lane in T.Parallel(rows, width):
         k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
         if format == "Q1_0":
@@ -43,20 +53,26 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
             elif format == "TQ2_0":
                 value = value - 1
         if format == "Q2_K":
-            scale = T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") & 15
-            minimum_value = T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") >> 4
+            metadata = scales[()] if point is not None else scales[(k // 16,) if single else (r, k // 16)]
+            scale = T.cast(metadata, "int32") & 15
+            minimum_value = T.cast(metadata, "int32") >> 4
             result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32") - T.cast(dmin[() if single else (r,)], "float32") * T.cast(
                 minimum_value, "float32"
             )
         elif format == "Q3_K":
-            scale = (T.cast(scale_low[(k // 16,) if single else (r, k // 16)], "int32") | T.cast(scale_high[(k // 16,) if single else (r, k // 16)], "int32") << 4) - 32
+            low_scale = scale_low[()] if point is not None else scale_low[(k // 16,) if single else (r, k // 16)]
+            high_scale = scale_high[()] if point is not None else scale_high[(k // 16,) if single else (r, k // 16)]
+            scale = (T.cast(low_scale, "int32") | T.cast(high_scale, "int32") << 4) - 32
             result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale * value, "float32")
         elif format in ("Q4_K", "Q5_K"):
-            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scales[(k // 32,) if single else (r, k // 32)], "float32") * T.cast(value, "float32") - T.cast(
+            scale = scales[()] if point is not None else scales[(k // 32,) if single else (r, k // 32)]
+            minimum_value = minimum[()] if point is not None else minimum[(k // 32,) if single else (r, k // 32)]
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(scale, "float32") * T.cast(value, "float32") - T.cast(
                 dmin[() if single else (r,)], "float32"
-            ) * T.cast(minimum[(k // 32,) if single else (r, k // 32)], "float32")
+            ) * T.cast(minimum_value, "float32")
         elif format == "Q6_K":
-            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scales[(k // 16,) if single else (r, k // 16)], "int32") * value, "float32")
+            scale = scales[()] if point is not None else scales[(k // 16,) if single else (r, k // 16)]
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scale, "int32") * value, "float32")
         else:
             result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(value, "float32")
         if format in ("Q4_1", "Q5_1"):

@@ -156,6 +156,14 @@ Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `col
 分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
 源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。
 
+`projection.staged_f16_projection` 在调用内把 activation 转成调用方的 F16 workspace，
+分别 stage 一组权重列和 activation 行，再用普通完整 K 的 `T.gemm` 计算各输出 tile。
+源码参数分别表达复用作用域和输出 tile 大小。
+
+`quantized.field_windows` 通过显式 Level 子块解码整数格式 record。scale-group 窗口
+从同一读取快照选择 payload 与标量 metadata，复用常规解码宏。这种作者结构直接表达
+Encoding 的字段关系，不另建解码后的完整 record 数组，也不改变调用方存储布局。
+
 `indexed_lanes.vec_dot` 与 `indexed_lanes.projection` 复用普通 `indexed_rows`
 宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的 I16 pair partial、
 I32 group 累加、显式 codebook 输入和逐 record 浮点 scale。`groups_per_step`

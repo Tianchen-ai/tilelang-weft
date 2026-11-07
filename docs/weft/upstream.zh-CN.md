@@ -30,6 +30,8 @@ TIRx 在 tile 展开前保留 Encoding、Level、state/stage 和数值边界；i
 Weft helper 和 Level 的三个阶段使用原生 TIRx 属性区域。局部 buffer 在声明处
 分配，包括 helper 和初始化区域内部。importer 从有类型的语句及 View 操作建立
 读写、capture 和 handoff；不把 Encoding 的不透明句柄交给 tensor block 访存推断。
+嵌套 Level 继承同一逻辑轴上祖先 Level 的尾部性质。父层名义分区可整除不代表最后一个
+active window 完整；共同目标分析可以在后续进一步证明 exact。
 
 共同 `NormalizeCanonicalControl` pass 内联只有末尾一次返回、且未声明 `noinline` 的
 helper，包括其显式 buffer 更新。非局部返回与显式 `noinline` 继续保留有类型的函数区域。

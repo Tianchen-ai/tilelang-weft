@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from . import activation, attention, linear, normalization, moe, state, quantized, codebook, preparation, deployment
 from . import packed
+from . import projection
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ _entries = [
     Program("fill", "memory", activation.fill),
     Program("matmul", "projection", linear.matmul),
     Program("blocked_matmul", "projection", linear.blocked_matmul),
+    Program("staged_f16_projection", "projection", projection.staged_f16_projection),
     Program("batched_matmul", "projection", linear.projection, (("transpose_weight", False), ("bias", False))),
     *(
         Program(name, "projection", linear.projection, (("transpose_weight", transpose), ("bias", bias), ("activation", act)))
@@ -60,6 +62,7 @@ _entries = [
     Program("q6_k_q8_k", "packed-dot", quantized.q6_k_q8_k),
     Program("ggml_q4_k_row", "deployment", deployment.vec_dot),
     Program("ggml_q6_k_row", "deployment", deployment.vec_dot, (("format", "Q6_K"),)),
+    Program("field_window_dequantize", "dequantization", quantized.field_windows),
 ]
 for _format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K", "TQ2_0"):
     _entries.append(Program(_format.lower() + "_dequantize", "dequantization", quantized.dequantize, (("format", _format),)))

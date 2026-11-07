@@ -74,6 +74,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         self.next_domain = 1
         self.next_local_shape = 1 << 32
         self.domain_partitions = {}
+        self.level_domains = {}
         self.active_domain = None
         self.birth_phase = None
         self.birth_outputs = []
@@ -1022,6 +1023,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.env[var] = value
         self.launch = body.arguments[-3:]
         self.active_domain = self.op("root_domain", ty=DomainType("root", 0, -1, 0, "root", "exact"))
+        self.level_domains[0] = self.active_domain.type
         self.stmt(function.body)
         self.emit("weft_kernel.return")
         accesses = argument_accesses(body)

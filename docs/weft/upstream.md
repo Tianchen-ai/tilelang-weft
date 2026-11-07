@@ -29,6 +29,9 @@ scheduled tensor blocks. Local buffers are allocated where declared, including
 inside helpers and birth regions. The importer builds reads, writes, captures
 and handoffs from their typed statements and View operations; it does not use
 tensor-block access inference for opaque Encoding handles.
+Nested Levels inherit a tail from an enclosing Level on the same logical
+axis. Divisibility of a parent's nominal partition does not prove its final
+active window is full; shared target analysis may refine that fact later.
 
 The shared `NormalizeCanonicalControl` pass inlines helpers with one final return
 and no `noinline` constraint, including their explicit buffer updates. Nonlocal

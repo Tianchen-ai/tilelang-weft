@@ -584,9 +584,17 @@ class ModelOperations:
         self.next_domain += 1
         static = self.analyzer.simplify(extent_expr)
         tail = "exact" if isinstance(static, tirx.IntImm) and int(static.value) % partition == 0 else "tail"
-        domain_type = DomainType(f"{name}.{serial}", serial, self.active_domain.type.domain_id, self.named_axis(name), relation, tail)
+        axis = self.named_axis(name)
+        ancestor = self.active_domain.type
+        while ancestor.domain_id:
+            if ancestor.axis_id == axis and ancestor.tail == "tail":
+                tail = "tail"
+                break
+            ancestor = self.level_domains[ancestor.parent_domain_id]
+        domain_type = DomainType(f"{name}.{serial}", serial, self.active_domain.type.domain_id, axis, relation, tail)
         domain = self.op("domain", (self.active_domain, extent, part, multiplicity), domain_type)
         self.domain_partitions[serial] = partition
+        self.level_domains[serial] = domain_type
         point_type = DomainPointType(domain_type)
         blocks = {}
 

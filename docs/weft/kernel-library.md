@@ -50,9 +50,18 @@ local instructions for one program.
 `tile_m`/`tile_n` Levels and `rows`/`columns` output cohorts. It uses ordinary
 `T.gemm` with the weight's storage order retained. `linear.matmul` separately
 exposes a tiled K loop and a grid of independent output programs.
+`projection.staged_f16_projection` converts activation to the caller's F16
+workspace inside the call, stages a weight-column cohort and an activation-row
+cohort, then uses ordinary full-K `T.gemm` for each output tile. The source
+parameters separately expose those reuse scopes and the output tile dimensions.
 
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
+`quantized.field_windows` decodes an integer-format record through explicit
+Level subtiles. A scale-group window selects its payload and scalar metadata
+from the same record snapshot, reusing the regular decoding macro. This source
+organization exposes the Encoding's field relation without creating a separate
+decoded record array or changing the caller's stored layout.
 `packed.projection` uses explicit integer block partials and F32 scale updates.
 Q4_K and Q6_K retain typed integer
 partials and separate scale/correction branches through the shared `partials`
