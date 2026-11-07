@@ -70,6 +70,11 @@ scale/correction 支路。`composition.packed_projection` 的显式解码到 wor
 
 `row_partials` 提供 x86 的作者级延迟归约与分组整数计算。单行 Q6_K 的
 `scale_groups` 限定作者同时暴露的 scale group 数量，不选择 ISA。
+
+RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
+的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
+和 Q6_K 使用 16 项子块。每组从原 record 快照读取 payload 与标量 metadata，
+完成 I32 partial 和整数 scale 更新，再执行 record 的浮点累加。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
 索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`

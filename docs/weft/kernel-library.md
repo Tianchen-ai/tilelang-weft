@@ -84,6 +84,12 @@ Persistent interleave requires a separate preparation kernel, demonstrated by
 `row_partials` provides source-selected deferred row reductions and grouped
 integer products for x86. `scale_groups` in the single-row Q6_K factory bounds
 the author's simultaneously exposed scale groups; it does not select an ISA.
+
+For RISC-V, `row_partials.affine_groups` expresses Q2_K/Q4_K/Q5_K scale groups
+as Level subtiles, keeping the minimum correction in a separate integer branch.
+`scaled_groups` uses 16-term subtiles for Q3_K and Q6_K. Each group reads payload
+and scalar metadata from the original record snapshot, performs its I32 partial,
+and applies its integer scale before the record's floating-point update.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.

@@ -368,9 +368,11 @@ def k_groups(M, K, format="Q4_K", rows=1, lanes=16):
 @tilelang.jit(target="weft")
 def affine_groups(M, K, format="Q5_K"):
     """Use named sublevels for scaled record groups and a separate minimum sum."""
-    assert format in ("Q4_K", "Q5_K") and M > 0 and K > 0 and K % 256 == 0
+    assert format in ("Q2_K", "Q4_K", "Q5_K") and M > 0 and K > 0 and K % 256 == 0
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
+    group_size = 16 if format == "Q2_K" else 32
+    groups = 256 // group_size
 
     @T.prim_func
     def main(
@@ -387,28 +389,46 @@ def affine_groups(M, K, format="Q5_K"):
                 total = T.alloc_var("float32", init=0)
                 with T.level.blocks(K, extent=256) as block:
                     w, x = T.load(weights[row, block][0, :]), T.load(values[block])
-                    d, dmin, ds, minima, sums = w.d, w.dmin, x.ds, w.m, x.bsum
+                    d, dmin, ds, sums = w.d, w.dmin, x.ds, x.bsum
+                    if format == "Q2_K":
+                        metadata = w.scales
+                    else:
+                        minima = w.m
                     integer = T.alloc_var("int32", init=0)
-                    with T.level.subtiles(block, extent=32) as group:
+                    with T.level.subtiles(block, extent=group_size) as group:
                         low = T.load(w.q, at=group)
                         if format == "Q5_K":
                             high = T.load(w.qh, at=group)
-                        activation, scale = T.load(x.q, at=group), T.load(w.sc, at=group)
-                        codes = T.alloc_local((32,), "uint8")
+                        activation = T.load(x.q, at=group)
+                        if format == "Q2_K":
+                            scale = T.load(metadata, at=group)
+                        else:
+                            scale = T.load(w.sc, at=group)
+                        codes = T.alloc_local((group_size,), "uint8")
                         product = T.alloc_local((1,), "int32")
-                        for k in T.Parallel(32):
+                        for k in T.Parallel(group_size):
                             codes[k] = T.cast(low[k], "uint8")
                             if format == "Q5_K":
                                 codes[k] |= T.cast(high[k], "uint8") << T.uint8(4)
                         T.reduce_dot(codes, activation, product, over="k", acc_dtype="int32", engine="vector")
-                        integer += product[0] * T.cast(scale[()], "int32")
-                    terms = T.alloc_local((8,), "int32")
+                        if format == "Q2_K":
+                            integer += product[0] * (T.cast(scale[()], "int32") & T.int32(15))
+                        else:
+                            integer += product[0] * T.cast(scale[()], "int32")
+                    terms = T.alloc_local((groups,), "int32")
                     correction = T.alloc_local((1,), "int32")
-                    for g in T.Parallel(8):
-                        terms[g] = T.cast(minima[g], "int32") * (T.cast(sums[g * 2], "int32") + T.cast(sums[g * 2 + 1], "int32"))
+                    for g in T.Parallel(groups):
+                        if format == "Q2_K":
+                            terms[g] = T.cast(metadata[g] >> T.uint8(4), "int32") * T.cast(sums[g], "int32")
+                        else:
+                            terms[g] = T.cast(minima[g], "int32") * (T.cast(sums[g * 2], "int32") + T.cast(sums[g * 2 + 1], "int32"))
                     T.reduce_sum(terms, correction, dim=0)
-                    total -= (ds[()] * T.cast(dmin[()], "float32")) * T.cast(correction[0], "float32")
-                    total += (ds[()] * T.cast(d[()], "float32")) * T.cast(integer, "float32")
+                    if format == "Q2_K":
+                        total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32")
+                                          - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))
+                    else:
+                        total -= (ds[()] * T.cast(dmin[()], "float32")) * T.cast(correction[0], "float32")
+                        total += (ds[()] * T.cast(d[()], "float32")) * T.cast(integer, "float32")
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
                 T.copy(result, output[row])
@@ -441,32 +461,26 @@ def scaled_groups(M, K, format="Q3_K"):
                     low = w.q if format == "Q3_K" else w.ql
                     high = w.hmask if format == "Q3_K" else w.qh
                     activation, d, ds = x.q, w.d, x.ds
-                    if format == "Q3_K":
-                        scale_low, scale_high = w.scale_low, w.scale_high
-                        scales = T.alloc_local((16,), "int8")
-                        for g in T.Parallel(16):
-                            scales[g] = T.cast(T.cast(scale_low[g], "uint8") | (T.cast(scale_high[g], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                    else:
-                        scales = w.scales
                     integer = T.alloc_var("int32", init=0)
-                    for half in T.unroll(2):
-                        codes = T.alloc_local((4, 2, 16), "int8")
-                        inputs = T.alloc_local((4, 2, 16), "int8")
-                        for plane, group, k in T.Parallel(4, 2, 16):
-                            coordinate = T.uint8(half * 128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
-                            codes[plane, group, k] = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
-                            inputs[plane, group, k] = activation[coordinate]
-                        products = T.alloc_local((4, 2), "int32")
-                        terms = T.alloc_local((4, 2), "int32")
-                        plane_sums = T.alloc_local((4,), "int32")
-                        half_sum = T.alloc_local((1,), "int32")
-                        T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
-                        for plane, group in T.Parallel(4, 2):
-                            scale_index = T.uint8(half * 8) + T.cast(plane, "uint8") * T.uint8(2) + T.cast(group, "uint8")
-                            terms[plane, group] = products[plane, group] * T.cast(scales[scale_index], "int32")
-                        T.reduce_sum(terms, plane_sums, dim=1)
-                        T.reduce_sum(plane_sums, half_sum, dim=0)
-                        integer += half_sum[0]
+                    with T.level.subtiles(block, extent=16) as group:
+                        lows = T.load(low, at=group)
+                        highs = T.load(high, at=group)
+                        inputs = T.load(activation, at=group)
+                        if format == "Q3_K":
+                            scale_low = T.load(w.scale_low, at=group)
+                            scale_high = T.load(w.scale_high, at=group)
+                            scale = T.cast(T.cast(scale_low[()], "uint8")
+                                           | (T.cast(scale_high[()], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                        else:
+                            scale_value = T.load(w.scales, at=group)
+                            scale = scale_value[()]
+                        codes = T.alloc_local((16,), "int8")
+                        product = T.alloc_local((1,), "int32")
+                        for k in T.Parallel(16):
+                            codes[k] = T.cast(T.cast(lows[k], "uint8")
+                                              | (T.cast(highs[k], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
+                        T.reduce_dot(inputs, codes, product, over="k", acc_dtype="int32", engine="vector")
+                        integer += product[0] * T.cast(scale, "int32")
                     total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
