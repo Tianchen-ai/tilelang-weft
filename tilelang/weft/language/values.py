@@ -147,6 +147,11 @@ class RecordValue:
     encoding: EncodingDefinition
     __tilelang_immutable_value__: bool = False
 
+    def __getitem__(self, indices):
+        selected = LogicalView(self.var, self.shape, self.axes, self.encoding)[indices]
+        return RecordValue(selected.var, selected.shape, selected.axes, self.encoding,
+                           self.__tilelang_immutable_value__)
+
     def __getattr__(self, name):
         fields = self.encoding.schema.fields
         field = next((field for field in fields if field.name == name), None)
@@ -187,6 +192,11 @@ def reshape(source, shape, *, axes=None):
 
 def load(source, *, at=None, axis=-1, bounds=None):
     from .derived import DerivedEncodingInstance
+
+    if isinstance(source, RecordValue):
+        if at is not None or bounds is not None:
+            raise ValueError("select the saved record's logical coordinates before loading its fields")
+        return source
 
     if at is not None and not isinstance(at, Point):
         from tilelang.utils.language import retrieve_shape, _get_buffer
@@ -252,7 +262,8 @@ def stage(value):
 
 def state(shape, dtype, *, init):
     output = alloc_local(shape, dtype)
-    I.evaluate(intrinsic("state", to_tile_region(output), init))
+    initializer = to_tile_region(init) if isinstance(init, (tirx.Buffer, tirx.BufferRegion)) else init
+    I.evaluate(intrinsic("state", to_tile_region(output), initializer))
     return output
 
 

@@ -86,6 +86,10 @@ class Packed32:
 建立数值状态。Level 保存独立的 state 初始化、stage 初始化及 body；初始化能读取
 进入该层前的值、当前 point 与本初始化区中先前的声明，不能捕获兄弟初始化区或 body 新值。
 
+State 初始化值可以是标量或 Tensor 区域，包括已保存的 `T.load(...)` 结果。
+保存的编码 Value 支持与 View 相同的逻辑选择，后代可以从 staged record tile
+投影所需区域，继续消费原快照并保留 stage 生命周期。
+
 `T.mac_groups(a, b, partial, n=4, into="int16", over="k")` 保留作者的 partial
 分组和位宽，随后普通 cast、归约组成完整数值程序。参见
 [Packed32](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/04_encoding_levels.py) 和

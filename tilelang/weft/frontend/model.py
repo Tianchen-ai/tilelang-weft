@@ -218,6 +218,20 @@ class ModelOperations:
                         extents.append(-1)
                         shape.append(shape_of(base.type)[axis])
                         dynamic.append(self.cast(self.expr(extent), dt.index))
+                if isinstance(base.type, LocalValueType):
+                    selectors, coordinates = [], []
+                    for axis, size, extent, offset in zip(axes_of(base.type), shape_of(base.type), shape, call.args[2:]):
+                        if extent == size and self.analyzer.can_prove_equal(offset, 0):
+                            selectors.append("all")
+                            continue
+                        coordinate = self.iota(extent, axis)
+                        start = self.cast(self.expr(offset), element_type(coordinate.type).dtype)
+                        coordinates.append(self.binary("add", coordinate, start))
+                        selectors.append("gather")
+                    return self.op(
+                        "extract", (base, *coordinates), LocalValueType(element_type(base.type), tuple(shape), axes_of(base.type)),
+                        {"selectors": json.dumps(selectors)},
+                    )
                 return self.op(
                     "subview", (base, *dynamic), SliceType(base.type.encoding, tuple(shape), axes_of(base.type)),
                     {"offsets": integers(offsets), "extents": integers(extents)},
@@ -242,7 +256,11 @@ class ModelOperations:
                     index = self.cast(index, dt.index)
                 values.append(index)
             return self.op(
-                "slice", (base, *values), SliceType(base.type.encoding, tuple(shape), tuple(axes)), {"selectors": json.dumps(selectors)}
+                "extract" if isinstance(base.type, LocalValueType) else "slice",
+                (base, *values),
+                LocalValueType(element_type(base.type), tuple(shape), tuple(axes)) if isinstance(base.type, LocalValueType)
+                else SliceType(base.type.encoding, tuple(shape), tuple(axes)),
+                {"selectors": json.dumps(selectors)},
             )
         if name == "tl.weft.load_record":
             view = self.expr(call.args[0])
@@ -392,7 +410,13 @@ class ModelOperations:
             from .importer import dtype
 
             destination, _, shape = self.region(call.args[0])
-            initial = self.cast(self.expr(call.args[1]), dtype(destination.dtype))
+            initializer = call.args[1]
+            if isinstance(initializer, tirx.Call) and initializer.op.name == "tl.region":
+                source = self.region(initializer)
+                initial = self.read_region(source, self.local_axes_for(source[0]))
+            else:
+                initial = self.expr(initializer)
+            initial = self.cast(initial, dtype(destination.dtype))
             axes = self.local_axes[destination]
             if (len(shape) == 1 and self.active_domain.type.domain_id
                     and shape[0] == self.domain_partitions[self.active_domain.type.domain_id]):

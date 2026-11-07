@@ -112,6 +112,11 @@ state initialization, staged initialization and body regions. Initializers see
 incoming values, their own earlier declarations and the current point. Source
 order does not allow an initializer to capture a sibling initializer or body value.
 
+State initializers accept scalars and Tensor regions, including a saved
+`T.load(...)` result. A saved encoded value supports the same logical selectors
+as its View, so a descendant can select a staged record tile without reading
+the original storage again. These projections retain the stage's lifetime.
+
 `T.mac_groups(a, b, partial, n=4, into="int16", over="k")` retains the author's
 partial grouping and width. Ordinary casts and reductions then build the rest
 of the numerical program. See the complete
