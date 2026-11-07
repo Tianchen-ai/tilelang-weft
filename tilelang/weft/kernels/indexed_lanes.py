@@ -119,6 +119,71 @@ def scaled_entries(M, K, format="IQ3_S"):
 
 
 @tilelang.jit(target="weft")
+def xxs_subgroups(M, K):
+    """Keep two scale groups and their codebook/sign rows in each 64-term Level."""
+    assert M > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * 98), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((1024,), "int8"),
+        Signs: T.Tensor((1024,), "int8"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Signs": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M, K), encoding=F.IQ3_XXS, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        grid = T.view(Grid, shape=(256, 4), encoding=F.I8X4, axes=("code", "payload"), abi=True)
+        signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "sign_payload"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.rows(M, group=1) as row:
+                total = T.alloc_var("float32", init=0)
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+                    q, metadata, d, activation, ds = w.q, w.metadata, w.d, x.q, x.ds
+                    block_sum = T.alloc_var("int32", init=0)
+                    group_index = T.alloc_var("uint16", init=0)
+                    with T.level.subtiles(block, extent=64) as window:
+                        indices = T.alloc_local((2, 8, 4), "uint16")
+                        sign_indices = T.alloc_local((2, 4, 8), "uint16")
+                        for half, entry, payload in T.Parallel(2, 8, 4):
+                            coordinate = group_index * T.uint16(16) + T.cast(half * 8 + entry, "uint16")
+                            indices[half, entry, payload] = T.cast(q[coordinate], "uint16") * T.uint16(4) + T.cast(payload, "uint16")
+                        for half, pair_entry, sign_payload in T.Parallel(2, 4, 8):
+                            word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
+                            index = T.cast(word >> T.cast(pair_entry * 7, "uint32"), "uint16") & T.uint16(127)
+                            sign_indices[half, pair_entry, sign_payload] = index * T.uint16(8) + T.cast(sign_payload, "uint16")
+                        selected = T.load(grid.values, at=indices, bounds="in_bounds")
+                        sign_rows = T.load(signs.values, at=sign_indices, bounds="in_bounds")
+                        sign_lanes = T.reshape(sign_rows, (2, 8, 4))
+                        codes = T.alloc_local((2, 8, 4), "int8")
+                        inputs = T.alloc_local((2, 8, 4), "int8")
+                        for half, entry, payload in T.Parallel(2, 8, 4):
+                            codes[half, entry, payload] = selected[half, entry, payload] * sign_lanes[half, entry, payload]
+                            coordinate = group_index * T.uint16(64) + T.cast(half * 32 + entry * 4 + payload, "uint16")
+                            inputs[half, entry, payload] = activation[coordinate]
+                        products = T.alloc_local((2,), "int32")
+                        weighted = T.alloc_local((2,), "int32")
+                        subtotal = T.alloc_local((), "int32")
+                        T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                        for half in T.Parallel(2):
+                            word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
+                            scale = T.cast((word >> T.uint32(28)) * T.uint32(2) + T.uint32(1), "int32")
+                            weighted[half] = products[half] * scale
+                        T.reduce_sum(weighted, subtotal, dim=0)
+                        block_sum += subtotal[()]
+                        group_index += T.uint16(1)
+                    total += (T.cast(d[()], "float32") * ds[()]) * T.cast(block_sum, "float32")
+                result = T.alloc_local((1,), "float32")
+                result[0] = total * 0.25
+                T.copy(result, output[row])
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def iq1_planes(M, K, groups_per_step=8):
     """Expose independent record groups, codebook entries and payload lanes."""
     assert M > 0 and K > 0 and K % 256 == 0
