@@ -16,7 +16,8 @@ def k_layout_row(weights, activation, output, N, K, format, columns, cohort=32, 
         total = T.state((columns,), "float32", init=0)
         with T.level.blocks(K, extent=256) as block:
             x = T.load(activation[block])
-            sums, ds, activation_codes = x.bsum, x.ds, x.q
+            sums, ds = x.bsum, x.ds
+            activation_codes = activation[block].q
             if format == "Q4_K":
                 pairs = T.alloc_local((8,), "int16")
                 for g in T.Parallel(8):
@@ -31,9 +32,7 @@ def k_layout_row(weights, activation, output, N, K, format, columns, cohort=32, 
                     for offset in T.unroll(min(groups_per_step, 256 // width)):
                         group = first * groups_per_step + offset
                         low = T.load(record.q[:, group * width : (group + 1) * width] if format == "Q4_K" else record.low[:, group * width : (group + 1) * width])
-                        inputs = T.alloc_local((width,), "int8")
-                        for k in T.Parallel(width):
-                            inputs[k] = activation_codes[T.uint32(group * width) + T.cast(k, "uint32")]
+                        inputs = T.load(activation_codes[group * width : (group + 1) * width])
                         codes = T.alloc_local((cohort_size, width), "uint4" if format == "Q4_K" else "uint6")
                         products = T.alloc_local((cohort_size,), "int32")
                         if format == "Q6_K":
