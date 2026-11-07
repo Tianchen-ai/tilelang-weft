@@ -53,9 +53,10 @@ def kv_update(B, Tokens, Groups, D, Capacity, block=64):
 
 
 @tilelang.jit(target="weft")
-def causal_attention(B, Tokens, Heads, Groups, D, Capacity):
+def causal_attention(B, Tokens, Heads, Groups, D, Capacity, tokens_per_program=1, heads_per_program=1):
     """Grouped-query online attention over the populated causal KV prefix."""
     assert Heads % Groups == 0
+    assert tokens_per_program > 0 and heads_per_program > 0
 
     @T.prim_func
     def main(
@@ -66,37 +67,49 @@ def causal_attention(B, Tokens, Heads, Groups, D, Capacity):
         start: T.int32,
         scale: T.float32,
     ):
-        with T.Kernel(B, Tokens, Heads) as (batch, token, head):
-            group = head // (Heads // Groups)
-            query = T.alloc_local((D,), "float32")
-            numerator = T.alloc_local((D,), "float32")
-            product = T.alloc_local((D,), "float32")
-            score = T.alloc_local((1,), "float32")
-            maximum = T.alloc_var("float32", init=float("-inf"))
-            denominator = T.alloc_var("float32", init=0)
-            T.fill(numerator, 0)
-            for d in T.Parallel(D):
-                query[d] = Query[batch, token, head, d]
-            for key in T.serial(start + token + 1):
-                for d in T.Parallel(D):
-                    product[d] = query[d] * Key[batch, key, group, d]
-                T.reduce_sum(product, score, dim=0)
-                value = score[0] * scale
-                next_max = T.max(maximum, value)
-                keep = T.exp(maximum - next_max)
-                probability = T.exp(value - next_max)
-                for d in T.Parallel(D):
-                    numerator[d] = numerator[d] * keep + Value[batch, key, group, d] * probability
-                denominator = denominator * keep + probability
-                maximum = next_max
-            for d in T.Parallel(D):
-                Output[batch, token, head, d] = numerator[d] / denominator
+        queries = T.view(Query, shape=(B, Tokens, Heads, D), axes=("b", "t", "h", "d"))
+        keys = T.view(Key, shape=(B, Capacity, Groups, D), axes=("b", "s", "g", "d"))
+        values = T.view(Value, shape=(B, Capacity, Groups, D), axes=("b", "s", "g", "d"))
+        outputs = T.view(Output, shape=(B, Tokens, Heads, D), axes=("b", "t", "h", "d"))
+        with T.Kernel(B, T.ceildiv(Tokens, tokens_per_program), T.ceildiv(Heads, heads_per_program)) as (batch, token_group, head_group):
+            for t in T.serial(tokens_per_program):
+                token = token_group * tokens_per_program + t
+                if token < Tokens:
+                    for h in T.serial(heads_per_program):
+                        head = head_group * heads_per_program + h
+                        if head < Heads:
+                            causal_row(queries, keys, values, outputs, batch, token, head, start, scale, Heads, Groups, D)
 
     return main
 
 
+@T.macro
+def causal_row(queries, keys, values, outputs, batch, token, head, start, scale, Heads, Groups, D):
+    group = head // (Heads // Groups)
+    query = T.stage(T.load(queries[batch, token, head, :]))
+    numerator = T.state((D,), "float32", init=0)
+    score = T.alloc_local((1,), "float32")
+    maximum = T.alloc_var("float32", init=float("-inf"))
+    denominator = T.alloc_var("float32", init=0)
+    for key in T.serial(start + token + 1):
+        key_value = T.load(keys[batch, key, group, :])
+        T.reduce_dot(query, key_value, score, over="d", acc_dtype="float32", engine="vector")
+        value = score[0] * scale
+        next_max = T.max(maximum, value)
+        keep = T.exp(maximum - next_max)
+        probability = T.exp(value - next_max)
+        payload = T.load(values[batch, key, group, :])
+        for d in T.Parallel(D):
+            numerator[d] = numerator[d] * keep + payload[d] * probability
+        denominator = denominator * keep + probability
+        maximum = next_max
+    for d in T.Parallel(D):
+        numerator[d] = numerator[d] / denominator
+    T.copy(numerator, outputs[batch, token, head, :])
+
+
 @tilelang.jit(target="weft")
-def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pair_tile=None, rows_per_program=1):
+def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pair_tile=None, rows_per_program=1, head_major=False):
     pair_tile = P if pair_tile is None else pair_tile
     assert heads_per_program > 0 and pair_tile > 0 and rows_per_program > 0
     @T.prim_func
@@ -119,27 +132,40 @@ def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pai
             for token in T.serial(rows_per_program):
                 row = token if rows_per_program >= M else tile * rows_per_program + token
                 if row < M:
-                    with T.level.blocks(P, extent=pair_tile) as part:
-                        cosine = T.stage(T.load(cosine_view[row, part]))
-                        sine = T.stage(T.load(sine_view[row, part]))
+                    if head_major:
                         for offset in T.serial(heads_per_program):
                             head = offset if heads_per_program >= H else cohort * heads_per_program + offset
                             if head < H:
-                                if interleaved:
-                                    first, second = inputs[row, head, part, 0], inputs[row, head, part, 1]
-                                    first_output, second_output = outputs[row, head, part, 0], outputs[row, head, part, 1]
-                                else:
-                                    first, second = inputs[row, head, 0, part], inputs[row, head, 1, part]
-                                    first_output, second_output = outputs[row, head, 0, part], outputs[row, head, 1, part]
-                                a, b = T.load(first), T.load(second)
-                                left, right = T.alloc_local((pair_tile,), "float32"), T.alloc_local((pair_tile,), "float32")
-                                for k in T.Parallel(pair_tile):
-                                    left[k] = a[k] * cosine[k] - b[k] * sine[k]
-                                    right[k] = a[k] * sine[k] + b[k] * cosine[k]
-                                T.copy(left, first_output)
-                                T.copy(right, second_output)
+                                with T.level.blocks(P, extent=pair_tile) as part:
+                                    cosine, sine = T.load(cosine_view[row, part]), T.load(sine_view[row, part])
+                                    rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, interleaved)
+                    else:
+                        with T.level.blocks(P, extent=pair_tile) as part:
+                            cosine = T.stage(T.load(cosine_view[row, part]))
+                            sine = T.stage(T.load(sine_view[row, part]))
+                            for offset in T.serial(heads_per_program):
+                                head = offset if heads_per_program >= H else cohort * heads_per_program + offset
+                                if head < H:
+                                    rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, interleaved)
 
     return main
+
+
+@T.macro
+def rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, interleaved):
+    if interleaved:
+        first, second = inputs[row, head, part, 0], inputs[row, head, part, 1]
+        first_output, second_output = outputs[row, head, part, 0], outputs[row, head, part, 1]
+    else:
+        first, second = inputs[row, head, 0, part], inputs[row, head, 1, part]
+        first_output, second_output = outputs[row, head, 0, part], outputs[row, head, 1, part]
+    a, b = T.load(first), T.load(second)
+    left, right = T.alloc_local((pair_tile,), "float32"), T.alloc_local((pair_tile,), "float32")
+    for k in T.Parallel(pair_tile):
+        left[k] = a[k] * cosine[k] - b[k] * sine[k]
+        right[k] = a[k] * sine[k] + b[k] * cosine[k]
+    T.copy(left, first_output)
+    T.copy(right, second_output)
 
 
 @tilelang.jit(target="weft")

@@ -53,6 +53,11 @@ kernel(a, b, c)
 内完成整个 K 的缩并，以普通 `T.gemm` 保留权重的存储顺序。`linear.matmul` 则单独表达
 分块 K 循环及各输出程序的 grid。
 
+`attention.rope(head_major=True)` 按 head 遍历连续的 pair 范围；默认先遍历 pair tile，
+再跨 head cohort 复用 staged 系数。两种组织复用同一 rotary 宏。
+`causal_attention` 以 typed View 保存 query stage，以 state 保留 online numerator。
+token/head cohort 参数限定每个 grid 实例的串行工作，不改变有效 causal KV 前缀。
+
 格式声明统一位于 `weft_core.formats.ggml`，`ggml_formats` 将其接入 TileLang；
 lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，完整流程见
 [示例 05](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/05_derived_layout.py)。
@@ -65,9 +70,10 @@ IQ2_XS/XXS 同样保留 entry/sign 行，并使用完整范围可容纳于已声
 Level。每个 entry 选择一个连续的 I8X8 codebook 行，IQ2 另外选择对应
 的 sign 行。scale metadata 保留原 record 快照，输出仍为公开的 `(M, K)` 布局。
 作者在有界窗口内复用 metadata，无需持久化的解码数组。
-IQ2 的 codebook 与 sign 行均为 I8 元素，源码显式以 I16 计算乘积，再转换为 F32。
-I16 能精确容纳完整的 I8×I8 乘积范围，共同目标 passes 因而可以直接选择
-widening multiply 与 widening 整数到浮点转换。
+IQ2 的 codebook 与 sign 行均为 I8 元素。`iq2_windows(product_dtype=...)` 显式选择
+I16 或 I32 乘积，再转换为 F32；两者都能精确容纳完整的 I8×I8 乘积范围。
+I16 公开 widening multiply 与 widening 整数到浮点转换，I32 则可让短 payload
+与 F32 消费者保持同一 RVV 配置。这项作者数值选择与后端的物理 LMUL 选择分开。
 `codebook.indexed_windows` 将同一表行窗口结构用于 IQ1_M、IQ2_S 与 IQ3_XXS。
 IQ1_M 的 half-bit 查表与 IQ2_S 的 packed signs 仍是显式源码输入及字段。
 `iq3_windows` 在八元素符号窗口内配对两个四元素表行，并在父层 32 元素 Level
@@ -86,6 +92,8 @@ scale/correction 支路。`composition.packed_projection` 的显式解码到 wor
 
 `row_partials` 提供 x86 的作者级延迟归约与分组整数计算。单行 Q6_K 的
 `scale_groups` 限定作者同时暴露的 scale group 数量，不选择 ISA。
+`q6_planes` 也接受多行输出。显式串行行循环为每行保留相同的 plane/lane partial
+及逐 record 缩放，不把所有输出行同时暴露为驻留值。
 
 RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
 的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
@@ -136,6 +144,13 @@ Q8_0 子 record 的 scale，再应用权重 scale；NVFP4 共享 staged codebook
 作者的行 cohort，native grid 覆盖全部 cohort。`window_projection` 在调用内将
 activation 量化到调用者提供的 `Quantized` buffer，再复用同一宏，准备成本与
 输出布局均保持显式。
+`record_partials=2` 分别保留 Q1 偶数与奇数 record 的和，最后在 F32 中合并。
+`rows_per_program` 也可以让一个实例保留多行完整计算，两者都是显式作者结构。
+
+`row_partials.scale_projection` 为 Q2_K、Q4_K、Q5_K 复用 `affine_group_rows`，
+分别保留带 scale 的整数和及 minimum 校正和。scale 与 indexed projection
+factory 均公开已有 activation extreme/inverse 策略，复用行程序时保持 workload
+要求的量化合同。
 
 Affine 短 record 将权重 scale/minimum 和 activation scale/sum 分别保留为双元素
 metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更新 payload 乘积与

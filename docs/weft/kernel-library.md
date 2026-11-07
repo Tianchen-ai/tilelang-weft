@@ -55,6 +55,12 @@ workspace inside the call, stages a weight-column cohort and an activation-row
 cohort, then uses ordinary full-K `T.gemm` for each output tile. The source
 parameters separately expose those reuse scopes and the output tile dimensions.
 
+`attention.rope(head_major=True)` traverses each head's contiguous pair range;
+the default traverses pair tiles first and stages coefficients across the head
+cohort. Both use the same rotary macro. `causal_attention` stages a typed query
+View and carries its online numerator as state. Its token/head cohort parameters
+bound the serial work per grid instance without changing the causal KV prefix.
+
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
 
@@ -70,10 +76,12 @@ row; IQ2 selects its sign row independently.
 The scale metadata belongs to the original record snapshot, and the output
 retains the public `(M, K)` layout. The author shares metadata within these
 bounded windows without preparing a persistent decoded array.
-IQ2 codebook and sign rows contain I8 elements. Their product is explicitly I16,
-which represents the complete I8-by-I8 product range exactly; conversion to F32
-follows the product. This lets the shared target passes use a widening multiply
-and widening integer-to-float conversion directly.
+IQ2 codebook and sign rows contain I8 elements. `iq2_windows(product_dtype=...)`
+selects an explicit I16 or I32 product before conversion to F32. Both represent
+the complete I8-by-I8 product range exactly. I16 exposes widening multiply and
+widening integer-to-float conversion; I32 can keep short payloads in the same
+RVV configuration as their F32 consumers. The author selects this numerical
+organization independently of the target's physical LMUL choice.
 `codebook.indexed_windows` uses the same bounded table-row structure for IQ1_M,
 IQ2_S and IQ3_XXS. The IQ1_M half-bit lookup and the IQ2_S packed signs remain
 explicit source inputs and fields. `iq3_windows` pairs two four-element table
@@ -110,6 +118,9 @@ Persistent interleave requires a separate preparation kernel, demonstrated by
 `row_partials` provides source-selected deferred row reductions and grouped
 integer products for x86. `scale_groups` in the single-row Q6_K factory bounds
 the author's simultaneously exposed scale groups; it does not select an ISA.
+`q6_planes` also accepts multiple output rows. Its serial row loop retains the
+same plane/lane partials and per-record scaling for each row, without exposing
+all rows as simultaneously resident values.
 
 For RISC-V, `row_partials.affine_groups` expresses Q2_K/Q4_K/Q5_K scale groups
 as Level subtiles, keeping the minimum correction in a separate integer branch.
@@ -171,9 +182,18 @@ implementation of the requested organization.
 record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
 NVFP4 shares the staged codebook while closing each 16-element scaled product;
 TQ2_0 closes one 256-element signed dot. `rows_per_program` selects the author's
-row cohort, and the native grid covers all cohorts. `window_projection` reuses
-the same macro after quantizing activation into the caller-provided `Quantized`
+row cohort, and the native grid covers all cohorts.
+`record_partials=2` keeps independent even/odd Q1 record sums before the final
+F32 combination. `rows_per_program` can instead retain several complete rows
+inside one instance; both choices are visible author structure.
+`window_projection` reuses the same macro after quantizing activation into the caller-provided `Quantized`
 buffer during the call. Its preparation cost and output layouts stay explicit.
+
+`row_partials.scale_projection` similarly reuses `affine_group_rows` for Q2_K,
+Q4_K and Q5_K, retaining separate scaled integer and minimum-correction sums.
+Both scale and indexed projection factories expose the existing activation
+extreme and inverse policies, so a workload keeps its required quantization
+contract while reusing a row program.
 
 Affine short records retain the weight scale/minimum and activation scale/sum as
 two-element metadata tiles. Their conversion and multiplication are expressed

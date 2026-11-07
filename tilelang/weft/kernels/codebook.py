@@ -51,9 +51,10 @@ def iq1_windows(M, K):
 
 
 @tilelang.jit(target="weft")
-def iq2_windows(M, K, format="IQ2_XS"):
+def iq2_windows(M, K, format="IQ2_XS", product_dtype="int16"):
     """Keep scale groups and contiguous table rows in separate source Levels."""
     assert M > 0 and K > 0 and K % 256 == 0 and format in ("IQ2_XS", "IQ2_XXS")
+    assert product_dtype in ("int16", "int32")
     encoding = getattr(F, format)
     size = encoding.schema.storage_bits // 8
     entries = 4096 if format == "IQ2_XS" else 2048
@@ -89,15 +90,20 @@ def iq2_windows(M, K, format="IQ2_XS"):
                             word = T.cast(record.q[base + entry // T.int64(2)], "uint16")
                             index = word >> (T.cast(entry % T.int64(2), "uint16") * T.uint16(8)) & T.uint16(255)
                             sign = metadata >> (T.cast(entry, "uint32") * T.uint32(7)) & T.uint32(127)
-                        selected, parity = T.load(grid[index, :]), T.load(signs[sign, :])
-                        values = T.alloc_local((8,), "float32")
-                        for k in T.Parallel(8):
-                            values[k] = factor * T.cast(T.cast(selected.values[k], "int16") * T.cast(parity.values[k], "int16"), "float32")
-                        T.copy(values, output[payload])
+                        iq2_payload(grid, signs, index, sign, factor, output[payload], product_dtype)
                         entry += T.int64(1)
                     group_index += T.int64(1)
 
     return main
+
+
+@T.macro
+def iq2_payload(grid, signs, index, sign, factor, output, product_dtype):
+    selected, parity = T.load(grid[index, :]), T.load(signs[sign, :])
+    values = T.alloc_local((8,), "float32")
+    for k in T.Parallel(8):
+        values[k] = factor * T.cast(T.cast(selected.values[k], product_dtype) * T.cast(parity.values[k], product_dtype), "float32")
+    T.copy(values, output)
 
 
 @tilelang.jit(target="weft")

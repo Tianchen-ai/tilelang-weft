@@ -383,53 +383,87 @@ def affine_groups(M, K, format="Q5_K"):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            with T.level.rows(M, group=1) as row:
-                total = T.alloc_var("float32", init=0)
-                with T.level.blocks(K, extent=256) as block:
-                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
-                    d, dmin, ds, sums = w.d, w.dmin, x.ds, x.bsum
-                    if format == "Q2_K":
-                        metadata = w.scales
-                    else:
-                        minima = w.m
-                    integer = T.alloc_var("int32", init=0)
-                    with T.level.subtiles(block, extent=group_size) as group:
-                        low = T.load(w.q, at=group)
-                        if format == "Q5_K":
-                            high = T.load(w.qh, at=group)
-                        activation = T.load(x.q, at=group)
-                        if format == "Q2_K":
-                            scale = T.load(metadata, at=group)
-                        else:
-                            scale = T.load(w.sc, at=group)
-                        codes = T.alloc_local((group_size,), "uint8")
-                        product = T.alloc_local((1,), "int32")
-                        for k in T.Parallel(group_size):
-                            codes[k] = T.cast(low[k], "uint8")
-                            if format == "Q5_K":
-                                codes[k] |= T.cast(high[k], "uint8") << T.uint8(4)
-                        T.reduce_dot(codes, activation, product, over="k", acc_dtype="int32", engine="vector")
-                        if format == "Q2_K":
-                            integer += product[0] * (T.cast(scale[()], "int32") & T.int32(15))
-                        else:
-                            integer += product[0] * T.cast(scale[()], "int32")
-                    terms = T.alloc_local((groups,), "int32")
-                    correction = T.alloc_local((1,), "int32")
-                    for g in T.Parallel(groups):
-                        if format == "Q2_K":
-                            terms[g] = T.cast(metadata[g] >> T.uint8(4), "int32") * T.cast(sums[g], "int32")
-                        else:
-                            terms[g] = T.cast(minima[g], "int32") * (T.cast(sums[g * 2], "int32") + T.cast(sums[g * 2 + 1], "int32"))
-                    T.reduce_sum(terms, correction, dim=0)
-                    if format == "Q2_K":
-                        total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32")
-                                          - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))
-                    else:
-                        total -= (ds[()] * T.cast(dmin[()], "float32")) * T.cast(correction[0], "float32")
-                        total += (ds[()] * T.cast(d[()], "float32")) * T.cast(integer, "float32")
-                result = T.alloc_local((1,), "float32")
-                result[0] = total
-                T.copy(result, output[row])
+            affine_group_rows(weights, values, output, M, K, format, group_size, groups, "m")
+
+    return main
+
+@T.macro
+def affine_group_rows(weights, values, output, M, K, format, group_size, groups, axis):
+    with T.level.rows(M, group=1, axis=axis) as row:
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=256) as block:
+            w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+            d, dmin, ds, sums = w.d, w.dmin, x.ds, x.bsum
+            if format == "Q2_K":
+                metadata = w.scales
+            else:
+                minima = w.m
+            integer = T.alloc_var("int32", init=0)
+            with T.level.subtiles(block, extent=group_size) as group:
+                low = T.load(w.q, at=group)
+                if format == "Q5_K":
+                    high = T.load(w.qh, at=group)
+                activation = T.load(x.q, at=group)
+                if format == "Q2_K":
+                    scale = T.load(metadata, at=group)
+                else:
+                    scale = T.load(w.sc, at=group)
+                codes = T.alloc_local((group_size,), "uint8")
+                product = T.alloc_local((1,), "int32")
+                for k in T.Parallel(group_size):
+                    codes[k] = T.cast(low[k], "uint8")
+                    if format == "Q5_K":
+                        codes[k] |= T.cast(high[k], "uint8") << T.uint8(4)
+                T.reduce_dot(codes, activation, product, over="k", acc_dtype="int32", engine="vector")
+                if format == "Q2_K":
+                    integer += product[0] * (T.cast(scale[()], "int32") & T.int32(15))
+                else:
+                    integer += product[0] * T.cast(scale[()], "int32")
+            terms = T.alloc_local((groups,), "int32")
+            correction = T.alloc_local((1,), "int32")
+            for g in T.Parallel(groups):
+                if format == "Q2_K":
+                    terms[g] = T.cast(metadata[g] >> T.uint8(4), "int32") * T.cast(sums[g], "int32")
+                else:
+                    terms[g] = T.cast(minima[g], "int32") * (T.cast(sums[g * 2], "int32") + T.cast(sums[g * 2 + 1], "int32"))
+            T.reduce_sum(terms, correction, dim=0)
+            if format == "Q2_K":
+                total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32")
+                                  - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))
+            else:
+                total -= (ds[()] * T.cast(dmin[()], "float32")) * T.cast(correction[0], "float32")
+                total += (ds[()] * T.cast(d[()], "float32")) * T.cast(integer, "float32")
+        result = T.alloc_local((1,), "float32")
+        result[0] = total
+        T.copy(result, output[row])
+
+
+@tilelang.jit(target="weft")
+def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_policy="reciprocal"):
+    """Quantize in-call and close each affine scale group's integer dot."""
+    assert format in ("Q2_K", "Q4_K", "Q5_K") and min(M, N, K) > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    group_size = 16 if format == "Q2_K" else 32
+    groups = 256 // group_size
+    weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
+    activation_bytes = K // 256 * 292
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, weight_bytes), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, activation_bytes), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        values = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
+            for m in T.serial(M):
+                affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
 
     return main
 
@@ -662,7 +696,7 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
 @tilelang.jit(target="weft")
 def q6_planes(M, K, rows=1, lanes=64, planes=4):
     """Retain explicitly scaled signed products across the encoded row."""
-    assert M == rows == 1
+    assert M > 0 and rows == 1
     assert lanes in (32, 64, 128) and planes >= 2 and 256 % (lanes * planes) == 0
     assert K > 0 and K % 256 == 0
 
@@ -675,32 +709,33 @@ def q6_planes(M, K, rows=1, lanes=64, planes=4):
         T.func_attr({"tir.noalias": True})
         weights = T.view(Weights, shape=(M, K), encoding=F.Q6_K, axes=("m", "k"), abi=True)
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
-        output = T.view(Output, shape=(1,), axes=("m",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            total = T.alloc_local((lanes,), "float32")
-            T.fill(total, 0)
-            result = T.alloc_local((1,), "float32")
-            with T.level.blocks(K, extent=256) as block:
-                w, x = T.load(weights[0, block]), T.load(values[block])
-                low, high, scales, d, activation, ds = w.ql, w.qh, w.scales, w.d, x.q, x.ds
-                accumulated = T.alloc_local((lanes,), "int32")
-                T.fill(accumulated, 0)
-                for group in T.unroll(256 // (lanes * planes)):
-                    scaled = T.alloc_local((planes, lanes), "int32")
-                    partial = T.alloc_local((lanes,), "int32")
-                    for p, k in T.Parallel(planes, lanes):
-                        coordinate = T.uint32(group * planes * lanes) + T.cast(p, "uint32") * T.uint32(lanes) + T.cast(k, "uint32")
-                        code = T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(4))
-                        centered = T.cast(code, "int8") - T.int8(32)
-                        product = T.cast(centered, "int16") * T.cast(activation[coordinate], "int16")
-                        scaled[p, k] = T.cast(product, "int32") * T.cast(scales[coordinate // T.uint32(16)], "int32")
-                    T.reduce_sum(scaled, partial, dim=0)
+            for row in T.serial(M):
+                total = T.alloc_local((lanes,), "float32")
+                T.fill(total, 0)
+                result = T.alloc_local((1,), "float32")
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block]), T.load(values[block])
+                    low, high, scales, d, activation, ds = w.ql, w.qh, w.scales, w.d, x.q, x.ds
+                    accumulated = T.alloc_local((lanes,), "int32")
+                    T.fill(accumulated, 0)
+                    for group in T.unroll(256 // (lanes * planes)):
+                        scaled = T.alloc_local((planes, lanes), "int32")
+                        partial = T.alloc_local((lanes,), "int32")
+                        for p, k in T.Parallel(planes, lanes):
+                            coordinate = T.uint32(group * planes * lanes) + T.cast(p, "uint32") * T.uint32(lanes) + T.cast(k, "uint32")
+                            code = T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(4))
+                            centered = T.cast(code, "int8") - T.int8(32)
+                            product = T.cast(centered, "int16") * T.cast(activation[coordinate], "int16")
+                            scaled[p, k] = T.cast(product, "int32") * T.cast(scales[coordinate // T.uint32(16)], "int32")
+                        T.reduce_sum(scaled, partial, dim=0)
+                        for k in T.Parallel(lanes):
+                            accumulated[k] += partial[k]
                     for k in T.Parallel(lanes):
-                        accumulated[k] += partial[k]
-                for k in T.Parallel(lanes):
-                    total[k] += T.cast(accumulated[k], "float32") * (T.cast(d[()], "float32") * ds[()])
-            T.reduce_sum(total, result, dim=0)
-            T.copy(result, output)
+                        total[k] += T.cast(accumulated[k], "float32") * (T.cast(d[()], "float32") * ds[()])
+                T.reduce_sum(total, result, dim=0)
+                T.copy(result, output[row])
 
     return main
 
@@ -947,7 +982,8 @@ def indexed_groups(M, K, format="IQ2_XXS", rows=1):
 
 
 @tilelang.jit(target="weft")
-def indexed_projection(M, N, K, format="IQ2_XS", columns=1, windows=4):
+def indexed_projection(M, N, K, format="IQ2_XS", columns=1, windows=4,
+                       extreme_policy="first", inverse_policy="direct"):
     """Reuse the row-dot program after one in-call activation preparation."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ3_S", "IQ3_XXS")
     assert M > 0 and N > 0 and N % columns == 0 and K > 0 and K % 256 == 0
@@ -976,7 +1012,7 @@ def indexed_projection(M, N, K, format="IQ2_XS", columns=1, windows=4):
         grid = T.view(Grid, shape=(entries, payload), encoding=grid_encoding,
                       axes=("entry", "payload"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 256)
+            quantize_rows(source, prepared, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
                 if format in ("IQ1_S", "IQ1_M"):
                     iq1_groups_rows(weights, prepared[m, :], output[m, :], grid, HalfBits,
