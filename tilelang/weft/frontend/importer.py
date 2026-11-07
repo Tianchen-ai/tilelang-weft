@@ -355,6 +355,9 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 value = self.expr(node.args[0])
                 return self.op("unary", (value,), value.type, {"kind": json.dumps("abs" if leaf == "fabs" else leaf)})
             if leaf == "if_then_else":
+                selected = self.static_condition(node.args[0])
+                if selected is not None:
+                    return self.expr(node.args[1] if selected else node.args[2])
                 condition, yes, no = map(self.expr, node.args)
                 shape, axes = self.domain(yes, no, condition)
                 return self.op("select", (condition, yes, no), value_type(element_type(yes.type), shape, axes))
@@ -362,6 +365,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 value = self.expr(node.args[0])
                 return self.op("bitcast", (value,), value_type(ScalarType(dtype(node.dtype)), shape_of(value.type), axes_of(value.type)))
         self.error(f"TIRx expression {type(node).__name__} is not yet imported: {node}", node)
+
+    def static_condition(self, expression):
+        simplified = self.analyzer.simplify(expression)
+        return bool(simplified.value) if isinstance(simplified, tirx.IntImm) else None
 
     def static(self, expression):
         simplified = self.analyzer.simplify(expression)
@@ -724,6 +731,12 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.while_loop(node)
             return
         if isinstance(node, tirx.IfThenElse):
+            selected = self.static_condition(node.condition)
+            if selected is not None:
+                branch = node.then_case if selected else node.else_case
+                if branch is not None:
+                    self.stmt(branch)
+                return
             condition = self.expr(node.condition)
             if shape_of(condition.type):
                 saved = self.mask

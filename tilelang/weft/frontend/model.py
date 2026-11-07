@@ -493,9 +493,9 @@ class ModelOperations:
             if len(names) == 1:
                 axis, left, right = self.bind_group_axis(left, right, names[0])
                 reduction = (axis,)
-                left, right = self.align_contraction_batches(left, right, reduction, output[2])
             else:
                 reduction = tuple(self.named_axis(name) for name in names)
+            left, right = self.align_contraction_batches(left, right, reduction, output[2])
             if any(axis not in axes_of(value.type) for value in (left, right) for axis in reduction):
                 self.error("reduce_dot operands must retain every declared named reduction axis")
             shape, axes = self.domain(left, right)
@@ -514,7 +514,7 @@ class ModelOperations:
             output_axes = free_axes
             if output[2] != free_shape:
                 if free_shape or output[2] != (1,):
-                    self.error("reduce_dot destination must match its free logical axes")
+                    self.error(f"reduce_dot free shape {free_shape} does not match its destination {output[2]}")
                 output_axes = self.local_axes[output[0]]
                 result = self.broadcast(result, output[2], output_axes)
             self.write_region(output, result, output_axes)
