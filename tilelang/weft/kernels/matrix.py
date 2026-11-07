@@ -111,6 +111,7 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
         Xq: T.Tensor((M * (K // 32) * activation_bytes,), "uint8"),
         Y: T.Tensor((M, N), "float32"),
     ):
+        T.func_attr({"weft.alias_groups": {"W": "input", "Xq": "input", "Y": "output"}})
         wv = T.view(W, shape=(N, K), encoding=weight, axes=("n", "k"), abi=True)
         xv = T.view(Xq, shape=(M, K), encoding=activation, axes=("m", "k"), abi=True)
         yv = T.view(Y, shape=(M, N), axes=("m", "n"), abi=True)
@@ -132,19 +133,19 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                             high_product = T.alloc_local((tile_rows, columns), "int32")
                             low_product = T.alloc_local((tile_rows, columns), "int32")
                             negative = x.neg_sum
-                            for r, k in T.Parallel(tile_rows, 32):
-                                high[r, k] = T.cast(xq[r, k] >> 4, "int4")
-                                low[r, k] = T.cast(xq[r, k], "uint4")
+                            for m, k in T.Parallel(tile_rows, 32):
+                                high[m, k] = T.cast(xq[m, k] >> 4, "int4")
+                                low[m, k] = T.cast(xq[m, k], "uint4")
                             T.reduce_dot(high, q, high_product, over="k", acc_dtype="int32", engine=engine)
                             T.reduce_dot(low, q, low_product, over="k", acc_dtype="int32", engine=engine)
-                            for r, c in T.Parallel(tile_rows, columns):
-                                integer[r, c] = (
-                                    high_product[r, c] * 16 + low_product[r, c] + T.cast(negative[r], "int32") * T.cast(zero[c], "int32")
+                            for m, n in T.Parallel(tile_rows, columns):
+                                integer[m, n] = (
+                                    high_product[m, n] * 16 + low_product[m, n] + T.cast(negative[m], "int32") * T.cast(zero[n], "int32")
                                 )
                         elif generation == 1:
                             values = T.alloc_local((columns, 32), "int8")
-                            for c, k in T.Parallel(columns, 32):
-                                values[c, k] = T.cast(q[c, k], "int8") - T.cast(zero[c] if affine else 8, "int8")
+                            for n, k in T.Parallel(columns, 32):
+                                values[n, k] = T.cast(q[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
                             T.gemm(x.q, values, integer, transpose_B=True, clear_accum=True, engine=engine)
                         else:
                             T.fill(integer, 0)
@@ -154,10 +155,10 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                                 right = T.load(q, at=sub)
                                 partial = T.alloc_local((tile_rows, columns), "int32")
                                 T.reduce_dot(left, right, partial, over="k", acc_dtype="int32", engine=engine)
-                                for r, c in T.Parallel(tile_rows, columns):
-                                    integer[r, c] += partial[r, c]
-                        for r, c in T.Parallel(tile_rows, columns):
-                            total[r, c] += (T.cast(integer[r, c], "float32") * T.cast(wd[c], "float32")) * xd[r]
+                                for m, n in T.Parallel(tile_rows, columns):
+                                    integer[m, n] += partial[m, n]
+                        for m, n in T.Parallel(tile_rows, columns):
+                            total[m, n] += (T.cast(integer[m, n], "float32") * T.cast(wd[n], "float32")) * xd[m]
                     T.copy(total, yv[row, col])
 
     return main
