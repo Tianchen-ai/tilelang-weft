@@ -138,10 +138,9 @@ class TileOperations:
             if len(left[2]) != 2 or len(right[2]) != 2 or len(output[2]) != 2:
                 self.error("gemm tile operands require explicit rank-two regions")
             a, b = self.read_region(left, left_axes), self.read_region(right, right_axes)
-            if transpose_left:
-                a = self.rename(a, (m, k), (row, reduction), (row, reduction))
-            if transpose_right:
-                b = self.rename(b, (k, n), (reduction, column), (reduction, column))
+            # The contraction names M/N/K explicitly. Its operands retain
+            # their storage-coordinate order, including transposed matrices;
+            # a numerical transpose would hide the original field/read edge.
             from .importer import dtype, integers
 
             accum = ScalarType(dtype(output[0].dtype))

@@ -35,6 +35,10 @@ Weft helper 和 Level 的三个阶段使用原生 TIRx 属性区域。局部 buf
 helper，包括其显式 buffer 更新。非局部返回与显式 `noinline` 继续保留有类型的函数区域。
 两种前端在物理布局和资源分析之前共用这项规范化。
 
+`T.gemm` 保留操作数原有的存储坐标顺序。转置参数绑定 Canonical outer contraction
+的 M/N/K 轴，不额外建立数值转置；Encoding 字段和读取快照因此保留原有供给关系，
+交由共同物理编译器实现。
+
 局部 Tensor 索引保留 Canonical extraction 坐标，包括 Encoding 字段。
 显式 `T.load(table, at=indices, bounds="in_bounds")` 继续表示索引表读取。
 state 的诞生 Level 规定生命周期；只有数值长度与该 Level 的分区相同时，才使用其坐标。

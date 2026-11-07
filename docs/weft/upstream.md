@@ -35,6 +35,11 @@ and no `noinline` constraint, including their explicit buffer updates. Nonlocal
 returns and explicit `noinline` constraints retain typed function regions. Both
 frontends use this normalization before physical layout and resource analysis.
 
+`T.gemm` retains each operand's storage-coordinate order. Transpose flags bind
+the explicit M/N/K axes of the Canonical outer contraction; they do not insert
+a separate numerical transpose. Encoded fields and saved reads therefore keep
+their original supply relation for the shared physical compiler.
+
 Local Tensor indexing retains Canonical extraction coordinates, including
 Encoding fields. Explicit `T.load(table, at=indices, bounds="in_bounds")` remains
 the indexed-table operation. A state's birth Level determines its lifetime;

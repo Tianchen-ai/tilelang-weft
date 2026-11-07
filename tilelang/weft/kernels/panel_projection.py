@@ -253,7 +253,7 @@ def staged_affine(M, N, K, format="Q4_K", staged_columns=64, block_k=256,
                                             codes = low
                                         products = T.alloc_local((rows, columns), "int32")
                                         if partials == 1:
-                                            T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
+                                            T.gemm(inputs, codes, products, transpose_B=True, clear_accum=True, engine="vector")
                                         else:
                                             partial = T.alloc_local((rows, columns, 8), "int16")
                                             T.mac_groups(inputs, codes, partial, n=4, into="int16", over="k")
@@ -266,7 +266,7 @@ def staged_affine(M, N, K, format="Q4_K", staged_columns=64, block_k=256,
                                     minima, d, dmin, ds = w.m, w.d, w.dmin, x.ds
                                     paired_sums = T.sum_pairs(x.bsum)
                                     correction = T.alloc_local((rows, columns), "int32")
-                                    T.reduce_dot(paired_sums, minima, correction, over="k", acc_dtype="int32", engine="vector")
+                                    T.gemm(paired_sums, minima, correction, transpose_B=True, clear_accum=True, engine="vector")
                                     for r, c in T.Parallel(rows, columns):
                                         total[r, c] += ds[r] * (T.cast(d[c], "float32") * T.cast(integer[r, c], "float32") - T.cast(dmin[c], "float32") * T.cast(correction[r, c], "float32"))
                                 T.copy(total, output[row, col])
