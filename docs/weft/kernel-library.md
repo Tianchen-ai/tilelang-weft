@@ -200,3 +200,11 @@ record's floating scale. IQ4_XS uses a staged 16-entry codebook and a 32-element
 subtile with an explicit scale update. Field projection consumes the existing
 Level point, keeping both the record read and the codebook snapshot visible to
 the shared compiler.
+
+`indexed_lanes.vec_dot` and `indexed_lanes.projection` share the ordinary
+`indexed_rows` macro for IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S. The author retains
+sixteen-lane I16 pair partials, I32 group accumulation, explicit codebook inputs
+and per-record floating scales. `groups_per_step` bounds source unrolling
+without specifying a hardware vector width. Projection prepares its caller's
+Q8_K buffer once inside the invocation; `extreme_policy` preserves the selected
+quantization tie rule before the same indexed row program consumes that buffer.

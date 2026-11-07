@@ -156,6 +156,12 @@ Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `col
 分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
 源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。
 
+`indexed_lanes.vec_dot` 与 `indexed_lanes.projection` 复用普通 `indexed_rows`
+宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的 I16 pair partial、
+I32 group 累加、显式 codebook 输入和逐 record 浮点 scale。`groups_per_step`
+约束源码展开范围，不指定硬件向量宽度。projection 在调用内只准备一次调用方的 Q8_K
+缓冲；`extreme_policy` 保留选定的量化并列极值规则，然后由相同的 indexed row 程序消费。
+
 `indexed_lanes.scaled_entries` 在 64 元素 Level 窗口中明确表达 IQ2_S/IQ3_S 的
 entry、payload 轴，先完成整数 scale group，再应用 record 的浮点缩放。IQ4_XS
 使用 staged 的 16 项码本与 32 元素子块，显式更新逐组缩放结果。字段投影直接消费
