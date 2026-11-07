@@ -65,6 +65,10 @@ IQ2_XS/XXS 同样保留 entry/sign 行，并使用完整范围可容纳于已声
 Level。每个 entry 选择一个连续的 I8X8 codebook 行，IQ2 另外选择对应的 sign 行。
 scale metadata 保留原 record 快照，输出仍为公开的 `(M, K)` 布局。该源码组织共享
 标量 metadata，并限定每个 payload 的生命周期，无需持久化的解码数组。
+`codebook.indexed_windows` 将同一表行窗口结构用于 IQ1_M、IQ2_S 与 IQ3_XXS。
+IQ1_M 的 half-bit 查表与 IQ2_S 的 packed signs 仍是显式源码输入及字段。
+`iq3_windows` 在八元素符号窗口内配对两个四元素表行，并在父层 32 元素 Level
+共享标量 scale。符号运算直接消费原 packed-bit 字段，公开输出仍为 `(M, K)`。
 
 `indexed_lanes.xxs_subgroups` 用 64 元素的 Level 窗口表达 IQ3_XXS。
 每个窗口保留两个整数 scale group，以及各自的 codebook 行和 sign 行，随后加入 block 和。

@@ -68,31 +68,149 @@ def iq2_windows(M, K, format="IQ2_XS"):
         with T.Kernel(1):
             with T.level.blocks(M * K, extent=256) as block:
                 record = T.load(weights[block])
-                entry = T.alloc_var("uint16", init=0)
+                block_scale = T.cast(record.d[()], "float32")
+                group_index = T.alloc_var("int64", init=0)
                 with T.level.subtiles(block, extent=32) as group:
                     if format == "IQ2_XS":
-                        scale = T.load(record.scales, at=group)
+                        scale = T.cast(record.scales[group_index], "uint32")
+                        low_factor = block_scale * (0.5 + T.cast(scale & T.uint32(15), "float32")) * 0.25
+                        high_factor = block_scale * (0.5 + T.cast(scale >> T.uint32(4), "float32")) * 0.25
                     else:
-                        base = entry // T.uint16(4) * T.uint16(4)
-                        metadata = T.cast(record.q[base + T.uint16(2)], "uint32") | (T.cast(record.q[base + T.uint16(3)], "uint32") << T.uint32(16))
+                        base = group_index * T.int64(4)
+                        metadata = T.cast(record.q[base + T.int64(2)], "uint32") | (T.cast(record.q[base + T.int64(3)], "uint32") << T.uint32(16))
+                        factor = block_scale * (0.5 + T.cast(metadata >> T.uint32(28), "float32")) * 0.25
+                    entry = T.alloc_var("int64", init=0)
                     with T.level.subtiles(group, extent=8) as payload:
                         if format == "IQ2_XS":
-                            word = T.cast(record.q[entry], "uint16")
+                            word = T.cast(record.q[group_index * T.int64(4) + entry], "uint16")
                             index, sign = word & T.uint16(511), word >> T.uint16(9)
-                            sc = T.cast(scale[()], "uint16") >> ((entry % T.uint16(4) // T.uint16(2)) * T.uint16(4)) & T.uint16(15)
+                            factor = T.if_then_else(entry >= T.int64(2), high_factor, low_factor)
                         else:
-                            base = entry // T.uint16(4) * T.uint16(4)
-                            word = T.cast(record.q[base + entry % T.uint16(4) // T.uint16(2)], "uint16")
-                            index = word >> (entry % T.uint16(2) * T.uint16(8)) & T.uint16(255)
-                            sign = metadata >> (T.cast(entry % T.uint16(4), "uint32") * T.uint32(7)) & T.uint32(127)
-                            sc = metadata >> T.uint32(28)
-                        factor = T.cast(record.d[()], "float32") * (0.5 + T.cast(sc, "float32")) * 0.25
+                            word = T.cast(record.q[base + entry // T.int64(2)], "uint16")
+                            index = word >> (T.cast(entry % T.int64(2), "uint16") * T.uint16(8)) & T.uint16(255)
+                            sign = metadata >> (T.cast(entry, "uint32") * T.uint32(7)) & T.uint32(127)
                         selected, parity = T.load(grid[index, :]), T.load(signs[sign, :])
                         values = T.alloc_local((8,), "float32")
                         for k in T.Parallel(8):
                             values[k] = factor * T.cast(T.cast(selected.values[k], "int32") * T.cast(parity.values[k], "int32"), "float32")
                         T.copy(values, output[payload])
-                        entry += T.uint16(1)
+                        entry += T.int64(1)
+                    group_index += T.int64(1)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def indexed_windows(M, K, format="IQ2_S"):
+    """Select one entry's table row while retaining record and scale metadata."""
+    assert M > 0 and K > 0 and K % 256 == 0
+    assert format in ("IQ1_M", "IQ2_S", "IQ3_XXS")
+    encoding = getattr(F, format)
+    size = encoding.schema.storage_bits // 8
+    width = 4 if format == "IQ3_XXS" else 8
+    table_elements = {"IQ1_M": 16384, "IQ2_S": 8192, "IQ3_XXS": 1024}[format]
+    table_encoding = F.I8X4 if width == 4 else F.I8X8
+
+    @T.prim_func
+    def main(Weights: T.Tensor((M, K // 256 * size), "uint8"), Grid: T.Tensor((table_elements,), "int8"), Signs: T.Tensor((1024 if format == "IQ3_XXS" else 0,), "int8"), HalfBits: T.Tensor((65536 if format == "IQ1_M" else 0,), "float32"), Output: T.Tensor((M, K), "float32")):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Signs": "input", "HalfBits": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=encoding, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        grid = T.view(Grid, shape=(table_elements // width, width), encoding=table_encoding, axes=("entry", "payload"), abi=True)
+        if format == "IQ3_XXS":
+            signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        with T.Kernel(1):
+            with T.level.blocks(M * K, extent=256) as block:
+                record = T.load(weights[block])
+                if format == "IQ1_M":
+                    sc0 = T.cast(record.scales[0], "uint32") | T.cast(record.scales[1], "uint32") << T.uint32(8)
+                    sc1 = T.cast(record.scales[2], "uint32") | T.cast(record.scales[3], "uint32") << T.uint32(8)
+                    sc2 = T.cast(record.scales[4], "uint32") | T.cast(record.scales[5], "uint32") << T.uint32(8)
+                    sc3 = T.cast(record.scales[6], "uint32") | T.cast(record.scales[7], "uint32") << T.uint32(8)
+                    bits = sc0 >> T.uint32(12) | sc1 >> T.uint32(8) & T.uint32(240) | sc2 >> T.uint32(4) & T.uint32(3840) | sc3 & T.uint32(61440)
+                    block_scale = HalfBits[bits]
+                else:
+                    block_scale = T.cast(record.d[()], "float32")
+                entry = T.alloc_var("uint16", init=0)
+                with T.level.subtiles(block, extent=32) as group:
+                    if format == "IQ3_XXS":
+                        metadata_value = T.load(record.metadata, at=group)
+                        metadata = metadata_value[()]
+                    with T.level.subtiles(group, extent=8) as entry_group:
+                        with T.level.subtiles(entry_group, extent=width) as payload:
+                            if format == "IQ2_S":
+                                payload_signs = T.load(record.signs, at=payload)
+                            if format == "IQ1_M":
+                                metadata = T.cast(record.qh[entry // T.uint16(2)], "uint32") >> (T.cast(entry % T.uint16(2), "uint32") * T.uint32(4))
+                                index = T.cast(record.q[entry], "uint32") | (metadata & T.uint32(7)) << T.uint32(8)
+                                g = entry // T.uint16(4)
+                                scales = T.cast(record.scales[g // T.uint16(2) * T.uint16(2)], "uint32") | T.cast(record.scales[g // T.uint16(2) * T.uint16(2) + T.uint16(1)], "uint32") << T.uint32(8)
+                                shift = T.cast(g % T.uint16(2) * T.uint16(6) + entry % T.uint16(4) // T.uint16(2) * T.uint16(3), "uint32")
+                                factor = block_scale * T.cast(((scales >> shift) & T.uint32(7)) * T.uint32(2) + T.uint32(1), "float32")
+                                delta = T.if_then_else(metadata & T.uint32(8) != T.uint32(0), -0.125, 0.125)
+                            elif format == "IQ2_S":
+                                high = T.cast(record.qh[entry // T.uint16(4)], "uint32")
+                                index = T.cast(record.q[entry], "uint32") | ((high >> (T.cast(entry % T.uint16(4), "uint32") * T.uint32(2))) & T.uint32(3)) << T.uint32(8)
+                                sc = T.cast(record.scales[entry // T.uint16(4)], "uint32") >> (T.cast(entry % T.uint16(4) // T.uint16(2), "uint32") * T.uint32(4)) & T.uint32(15)
+                                factor = block_scale * (0.5 + T.cast(sc, "float32")) * 0.25
+                            else:
+                                index = T.cast(record.q[entry], "uint32")
+                                sign_index = metadata >> (T.cast(entry % T.uint16(8) // T.uint16(2), "uint32") * T.uint32(7)) & T.uint32(127)
+                                sign_row = T.load(signs[sign_index, :])
+                                factor = block_scale * (0.5 + T.cast(metadata >> T.uint32(28), "float32")) * 0.5
+                            selected = T.load(grid[index, :])
+                            values = T.alloc_local((width,), "float32")
+                            for k in T.Parallel(width):
+                                if format == "IQ1_M":
+                                    values[k] = factor * (T.cast(selected.values[k], "float32") + delta)
+                                else:
+                                    if format == "IQ3_XXS":
+                                        sign = T.cast(sign_row.values[entry % T.uint16(2) * T.uint16(4) + T.cast(k, "uint16")], "int32")
+                                    else:
+                                        sign = T.int32(1) - T.cast(payload_signs[k], "int32") * T.int32(2)
+                                    values[k] = factor * T.cast(T.cast(selected.values[k], "int32") * sign, "float32")
+                            T.copy(values, output[payload])
+                            entry += T.uint16(1)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def iq3_windows(M, K):
+    """Pair two four-byte codebook rows within one eight-bit sign window."""
+    assert M > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(Weights: T.Tensor((M, K // 256 * 110), "uint8"), Grid: T.Tensor((2048,), "int8"), Output: T.Tensor((M, K), "float32")):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=F.IQ3_S, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        grid = T.view(Grid, shape=(2048,), axes=("code",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.blocks(M * K, extent=256) as block:
+                record = T.load(weights[block])
+                group_index = T.alloc_var("int64", init=0)
+                with T.level.subtiles(block, extent=32) as group:
+                    scale = T.cast(record.d[()], "float32") * T.cast(T.int32(1) + T.int32(2) * T.cast(record.scales[group_index], "int32"), "float32")
+                    pair = T.alloc_var("int64", init=0)
+                    with T.level.subtiles(group, extent=8) as payload:
+                        entry = group_index * T.int64(8) + pair * T.int64(2)
+                        first = T.cast(record.q[entry], "uint32") | T.cast(record.qh[entry], "uint32") << T.uint32(8)
+                        second = T.cast(record.q[entry + T.int64(1)], "uint32") | T.cast(record.qh[entry + T.int64(1)], "uint32") << T.uint32(8)
+                        indices = T.alloc_local((8,), "uint32")
+                        for k in T.Parallel(8):
+                            half = T.cast(k, "uint32") // T.uint32(4)
+                            index = first * (T.uint32(1) - half) + second * half
+                            indices[k] = index * T.uint32(4) + T.cast(k, "uint32") % T.uint32(4)
+                        selected = T.load(grid, at=indices, bounds="in_bounds")
+                        signs = T.load(record.signs, at=payload)
+                        values = T.alloc_local((8,), "float32")
+                        for k in T.Parallel(8):
+                            sign = T.int32(1) - T.cast(signs[k], "int32") * T.int32(2)
+                            values[k] = scale * T.cast(T.cast(selected[k], "int32") * sign, "float32")
+                        T.copy(values, output[payload])
+                        pair += T.int64(1)
+                    group_index += T.int64(1)
 
     return main
 

@@ -70,6 +70,12 @@ row; IQ2 selects its sign row independently. The scale metadata belongs to the
 original record snapshot, and the output retains the public `(M, K)` layout.
 This source organization shares scalar metadata and bounds each payload's
 lifetime without preparing a persistent decoded array.
+`codebook.indexed_windows` uses the same bounded table-row structure for IQ1_M,
+IQ2_S and IQ3_XXS. The IQ1_M half-bit lookup and the IQ2_S packed signs remain
+explicit source inputs and fields. `iq3_windows` pairs two four-element table
+rows inside an eight-element sign window, sharing its scalar scale at the
+32-element parent Level. Its sign operation consumes the original packed-bit
+field, and its public output remains `(M, K)`.
 `quantized.field_windows` decodes an integer-format record through explicit
 Level subtiles. A scale-group window selects its payload and scalar metadata
 from the same record snapshot, reusing the regular decoding macro. This source
