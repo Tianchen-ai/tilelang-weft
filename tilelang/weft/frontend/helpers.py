@@ -7,6 +7,7 @@ from weft_core.types import shape_of, axes_of, element_type
 
 class HelperOperations:
     def source_helper(self, block):
+        declaration = json.loads(block.value.value)
         incoming, environment = dict(self.locals), dict(self.env)
         incoming_axes, readonly = dict(self.local_axes), set(self.readonly)
         keys = tuple(incoming)
@@ -15,8 +16,6 @@ class HelperOperations:
         self.helper_stack.append(context)
         with self.insertion(region):
             try:
-                for buffer in block.alloc_buffers:
-                    self.allocate(buffer)
                 self.stmt(block.body)
             finally:
                 self.helper_stack.pop()
@@ -41,12 +40,12 @@ class HelperOperations:
             "weft_kernel.helper",
             types=result_types,
             attrs={
-                "name": json.dumps(str(block.annotations["weft.helper"])),
-                "noinline": "true" if bool(block.annotations["weft.helper.noinline"]) else "false",
+                "name": json.dumps(declaration["name"]),
+                "noinline": "true" if declaration["noinline"] else "false",
             },
             regions=(region,),
         )
-        self.helper_results[int(block.annotations["weft.helper.id"])] = results[:count]
+        self.helper_results[int(declaration["id"])] = results[:count]
         self.locals, self.env = incoming, environment
         self.locals.update(zip((keys[i] for i in changed), results[count:]))
         self.local_axes, self.readonly = incoming_axes, readonly

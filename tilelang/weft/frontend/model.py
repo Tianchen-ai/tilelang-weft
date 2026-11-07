@@ -556,8 +556,11 @@ class ModelOperations:
             if isinstance(statement, tirx.SeqStmt):
                 for item in statement.seq:
                     collect(item)
-            elif isinstance(statement, tirx.SBlockRealize) and "weft.level.region" in statement.block.annotations:
-                blocks[str(statement.block.annotations["weft.level.region"])] = statement
+            elif isinstance(statement, tirx.AttrStmt) and statement.attr_key == "weft.level.region":
+                phase = statement.value.value
+                if phase in blocks:
+                    self.error("a semantic Level cannot duplicate a declaration/body region", statement)
+                blocks[phase] = statement.body
             else:
                 self.error("a semantic Level must retain its three explicit declaration/body regions", statement)
 

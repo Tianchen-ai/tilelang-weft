@@ -47,8 +47,7 @@ class LevelFrame:
         previous = self.phase, self.forbidden
         self.phase, self.forbidden = phase, set(forbidden)
         try:
-            with builder.with_frame(I.sblock("weft_" + phase)):
-                I.sblock_attr({"weft.level.region": phase})
+            with builder.with_frame(I.attr(tirx.IntImm("int32", 0), "weft.level.region", phase)):
                 yield
         finally:
             self.phase, self.forbidden = previous

@@ -9,6 +9,7 @@ Upstream GPU backends keep their existing pipeline/codegen path.
 |---|---|
 | `tilelang/language/eager/ast.py` | Common rewriting, return regions and declaration discovery |
 | `tilelang/language/eager/builder.py` | Existing scopes, arguments, callbacks and locations |
+| `tilelang/language/allocate.py` | Statement-level CPU allocations at their author's lexical position |
 | `tilelang/backend/module.py` | Exclusive artifact compiler and CPU iteration ownership contract |
 | `tilelang/engine/lower.py` | Selected backend checks and artifact compilation |
 | `tilelang/weft/frontend` | Native TIRx tile/control/model import into shared Canonical |
@@ -22,6 +23,12 @@ Upstream GPU backends keep their existing pipeline/codegen path.
 MLIR C++ objects do not cross the boundary. The shared native runtime is independent
 of the compiler and both frontends. Target passes have one source owner in
 Triton–Weft's `third_party/weft` subproject.
+
+Weft helper and Level phases use native TIRx attribute regions, rather than
+scheduled tensor blocks. Local buffers are allocated where declared, including
+inside helpers and birth regions. The importer builds reads, writes, captures
+and handoffs from their typed statements and View operations; it does not use
+tensor-block access inference for opaque Encoding handles.
 
 Local Tensor indexing retains Canonical extraction coordinates, including
 Encoding fields. Explicit `T.load(table, at=indices, bounds="in_bounds")` remains

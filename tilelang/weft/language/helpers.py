@@ -1,6 +1,7 @@
 """Native TileLang macros with typed return regions and optional call boundaries."""
 
 from dataclasses import replace
+import json
 
 from tvm import tirx
 from tvm.script.ir_builder import tirx as I
@@ -61,8 +62,8 @@ class HelperRegion:
                 raise TypeError("helper return paths must preserve their tuple and value structure")
             I.evaluate(intrinsic("helper_return", *operands, kinds=categories))
 
-        with builder.with_frame(I.sblock(f"weft_helper_{identity}")):
-            I.sblock_attr({"weft.helper": macro.name, "weft.helper.id": identity, "weft.helper.noinline": self.noinline})
+        declaration = json.dumps({"name": macro.name, "id": identity, "noinline": self.noinline})
+        with builder.with_frame(I.attr(tirx.IntImm("int32", 0), "weft.helper", declaration)):
             builder.return_handlers.append(emit_return)
             try:
                 with builder.macro(macro.name, macro.annotations):

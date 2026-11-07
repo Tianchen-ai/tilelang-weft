@@ -669,9 +669,6 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if "weft.derive" in node.annotations:
                 self.layout_builder(node)
                 return
-            if "weft.helper" in node.annotations:
-                self.source_helper(node)
-                return
             if "weft_cpu_num_threads" in node.annotations:
                 self.threads = int(node.annotations["weft_cpu_num_threads"])
             for buffer in node.alloc_buffers:
@@ -749,6 +746,9 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.expr(node.value)
             return
         if isinstance(node, tirx.AttrStmt):
+            if node.attr_key == "weft.helper":
+                self.source_helper(node)
+                return
             self.error(f"unhandled TIRx region attribute {node.attr_key}")
         self.error(f"TIRx statement {name} has no Canonical import: {node}")
 

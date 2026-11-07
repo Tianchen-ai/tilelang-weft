@@ -46,6 +46,13 @@ def _with_span(buffer: Buffer) -> Buffer:
     return buffer
 
 
+def _local_buffer(shape, dtype, scope):
+    target = tvm.target.Target.current(allow_none=True)
+    if target is not None and target.kind.name == "weft":
+        return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+
+
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     """Allocate a shared memory buffer for inter-thread communication.
 
@@ -61,7 +68,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
         # lei: This is a hack to handle bool type.
         # Because tilelang's merge smem pass cannot merge bool type currently.
         scope = "shared"
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _local_buffer(shape, dtype, scope)
 
 
 def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
@@ -75,7 +82,7 @@ def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _local_buffer(shape, dtype, scope)
 
 
 def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
@@ -89,7 +96,7 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _local_buffer(shape, dtype, scope)
 
 
 @overload
@@ -151,7 +158,7 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if dtype is _ptr_sentinel:
         dtype = _dtypes.int64
 
-    buffer = _with_span(T.sblock_alloc_buffer([1], dtype, scope=parsed_scope))
+    buffer = _local_buffer([1], dtype, parsed_scope)
     if parsed_init is not None:
         # Always use T.buffer_store for reliable initialisation across all
         # backends.  The sblock_attr("tl.local_var_init") path feeds into the
