@@ -108,6 +108,12 @@ the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
 
+Affine short records retain the weight scale/minimum and activation scale/sum as
+two-element metadata tiles. Their conversion and multiplication are expressed
+in one `T.Parallel(2)` operation before the independent product and correction
+updates. This keeps the author's metadata work grouped through the common
+frontend, alongside the explicitly grouped integer payload products.
+
 `indexed_projection.packed_words` builds byte panels during the call and reuses
 them across activation rows. Group factors, biased products and the exact
 activation-sum correction remain separate integer expressions. Its `rows` and

@@ -97,6 +97,10 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 源码的读取边界。这些是作者明确选择的数值组织，目标 passes
 负责实现所选组织的物理计算。
 
+Affine 短 record 将权重 scale/minimum 和 activation scale/sum 分别保留为双元素
+metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更新 payload 乘积与
+校正累加器。作者的 metadata 分组与整数 payload 分组一起通过共同前端保留。
+
 `indexed_projection.packed_words` 在调用内生成 byte panel，跨 activation 行复用。
 分组 factor、带偏置的乘积与精确 activation sum 校正保持独立的整数表达式。
 `rows`、`columns` 表达这层复用，共同编译器选择 VNNI 或其他合法向量实现。

@@ -226,12 +226,19 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
                                         codes[k] = q[k]
                                     else:
                                         codes[k] = T.cast(q[k], "int8") - T.int8(8) if format == "Q4_0" else T.cast(q[k], "uint8")
-                        if format == "MXFP4":
+                        if affine:
+                            weight_meta = T.alloc_local((2,), "float16")
+                            activation_meta = T.alloc_local((2,), "float16")
+                            metadata = T.alloc_local((2,), "float32")
+                            weight_meta[0], weight_meta[1] = d[()], minimum[()]
+                            activation_meta[0], activation_meta[1] = xd[()], activation_sum[()]
+                            for i in T.Parallel(2):
+                                metadata[i] = T.cast(weight_meta[i], "float32") * T.cast(activation_meta[i], "float32")
+                            scale, offset = metadata[0], metadata[1]
+                        elif format == "MXFP4":
                             scale = Scale[T.cast(exponent[()], "uint8")] * T.cast(xd[()], "float32")
                         else:
                             scale = T.cast(d[()], "float32") * T.cast(xd[()], "float32")
-                        if affine:
-                            offset = T.cast(minimum[()], "float32") * T.cast(activation_sum[()], "float32")
                         if partials == 1:
                             T.reduce_dot(codes, activation, products, over="k", acc_dtype="int32", engine="vector")
                         else:
