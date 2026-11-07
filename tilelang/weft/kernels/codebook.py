@@ -271,8 +271,8 @@ def fp4(M, K, format="MXFP4", rows=1, chunk=32, cache_hint="normal"):
 
 
 @tilelang.jit(target="weft")
-def tq1_0(M, K, rows=1):
-    assert K % 256 == 0
+def tq1_0(M, K, rows=1, chunk=32, cache_hint="normal"):
+    assert K % 256 == 0 and chunk in (16, 32, 64, 128, 256)
 
     @T.prim_func
     def main(Weights: T.Tensor((M, K // 256 * 54), "uint8"), Powers: T.Tensor((5,), "uint32"), Output: T.Tensor((M, K), "float32")):
@@ -283,9 +283,9 @@ def tq1_0(M, K, rows=1):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=256) as block:
                     record = T.load(wv[row, block])
-                    for segment in T.unroll(8):
-                        chunk = T.alloc_local((rows, 32), "float32")
-                        decode_tq1_0(record, chunk, rows, "TQ1_0", 256, 0, 0, 0, 0, 0, Powers, offset=segment * 32, width=32)
-                        T.copy(chunk, yv[row, block][:, segment * 32 : (segment + 1) * 32])
+                    for segment in T.unroll(256 // chunk):
+                        decoded = T.alloc_local((rows, chunk), "float32")
+                        decode_tq1_0(record, decoded, rows, "TQ1_0", 256, 0, 0, 0, 0, 0, Powers, offset=segment * chunk, width=chunk)
+                        T.copy(decoded, yv[row, block][:, segment * chunk : (segment + 1) * chunk], annotations={"cache_hint": cache_hint})
 
     return main

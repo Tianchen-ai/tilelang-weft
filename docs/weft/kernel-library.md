@@ -165,6 +165,12 @@ byte-width wrap and the five constant powers in the DSL. `panel_projection`
 consumes these codes in its ordinary preparation and contraction program;
 preparing the panels remains part of the measured call.
 
+`codebook.tq1_0(chunk=16/32/64/128/256)` bounds each decoded output window.
+Its `cache_hint="streaming"` option uses the existing checked store hint for
+outputs that will not be consumed by this kernel. The compiler retains the
+normal store when the alignment and storage contract do not permit a native
+streaming packet; the decoded values and preparation boundary are unchanged.
+
 `panel_projection.projection` exposes `unroll_decode` to expand the finite
 column decode loop in the author program. `pairwise=True, engine="vector"`
 uses an invocation-local `(pair, column, term)` I16 panel and typed two-term

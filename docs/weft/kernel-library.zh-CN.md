@@ -133,6 +133,11 @@ cohort；`rows=1` 直接遍历连续存储，更大的 row group 保留作者声
 字节位宽回绕与五个常量幂直接写在 DSL 中。`panel_projection` 在普通准备与
 contraction 程序中消费这些码，面板准备仍计入调用耗时。
 
+`codebook.tq1_0(chunk=16/32/64/128/256)` 限定每次解码的输出窗口；
+`cache_hint="streaming"` 复用已有 store 提示，表达本 kernel 不再消费该输出。
+编译器核对 alignment 和存储合同，只有合法时生成 streaming packet；其它情况保留
+普通 store。解码数值和准备工作的边界保持不变。
+
 `panel_projection.projection` 的 `unroll_decode` 由作者选择是否展开有限的列解码循环。
 `pairwise=True, engine="vector"` 使用调用内的 `(pair, column, term)` I16 面板，
 并显式表达两项乘积的 I32 partial。Activation 量化、面板准备和 contraction 都保留
