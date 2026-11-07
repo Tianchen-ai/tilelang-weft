@@ -189,3 +189,86 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                 first[0] = False
 
     return main
+
+
+@tilelang.jit(target="weft")
+def staged_affine(M, N, K, format="Q4_K", staged_columns=64, block_k=256,
+                  batch_rows=16, columns=16, rows=1, partials=8):
+    """Reuse an encoded weight stage across rows without a decoded panel."""
+    assert format in ("Q4_K", "Q5_K")
+    assert M > 0 and N > 0 and K > 0
+    assert M % batch_rows == 0 and N % staged_columns == 0
+    assert rows > 0 and batch_rows % rows == 0
+    assert partials in (1, 8)
+    assert K % block_k == 0 and block_k % 256 == 0 and staged_columns % columns == 0
+    encoding = getattr(F, format)
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // 256 * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 64)
+            if block_k != K:
+                with T.level.rows(M, group=1) as row:
+                    with T.level.cols(N, group=columns) as col:
+                        zero = T.alloc_local((1, columns), "float32")
+                        T.fill(zero, 0)
+                        T.copy(zero, output[row, col])
+            with T.level.tiles(N, extent=staged_columns, axis="n") as weight_columns:
+                with T.level.tiles(K, extent=block_k, axis="k") as weight_blocks:
+                    staged = T.stage(T.load(weights[weight_columns, weight_blocks]))
+                    with T.level.rows(M, group=batch_rows) as batch:
+                        staged_activation = T.stage(T.load(prepared[batch, weight_blocks]))
+                        with T.level.cols(weight_columns, group=columns) as col:
+                            with T.level.rows(batch, group=rows) as row:
+                                if block_k == K:
+                                    total = T.state((rows, columns), "float32", init=0)
+                                else:
+                                    stored = T.load(output[row, col])
+                                    total = T.state((rows, columns), "float32", init=stored)
+                                with T.level.blocks(weight_blocks, extent=256) as block:
+                                    w = T.load(staged[col, block])
+                                    x = T.load(staged_activation[row, block])
+                                    integer = T.state((rows, columns), "int32", init=0)
+                                    with T.level.subtiles(block, extent=32) as sub:
+                                        factors = T.load(w.sc, at=sub)
+                                        low = T.load(w.q, at=sub)
+                                        inputs = T.load(x.q, at=sub)
+                                        if format == "Q5_K":
+                                            upper = T.load(w.qh, at=sub)
+                                            codes = T.alloc_local((columns, 32), "uint8")
+                                            for c, k in T.Parallel(columns, 32):
+                                                codes[c, k] = T.cast(low[c, k], "uint8") | (T.cast(upper[c, k], "uint8") << T.uint8(4))
+                                        else:
+                                            codes = low
+                                        products = T.alloc_local((rows, columns), "int32")
+                                        if partials == 1:
+                                            T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
+                                        else:
+                                            partial = T.alloc_local((rows, columns, 8), "int16")
+                                            T.mac_groups(inputs, codes, partial, n=4, into="int16", over="k")
+                                            widened = T.alloc_local((rows, columns, 8), "int32")
+                                            for i, j, p in T.Parallel(rows, columns, 8):
+                                                widened[i, j, p] = T.cast(partial[i, j, p], "int32")
+                                            T.reduce_sum(widened, products, dim=2)
+                                        for r, c in T.Parallel(rows, columns):
+                                            integer[r, c] += products[r, c] * T.cast(factors[c], "int32")
+                                    minima, d, dmin, ds = w.m, w.d, w.dmin, x.ds
+                                    paired_sums = T.sum_pairs(x.bsum)
+                                    correction = T.alloc_local((rows, columns), "int32")
+                                    T.reduce_dot(paired_sums, minima, correction, over="k", acc_dtype="int32", engine="vector")
+                                    for r, c in T.Parallel(rows, columns):
+                                        total[r, c] += ds[r] * (T.cast(d[c], "float32") * T.cast(integer[r, c], "float32") - T.cast(dmin[c], "float32") * T.cast(correction[r, c], "float32"))
+                                T.copy(total, output[row, col])
+
+    return main

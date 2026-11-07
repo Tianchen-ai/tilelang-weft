@@ -143,6 +143,11 @@ contraction 程序中消费这些码，面板准备仍计入调用耗时。
 并显式表达两项乘积的 I32 partial。Activation 量化、面板准备和 contraction 都保留
 在调用内；两种选择均经过普通前端与共享 core。
 
+`panel_projection.staged_affine` 在显式 activation 行 cohort 中复用 encoded
+Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `columns`
+规定作者的复用范围。Q8_K activation 准备仍在调用内；完整 K 的输出 tile 从零累加，
+部分 K tile 显式读取和更新输出。I32 scale 更新、分组乘积与配对求和修正均在源码中表达。
+
 `row_partials.k_projection` 在调用内完成 Q8_K 量化后，复用 Q2/Q3/Q4/Q5/Q6
 分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
 源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。

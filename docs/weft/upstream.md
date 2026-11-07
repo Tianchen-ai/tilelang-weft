@@ -30,6 +30,11 @@ inside helpers and birth regions. The importer builds reads, writes, captures
 and handoffs from their typed statements and View operations; it does not use
 tensor-block access inference for opaque Encoding handles.
 
+The shared `NormalizeCanonicalControl` pass inlines helpers with one final return
+and no `noinline` constraint, including their explicit buffer updates. Nonlocal
+returns and explicit `noinline` constraints retain typed function regions. Both
+frontends use this normalization before physical layout and resource analysis.
+
 Local Tensor indexing retains Canonical extraction coordinates, including
 Encoding fields. Explicit `T.load(table, at=indices, bounds="in_bounds")` remains
 the indexed-table operation. A state's birth Level determines its lifetime;

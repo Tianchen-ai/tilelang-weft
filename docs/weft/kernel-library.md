@@ -177,6 +177,13 @@ uses an invocation-local `(pair, column, term)` I16 panel and typed two-term
 I32 partials. Activation quantization, panel preparation and contraction remain
 inside the call; both choices use the ordinary frontend and shared core.
 
+`panel_projection.staged_affine` retains encoded Q4_K/Q5_K weights across an
+explicit activation-row cohort. Its `staged_columns`, `block_k`, `batch_rows`,
+`rows` and `columns` parameters define the author's reuse boundaries. Q8_K
+activation preparation stays inside the call; a full-K output tile starts from
+zero, while partial K tiles explicitly accumulate the stored output. The source
+keeps I32 scale updates, grouped products and pair-sum corrections visible.
+
 `row_partials.k_projection` reuses the grouped Q2/Q3/Q4/Q5/Q6 dot body after
 in-call Q8_K quantization. The indexed projection wrappers likewise reuse the
 same integer partials as their row-dot programs. Source parameters choose

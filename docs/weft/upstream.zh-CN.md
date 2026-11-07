@@ -31,6 +31,10 @@ Weft helper 和 Level 的三个阶段使用原生 TIRx 属性区域。局部 buf
 分配，包括 helper 和初始化区域内部。importer 从有类型的语句及 View 操作建立
 读写、capture 和 handoff；不把 Encoding 的不透明句柄交给 tensor block 访存推断。
 
+共同 `NormalizeCanonicalControl` pass 内联只有末尾一次返回、且未声明 `noinline` 的
+helper，包括其显式 buffer 更新。非局部返回与显式 `noinline` 继续保留有类型的函数区域。
+两种前端在物理布局和资源分析之前共用这项规范化。
+
 局部 Tensor 索引保留 Canonical extraction 坐标，包括 Encoding 字段。
 显式 `T.load(table, at=indices, bounds="in_bounds")` 继续表示索引表读取。
 state 的诞生 Level 规定生命周期；只有数值长度与该 Level 的分区相同时，才使用其坐标。
