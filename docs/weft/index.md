@@ -113,7 +113,9 @@ incoming values, their own earlier declarations and the current point. Source
 order does not allow an initializer to capture a sibling initializer or body value.
 
 State initializers accept scalars and Tensor regions, including a saved
-`T.load(...)` result. A saved encoded value supports the same logical selectors
+`T.load(...)` result. A shaped initializer must match the declared state shape;
+the state retains that value's logical axes, including multidimensional Views.
+A saved encoded value supports the same logical selectors
 as its View, so a descendant can select a staged record tile without reading
 the original storage again. These projections retain the stage's lifetime.
 

@@ -418,7 +418,11 @@ class ModelOperations:
                 initial = self.expr(initializer)
             initial = self.cast(initial, dtype(destination.dtype))
             axes = self.local_axes[destination]
-            if (len(shape) == 1 and self.active_domain.type.domain_id
+            if shape_of(initial.type):
+                if tuple(shape) != shape_of(initial.type):
+                    self.error("state initializer must have the declared shape or be scalar", call)
+                axes = axes_of(initial.type)
+            elif (len(shape) == 1 and self.active_domain.type.domain_id
                     and shape[0] == self.domain_partitions[self.active_domain.type.domain_id]):
                 axes = (self.active_domain.type.axis_id,)
             ty = value_type(ScalarType(dtype(destination.dtype)), shape, axes)

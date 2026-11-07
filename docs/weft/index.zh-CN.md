@@ -87,6 +87,7 @@ class Packed32:
 进入该层前的值、当前 point 与本初始化区中先前的声明，不能捕获兄弟初始化区或 body 新值。
 
 State 初始化值可以是标量或 Tensor 区域，包括已保存的 `T.load(...)` 结果。
+带形状的初值须与声明的 state 形状一致；state 保留初值的逻辑轴，包括多维 View 的具名轴。
 保存的编码 Value 支持与 View 相同的逻辑选择，后代可以从 staged record tile
 投影所需区域，继续消费原快照并保留 stage 生命周期。
 
