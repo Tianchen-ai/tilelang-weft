@@ -582,12 +582,15 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             return None
         axes = []
         for index, size in zip(indices, buffer.shape):
-            if not isinstance(index, tirx.Var) or index not in self.parallel_domains:
+            matches = [
+                axis for variable, (start, extent, axis) in self.parallel_domains.items()
+                if self.analyzer.can_prove_equal(start, 0)
+                and self.analyzer.can_prove_equal(extent, size)
+                and self.analyzer.can_prove_equal(index, variable)
+            ]
+            if len(matches) != 1:
                 return None
-            start, extent, axis = self.parallel_domains[index]
-            if not self.analyzer.can_prove_equal(start, 0) or not self.analyzer.can_prove_equal(extent, size):
-                return None
-            axes.append(axis)
+            axes.append(matches[0])
         return tuple(axes) if len(set(axes)) == len(axes) else None
 
     def allocate(self, buffer):
@@ -770,6 +773,13 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         candidates = set()
         destinations = set()
         sources = set()
+        definitions = {}
+
+        def definition(node):
+            if type(node).__name__ == "Bind" and str(node.var.dtype).startswith(("int", "uint")):
+                definitions[node.var] = tirx.stmt_functor.substitute(node.value, definitions)
+
+        tirx.stmt_functor.post_order_visit(loop.body, definition)
 
         def access(node):
             if not isinstance(node, (tirx.BufferLoad, tirx.BufferStore)):
@@ -780,7 +790,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             axes = self.local_axes_for(node.buffer)
             record = getattr(self, "field_record_extents", {}).get(node.buffer)
             for dimension, (index, extent) in enumerate(zip(node.indices, node.buffer.shape)):
-                if not index.same_as(loop.loop_var):
+                index = tirx.stmt_functor.substitute(index, definitions)
+                if not self.analyzer.can_prove_equal(index, loop.loop_var):
                     continue
                 if record is not None and dimension + 1 == len(axes) and not self.analyzer.can_prove_equal(extent, record):
                     continue
@@ -791,7 +802,11 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                     elif self.locals[owner].producer is None or self.locals[owner].producer.name != "weft_kernel.empty":
                         sources.add(axes[dimension])
 
-        tirx.stmt_functor.post_order_visit(loop.body, access)
+        with (
+            self.analyzer.constraint_scope(loop.loop_var >= loop.min),
+            self.analyzer.constraint_scope(loop.loop_var < loop.min + loop.extent),
+        ):
+            tirx.stmt_functor.post_order_visit(loop.body, access)
         named = candidates.intersection(self.named_axes.values())
         if len(named) == 1:
             return next(iter(named))

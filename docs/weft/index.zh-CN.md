@@ -82,6 +82,10 @@ class Packed32:
 共同 GGML schema 位于 `weft_core.formats.ggml`，TileLang 声明通过
 `tilelang.weft.kernels.ggml_formats` 引用。
 
+TIRx 分析器能证明局部 tile 的每个索引等于对应 Parallel 坐标时，访问保留完整字段及原轴。
+这包括局部别名，以及在循环取值范围内保持原值的整数转换。例如 32 元素 Parallel 中的
+`q[T.cast(k, "uint8")]` 与 `q[k]` 消费同一完整字段，Encoding 信息继续用于物理选择。
+
 `T.stage(value)` 形成供后代只读复用的快照；`T.state(shape, dtype, init=...)`
 建立数值状态。Level 保存独立的 state 初始化、stage 初始化及 body；初始化能读取
 进入该层前的值、当前 point 与本初始化区中先前的声明，不能捕获兄弟初始化区或 body 新值。

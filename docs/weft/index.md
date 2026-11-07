@@ -226,6 +226,12 @@ The same indexed load accepts a saved numeric tile, for example
 It looks up that snapshot, retaining its read epoch. Ordinary buffer indexing
 continues to express a positional extraction.
 
+Complete local-tile accesses retain their source axes when the TIRx analyzer
+proves that each index equals its Parallel coordinate. This includes local
+aliases and an integer cast whose value is unchanged over the loop's range.
+For example, `q[T.cast(k, "uint8")]` in a 32-element Parallel uses the same
+complete field as `q[k]`, preserving Encoding information for physical selection.
+
 `T.copy(value, output_view, annotations={"cache_hint": "streaming"})` carries the
 author's store hint through Canonical IR. The x86 backend selects non-temporal
 stores only for a legal aligned, disjoint write-only output. `"normal"` uses
