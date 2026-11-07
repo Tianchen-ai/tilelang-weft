@@ -96,6 +96,11 @@ State 初始化值可以是标量或 Tensor 区域，包括已保存的 `T.load(
 [Packed32](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/04_encoding_levels.py) 和
 [Q4_K/Q6_K](https://github.com/Tianchen-ai/tilelang-weft/blob/main/tilelang/weft/kernels/quantized.py)。
 
+`T.sum_pairs(value)` 沿长度为偶数的最后一维对相邻整数求和。输入先转换为 I32
+再相加，结果该维长度减半，所有逻辑轴身份保持不变。它直接形成共同 Canonical
+`fold2` 操作，也可消费已经读取的 Encoding 字段。需要更窄的表示时，作者在求和
+后显式 cast。
+
 普通位置 tile 的具名 contraction 轴绑定到末尾维度，例如
 `over=("entry", "payload")` 归约最后两个维度；已有具名 View 轴保留原身份。
 `T.mac_groups` 的结果先排列两侧独立自由轴，最后保留分组轴，因此

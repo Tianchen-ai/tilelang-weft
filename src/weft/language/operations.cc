@@ -30,6 +30,7 @@ WEFT_OP("field", kOpaque);
 WEFT_OP("stage", kOpaque);
 WEFT_OP("state", kOpaque);
 WEFT_OP("mac_groups", kOpaque);
+WEFT_OP("sum_pairs", kOpaque);
 WEFT_OP("store_value", kOpaque);
 WEFT_OP("helper_return", kOpaque);
 WEFT_OP("helper_result", kPure);

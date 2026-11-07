@@ -380,7 +380,6 @@ def packed_x86(M, N, K, format="Q4_K", LDC=None, decode=False, rows=16, columns=
                         with T.level.blocks(K, extent=256) as part:
                             weight, activation = wv[col, part], xv[row, part]
                             scales = T.load(weight.scales)
-                            sums = T.load(activation.bsum)
                             scaled = T.alloc_local((rows, columns), "int32")
                             T.fill(scaled, 0)
                             for g in T.unroll(8):
@@ -395,12 +394,14 @@ def packed_x86(M, N, K, format="Q4_K", LDC=None, decode=False, rows=16, columns=
                                     scaled[r, c] += integer[r, c] * T.cast(scales[c, g], "int32")
                             wd, xd = T.load(weight.d), T.load(activation.ds)
                             if format == "Q4_K":
+                                sums = T.load(activation.bsum)
                                 dmin, minima = T.load(weight.dmin), T.load(weight.mins)
                                 pairs = T.alloc_local((rows, 8), "int16")
                                 minimum = T.alloc_local((columns, 8), "int16")
                                 correction = T.alloc_local((rows, columns), "int32")
+                                paired_sums = T.sum_pairs(sums)
                                 for r, g in T.Parallel(rows, 8):
-                                    pairs[r, g] = T.cast(T.cast(sums[r, 2 * g], "int32") + T.cast(sums[r, 2 * g + 1], "int32"), "int16")
+                                    pairs[r, g] = T.cast(paired_sums[r, g], "int16")
                                 for c, g in T.Parallel(columns, 8):
                                     minimum[c, g] = T.cast(minima[c, g], "int16")
                                 T.reduce_dot(pairs, minimum, correction, over="k", acc_dtype="int32", engine="vector")

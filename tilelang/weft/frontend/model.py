@@ -406,6 +406,16 @@ class ModelOperations:
                 self.field_record_extents = {}
             self.field_record_extents[destination] = schema.elements
             return True
+        if name == "tl.weft.sum_pairs":
+            source = self.region(call.args[1])
+            value = self.read_region(source, self.local_axes_for(source[0]))
+            shape = shape_of(value.type)
+            axes = axes_of(value.type)
+            result_type = value_type(ScalarType(dt.i32), (*shape[:-1], shape[-1] // 2), axes)
+            result = self.op("fold2", (value,), result_type)
+            destination = self.region(call.args[0])[0]
+            self.locals[destination], self.local_axes[destination] = result, axes
+            return True
         if name == "tl.weft.state":
             from .importer import dtype
 

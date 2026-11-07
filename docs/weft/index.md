@@ -125,6 +125,12 @@ of the numerical program. See the complete
 [Packed32 example](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/04_encoding_levels.py) and
 [Q4_K/Q6_K programs](https://github.com/Tianchen-ai/tilelang-weft/blob/main/tilelang/weft/kernels/quantized.py).
 
+`T.sum_pairs(value)` adds adjacent integers along an even-sized final dimension.
+Each input is converted to I32 before addition; the result has half that extent
+and retains all logical axis identities. It directly forms the shared Canonical
+`fold2` operation, including when its input is a saved Encoding field. An explicit
+cast after the sum selects any narrower representation required by the author.
+
 For ordinary positional tiles, named contraction axes bind their trailing
 dimensions: `over=("entry", "payload")` contracts both trailing dimensions.
 Existing named View axes retain their identities. `T.mac_groups` keeps its

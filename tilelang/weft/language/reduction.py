@@ -46,3 +46,17 @@ def reduce(buffer, out, reduce_type=None, dim=-1, clear=True, batch=1, annotatio
 
 def scan(buffer, out, *, combine, dim=0, reverse=False):
     return _combined("scan", buffer, out, combine, dim, reverse)
+
+
+def sum_pairs(buffer):
+    """Convert adjacent integer elements to I32 and add, preserving the last axis."""
+    from tilelang.language.allocate import alloc_local
+
+    shape = tuple(retrieve_shape(buffer))
+    if not shape or int(shape[-1]) % 2:
+        raise ValueError("sum_pairs requires an even nonempty final dimension")
+    if not str(_get_buffer(buffer).dtype).startswith(("int", "uint")):
+        raise TypeError("sum_pairs requires integer elements")
+    output = alloc_local((*shape[:-1], int(shape[-1]) // 2), "int32")
+    I.evaluate(intrinsic("sum_pairs", to_tile_region(output), to_tile_region(buffer)))
+    return output

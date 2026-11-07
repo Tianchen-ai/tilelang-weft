@@ -12,7 +12,7 @@ from .helpers import macro
 from .derived import View, interleave
 from .loop import Pipelined
 from .atomic import atomic_cas, atomic_xchg, atomic_and, atomic_xor
-from .reduction import reduce, scan
+from .reduction import reduce, scan, sum_pairs
 
 __tilelang_dialect__ = "weft"
 __all__ = [
@@ -49,4 +49,5 @@ __all__ = [
     "atomic_xor",
     "reduce",
     "scan",
+    "sum_pairs",
 ]
