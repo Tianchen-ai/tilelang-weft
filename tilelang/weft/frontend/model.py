@@ -501,9 +501,12 @@ class ModelOperations:
             shape, axes = self.domain(left, right)
             free_shape = tuple(n for n, axis in zip(shape, axes) if axis not in reduction)
             free_axes = tuple(axis for axis in axes if axis not in reduction)
+            left_free = set(axes_of(left.type)) - set(reduction)
+            right_free = set(axes_of(right.type)) - set(reduction)
+            kind = "outer_contract" if left_free and right_free and left_free.isdisjoint(right_free) else "contract"
             accumulator = ScalarType(dtype(string(call.annotations["accumulator"])))
             result = self.op(
-                "contract",
+                kind,
                 (left, right),
                 value_type(accumulator, free_shape, free_axes),
                 {"over": integers(reduction), "acc_type": emit_type(accumulator), "engine": json.dumps(string(call.annotations["engine"]))},
