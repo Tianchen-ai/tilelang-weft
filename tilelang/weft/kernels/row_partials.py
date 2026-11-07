@@ -469,7 +469,8 @@ def scaled_planes(M, K, format="Q3_K"):
                     else:
                         scales = w.scales
                     integer = T.alloc_var("int32", init=0)
-                    for half in T.unroll(2):
+                    half = T.alloc_var("uint8", init=0)
+                    with T.level.subtiles(block, extent=128) as half_block:
                         codes = T.alloc_local((4, 2, 16), "int8")
                         inputs = T.alloc_local((4, 2, 16), "int8")
                         for plane, group, k in T.Parallel(4, 2, 16):
@@ -487,6 +488,7 @@ def scaled_planes(M, K, format="Q3_K"):
                         T.reduce_sum(terms, plane_sums, dim=1)
                         T.reduce_sum(plane_sums, half_sum, dim=0)
                         integer += half_sum[0]
+                        half += T.uint8(1)
                     total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
