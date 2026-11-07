@@ -76,6 +76,7 @@ def scaled_entries(M, K, format="IQ3_S"):
                             if format == "IQ2_S":
                                 upper_offset = window_index * T.uint16(2)
                                 upper_word = T.cast(high[upper_offset], "uint16") | (T.cast(high[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
+                                scale_word = T.cast(scales[upper_offset], "uint16") | (T.cast(scales[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
                             indices = T.alloc_local((groups, entries, payload), "uint16")
                             inputs = T.alloc_local((groups, entries, payload), "int8")
                             codes = T.alloc_local((groups, entries, payload), "int8")
@@ -99,7 +100,7 @@ def scaled_entries(M, K, format="IQ3_S"):
                             for g in T.Parallel(groups):
                                 group = window_index * T.uint16(groups) + T.cast(g, "uint16")
                                 if format == "IQ2_S":
-                                    coefficient = (T.cast(scales[group // T.uint16(2)], "uint16") >> (group % T.uint16(2) * T.uint16(4))) & T.uint16(15)
+                                    coefficient = (scale_word >> T.cast(g * 4, "uint16")) & T.uint16(15)
                                 else:
                                     coefficient = T.cast(scales[group], "uint16")
                                 factor = T.cast(coefficient * T.uint16(2) + T.uint16(1), "int32")
