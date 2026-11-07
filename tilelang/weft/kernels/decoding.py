@@ -99,14 +99,28 @@ def decode_dequantize_iq4_nl(record, result, rows, format, elements, Grid, Signs
 def decode_iq1_s(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None):
     width = elements if width is None else width
     (q, high, d) = (record.q, record.qh, record.d)
-    for r, lane in T.Parallel(rows, width):
-        k = T.cast(offset, "uint8" if elements <= 256 else "uint16") + T.cast(lane, "uint8" if elements <= 256 else "uint16")
-        (entry, payload) = (k // 8, k % 8)
-        metadata = T.cast(high[r, entry // 4], "uint32")
-        index = T.cast(q[r, entry], "uint32") | (metadata >> entry % 4 * 3 & 7) << 8
-        delta = T.if_then_else(metadata & 32768 != 0, -0.125, 0.125)
-        scale = T.cast(d[r], "float32") * T.cast((metadata >> 12 & 7) * 2 + 1, "float32")
-        result[r, lane] = scale * (T.cast(Grid[index * 8 + payload], "float32") + delta)
+    entries = width // 8
+    indices = T.alloc_local((rows, entries, 8), "uint16")
+    factors = T.alloc_local((rows, entries), "float32")
+    deltas = T.alloc_local((rows, entries), "float32")
+    for r, entry in T.Parallel(rows, entries):
+        e = T.uint16(offset // 8) + T.cast(entry, "uint16")
+        metadata = T.cast(high[r, e // T.uint16(4)], "uint16")
+        deltas[r, entry] = T.if_then_else(metadata & T.uint16(32768) != T.uint16(0), -0.125, 0.125)
+        factors[r, entry] = T.cast(d[r], "float32") * T.cast(
+            ((metadata >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "float32")
+    for r, entry, payload in T.Parallel(rows, entries, 8):
+        e = T.uint16(offset // 8) + T.cast(entry, "uint16")
+        metadata = T.cast(high[r, e // T.uint16(4)], "uint16")
+        index = T.cast(q[r, e], "uint16") | (
+            ((metadata >> ((e % T.uint16(4)) * T.uint16(3))) & T.uint16(7)) << T.uint16(8))
+        indices[r, entry, payload] = index * T.uint16(8) + T.cast(payload, "uint16")
+    selected = T.load(Grid, at=indices, bounds="in_bounds")
+    decoded = T.alloc_local((rows, entries, 8), "float32")
+    for r, entry, payload in T.Parallel(rows, entries, 8):
+        decoded[r, entry, payload] = factors[r, entry] * (
+            T.cast(selected[r, entry, payload], "float32") + deltas[r, entry])
+    T.copy(T.reshape(decoded, (rows, width)), result)
 
 
 @T.macro
@@ -152,10 +166,10 @@ def decode_iq2_indexed(record, result, rows, format, elements, Grid, Signs, Code
     if format == "IQ2_XS":
         scales = record.scales
     entries = width // 8
-    grid_entries = T.alloc_local((rows, entries), "uint32")
-    sign_entries = T.alloc_local((rows, entries), "uint32")
-    grid_indices = T.alloc_local((rows, entries, 8), "uint32")
-    sign_indices = T.alloc_local((rows, entries, 8), "uint32")
+    grid_entries = T.alloc_local((rows, entries), "uint16")
+    sign_entries = T.alloc_local((rows, entries), "uint16")
+    grid_indices = T.alloc_local((rows, entries, 8), "uint16")
+    sign_indices = T.alloc_local((rows, entries, 8), "uint16")
     factors = T.alloc_local((rows, entries), "float32")
     for r, local in T.Parallel(rows, entries):
         entry = T.uint32(offset // 8) + T.cast(local, "uint32")
@@ -170,12 +184,12 @@ def decode_iq2_indexed(record, result, rows, format, elements, Grid, Signs, Code
             index = word >> entry % 2 * 8 & 255
             sign_index = metadata >> entry % 4 * 7 & 127
             sc = metadata >> 28
-        grid_entries[r, local] = index
-        sign_entries[r, local] = sign_index
+        grid_entries[r, local] = T.cast(index, "uint16")
+        sign_entries[r, local] = T.cast(sign_index, "uint16")
         factors[r, local] = T.cast(d[r], "float32") * (0.5 + T.cast(sc, "float32")) * 0.25
     for r, entry, payload in T.Parallel(rows, entries, 8):
-        grid_indices[r, entry, payload] = grid_entries[r, entry] * T.uint32(8) + T.cast(payload, "uint32")
-        sign_indices[r, entry, payload] = sign_entries[r, entry] * T.uint32(8) + T.cast(payload, "uint32")
+        grid_indices[r, entry, payload] = grid_entries[r, entry] * T.uint16(8) + T.cast(payload, "uint16")
+        sign_indices[r, entry, payload] = sign_entries[r, entry] * T.uint16(8) + T.cast(payload, "uint16")
     values = T.load(Grid, at=grid_indices, bounds="in_bounds")
     signs = T.load(Signs, at=sign_indices, bounds="in_bounds")
     decoded = T.alloc_local((rows, entries, 8), "float32")

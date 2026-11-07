@@ -57,6 +57,13 @@ parameters separately expose those reuse scopes and the output tile dimensions.
 
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
+
+`codebook.iq1_s(chunk=32/64/128/256)` retains separate entry and eight-element
+payload axes. Entry scale and delta are shared across their payload; a typed
+I8X8 table View supplies the lookup. IQ2_XS/XXS likewise retain entry/sign rows
+and use U16 table offsets, whose complete ranges fit their declared tables.
+The final reshape preserves the output's row-major order and the per-entry
+floating-point formula.
 `quantized.field_windows` decodes an integer-format record through explicit
 Level subtiles. A scale-group window selects its payload and scalar metadata
 from the same record snapshot, reusing the regular decoding macro. This source

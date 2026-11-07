@@ -17,22 +17,24 @@ from .decoding import (
 
 
 @tilelang.jit(target="weft")
-def iq1_s(M, K, rows=1):
-    assert K % 256 == 0
+def iq1_s(M, K, rows=1, chunk=32):
+    assert K % 256 == 0 and chunk in (32, 64, 128, 256)
 
     @T.prim_func
     def main(Weights: T.Tensor((M, K // 256 * 50), "uint8"), Grid: T.Tensor((16384,), "int8"), Output: T.Tensor((M, K), "float32")):
         T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Output": "output"}})
         wv = T.view(Weights, shape=(M, K), encoding=F.IQ1_S, axes=("m", "k"), abi=True)
         yv = T.view(Output, shape=(M, K), axes=("m", "k"), abi=True)
+        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8,
+                      axes=("code", "code_payload"), abi=True)
         with T.Kernel(1):
             with T.level.rows(M, group=rows) as row:
                 with T.level.blocks(K, extent=256) as block:
                     record = T.load(wv[row, block])
-                    for segment in T.unroll(8):
-                        chunk = T.alloc_local((rows, 32), "float32")
-                        decode_iq1_s(record, chunk, rows, "IQ1_S", 256, Grid, 0, 0, 0, 0, 0, offset=segment * 32, width=32)
-                        T.copy(chunk, yv[row, block][:, segment * 32 : (segment + 1) * 32])
+                    for segment in T.unroll(256 // chunk):
+                        values = T.alloc_local((rows, chunk), "float32")
+                        decode_iq1_s(record, values, rows, "IQ1_S", 256, grid.values, 0, 0, 0, 0, 0, offset=segment * chunk, width=chunk)
+                        T.copy(values, yv[row, block][:, segment * chunk : (segment + 1) * chunk])
 
     return main
 
