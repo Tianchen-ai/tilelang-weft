@@ -59,6 +59,7 @@ lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，�
 
 `indexed_lanes.xxs_subgroups` 用 64 元素的 Level 窗口表达 IQ3_XXS。
 每个窗口保留两个整数 scale group，以及各自的 codebook 行和 sign 行，随后加入 block 和。
+显式的 pair-entry、pair、payload 轴保留一行八个 sign 元素与两行四元素 codebook 的对应关系。
 有符号 payload 与 activation 通过普通 `T.reduce_dot` 计算，直接暴露局部复用，
 不先建立完整的解码 record 数组。
 `packed.projection` 使用显式整数 block partial 和 F32 scale 更新。

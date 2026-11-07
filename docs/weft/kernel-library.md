@@ -67,7 +67,9 @@ the payload multiplication. The author makes that numerical organization
 explicit, allowing one scalar scale conversion to serve the whole window.
 `indexed_lanes.xxs_subgroups` expresses IQ3_XXS as 64-element Level windows.
 Each window retains two integer scale groups, codebook rows and sign rows before
-the block sum. The signed payload and activation values meet in the ordinary
+the block sum. Explicit pair-entry, pair and payload axes preserve each sign
+row's eight elements when it becomes two four-element codebook rows.
+The signed payload and activation values meet in the ordinary
 `T.reduce_dot`; this exposes local reuse without a full decoded record.
 `packed.projection` uses explicit integer block partials and F32 scale updates.
 Q4_K and Q6_K retain typed integer

@@ -146,28 +146,28 @@ def xxs_subgroups(M, K):
                     block_sum = T.alloc_var("int32", init=0)
                     group_index = T.alloc_var("uint16", init=0)
                     with T.level.subtiles(block, extent=64) as window:
-                        indices = T.alloc_local((2, 8, 4), "uint16")
+                        indices = T.alloc_local((2, 4, 2, 4), "uint16")
                         sign_indices = T.alloc_local((2, 4, 8), "uint16")
-                        for half, entry, payload in T.Parallel(2, 8, 4):
-                            coordinate = group_index * T.uint16(16) + T.cast(half * 8 + entry, "uint16")
-                            indices[half, entry, payload] = T.cast(q[coordinate], "uint16") * T.uint16(4) + T.cast(payload, "uint16")
+                        for half, pair_entry, pair, payload in T.Parallel(2, 4, 2, 4):
+                            coordinate = group_index * T.uint16(16) + T.cast(half * 8 + pair_entry * 2 + pair, "uint16")
+                            indices[half, pair_entry, pair, payload] = T.cast(q[coordinate], "uint16") * T.uint16(4) + T.cast(payload, "uint16")
                         for half, pair_entry, sign_payload in T.Parallel(2, 4, 8):
                             word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
                             index = T.cast(word >> T.cast(pair_entry * 7, "uint32"), "uint16") & T.uint16(127)
                             sign_indices[half, pair_entry, sign_payload] = index * T.uint16(8) + T.cast(sign_payload, "uint16")
                         selected = T.load(grid.values, at=indices, bounds="in_bounds")
                         sign_rows = T.load(signs.values, at=sign_indices, bounds="in_bounds")
-                        sign_lanes = T.reshape(sign_rows, (2, 8, 4))
-                        codes = T.alloc_local((2, 8, 4), "int8")
-                        inputs = T.alloc_local((2, 8, 4), "int8")
-                        for half, entry, payload in T.Parallel(2, 8, 4):
-                            codes[half, entry, payload] = selected[half, entry, payload] * sign_lanes[half, entry, payload]
-                            coordinate = group_index * T.uint16(64) + T.cast(half * 32 + entry * 4 + payload, "uint16")
-                            inputs[half, entry, payload] = activation[coordinate]
+                        sign_lanes = T.reshape(sign_rows, (2, 4, 2, 4))
+                        codes = T.alloc_local((2, 4, 2, 4), "int8")
+                        inputs = T.alloc_local((2, 4, 2, 4), "int8")
+                        for half, pair_entry, pair, payload in T.Parallel(2, 4, 2, 4):
+                            codes[half, pair_entry, pair, payload] = selected[half, pair_entry, pair, payload] * sign_lanes[half, pair_entry, pair, payload]
+                            coordinate = group_index * T.uint16(64) + T.cast(half * 32 + pair_entry * 8 + pair * 4 + payload, "uint16")
+                            inputs[half, pair_entry, pair, payload] = activation[coordinate]
                         products = T.alloc_local((2,), "int32")
                         weighted = T.alloc_local((2,), "int32")
                         subtotal = T.alloc_local((), "int32")
-                        T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                        T.reduce_dot(inputs, codes, products, over=("pair_entry", "pair", "payload"), acc_dtype="int32", engine="vector")
                         for half in T.Parallel(2):
                             word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
                             scale = T.cast((word >> T.uint32(28)) * T.uint32(2) + T.uint32(1), "int32")
