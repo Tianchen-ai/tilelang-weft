@@ -169,3 +169,10 @@ inside the call; both choices use the ordinary frontend and shared core.
 in-call Q8_K quantization. The indexed projection wrappers likewise reuse the
 same integer partials as their row-dot programs. Source parameters choose
 column cohorts and record windows; target passes choose local instructions.
+
+`indexed_lanes.scaled_entries` expresses IQ2_S/IQ3_S entry and payload axes
+inside a 64-element Level window. It applies integer scale groups before the
+record's floating scale. IQ4_XS uses a staged 16-entry codebook and a 32-element
+subtile with an explicit scale update. Field projection consumes the existing
+Level point, keeping both the record read and the codebook snapshot visible to
+the shared compiler.

@@ -137,3 +137,8 @@ contraction 程序中消费这些码，面板准备仍计入调用耗时。
 `row_partials.k_projection` 在调用内完成 Q8_K 量化后，复用 Q2/Q3/Q4/Q5/Q6
 分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
 源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。
+
+`indexed_lanes.scaled_entries` 在 64 元素 Level 窗口中明确表达 IQ2_S/IQ3_S 的
+entry、payload 轴，先完成整数 scale group，再应用 record 的浮点缩放。IQ4_XS
+使用 staged 的 16 项码本与 32 元素子块，显式更新逐组缩放结果。字段投影直接消费
+已有 Level point，让共享编译器同时看见 record 读取与码本快照的作用域。

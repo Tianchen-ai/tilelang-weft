@@ -17,9 +17,110 @@ def lookup_pair(table, first, second, output):
 
 
 @tilelang.jit(target="weft")
-def iq1_planes(M, K):
+def scaled_entries(M, K, format="IQ3_S"):
+    """Contract each codebook scale group before applying its integer scale."""
+    assert format in ("IQ2_S", "IQ3_S", "IQ4_XS") and M > 0 and K > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    payload = 8 if format == "IQ2_S" else 4
+    entries = 2 if format == "IQ2_S" else 8
+    groups = 4 if format == "IQ2_S" else 2
+    table_entries = 1024 if format == "IQ2_S" else 512
+    table_encoding = F.I8X8 if format == "IQ2_S" else F.I8X4
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((16 if format == "IQ4_XS" else table_entries * payload,), "int8"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        if format == "IQ4_XS":
+            grid = T.view(Grid, shape=(16,), axes=("code",), abi=True)
+        else:
+            grid = T.view(Grid, shape=(table_entries, payload), encoding=table_encoding,
+                          axes=("entry", "payload"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            if format == "IQ4_XS":
+                codebook = T.stage(T.load(grid))
+            with T.level.rows(M, group=1) as row:
+                total = T.alloc_var("float32", init=0)
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+                    q, d = w.q, w.d
+                    if format == "IQ4_XS":
+                        scale_low, scale_high = w.scales_l, w.scales_h
+                    else:
+                        high, signs, scales = w.qh, w.signs, w.scales
+                    activation, ds = x.q, x.ds
+                    window_index = T.alloc_var("uint16", init=0)
+                    if format == "IQ4_XS":
+                        with T.level.subtiles(block, extent=32) as window:
+                            low = (scale_low[window_index // T.uint16(2)] >> T.cast(window_index % T.uint16(2) * T.uint16(4), "uint8")) & T.uint8(15)
+                            high = T.cast((scale_high[()] >> (window_index * T.uint16(2))) & T.uint16(3), "uint8")
+                            factor = T.cast(low | (high << T.uint8(4)), "int32") - T.int32(32)
+                            selected = T.load(q, at=window)
+                            codes = T.load(codebook, at=selected, bounds="in_bounds")
+                            inputs = T.load(activation, at=window)
+                            product = T.alloc_local((), "int32")
+                            T.reduce_dot(inputs, codes, product, over="k", acc_dtype="int32", engine="vector")
+                            scale = (T.cast(d[()], "float32") * ds[()]) * T.cast(factor, "float32")
+                            total += scale * T.cast(product[()], "float32")
+                            window_index += T.uint16(1)
+                    else:
+                        integer = T.alloc_var("int32", init=0)
+                        with T.level.subtiles(block, extent=64) as window:
+                            if format == "IQ2_S":
+                                upper_offset = window_index * T.uint16(2)
+                                upper_word = T.cast(high[upper_offset], "uint16") | (T.cast(high[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
+                            indices = T.alloc_local((groups, entries, payload), "uint16")
+                            inputs = T.alloc_local((groups, entries, payload), "int8")
+                            codes = T.alloc_local((groups, entries, payload), "int8")
+                            for g, e, p in T.Parallel(groups, entries, payload):
+                                entry = window_index * T.uint16(64 // payload) + T.cast(g * entries + e, "uint16")
+                                if format == "IQ2_S":
+                                    upper = (upper_word >> T.cast((g * entries + e) * 2, "uint16")) & T.uint16(3)
+                                else:
+                                    upper = T.cast(high[entry], "uint16")
+                                index = T.cast(q[entry], "uint16") | (upper << T.uint16(8))
+                                indices[g, e, p] = index * T.uint16(payload) + T.cast(p, "uint16")
+                            selected = T.load(grid.values, at=indices, bounds="in_bounds")
+                            for g, e, p in T.Parallel(groups, entries, payload):
+                                coordinate = window_index * T.uint16(64) + T.cast((g * entries + e) * payload + p, "uint16")
+                                sign = T.int8(1) - T.cast(signs[coordinate], "int8") * T.int8(2)
+                                codes[g, e, p] = selected[g, e, p] * sign
+                                inputs[g, e, p] = activation[coordinate]
+                            products = T.alloc_local((groups,), "int32")
+                            T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                            scaled = T.alloc_local((groups,), "int32")
+                            for g in T.Parallel(groups):
+                                group = window_index * T.uint16(groups) + T.cast(g, "uint16")
+                                if format == "IQ2_S":
+                                    coefficient = (T.cast(scales[group // T.uint16(2)], "uint16") >> (group % T.uint16(2) * T.uint16(4))) & T.uint16(15)
+                                else:
+                                    coefficient = T.cast(scales[group], "uint16")
+                                factor = T.cast(coefficient * T.uint16(2) + T.uint16(1), "int32")
+                                scaled[g] = products[g] * factor
+                            partial = T.alloc_local((), "int32")
+                            T.reduce_sum(scaled, partial, dim=0)
+                            integer += partial[()]
+                            window_index += T.uint16(1)
+                        total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
+                result = T.alloc_local((1,), "float32")
+                result[0] = total * (0.125 if format == "IQ2_S" else 1.0)
+                T.copy(result, output[row])
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def iq1_planes(M, K, groups_per_step=8):
     """Expose independent record groups, codebook entries and payload lanes."""
     assert M > 0 and K > 0 and K % 256 == 0
+    assert groups_per_step in (1, 2, 4, 8)
 
     @T.prim_func
     def main(
@@ -40,28 +141,34 @@ def iq1_planes(M, K):
                     w, x = T.load(weights[row, block][0, :]), T.load(values[block])
                     q, metadata, d, activation, sums, ds = w.q, w.qh, w.d, x.q, x.bsum, x.ds
                     block_scale = T.cast(d[()], "float32") * ds[()]
-                    indices = T.alloc_local((8, 4, 8), "uint16")
-                    inputs = T.alloc_local((8, 4, 8), "int8")
-                    for group, entry, payload in T.Parallel(8, 4, 8):
-                        g, e, p = T.cast(group, "uint16"), T.cast(entry, "uint16"), T.cast(payload, "uint16")
-                        high = (metadata[g] >> (e * T.uint16(3))) & T.uint16(7)
-                        index = T.cast(q[g * T.uint16(4) + e], "uint16") | (high << T.uint16(8))
-                        indices[group, entry, payload] = index * T.uint16(8) + p
-                        inputs[group, entry, payload] = activation[g * T.uint16(32) + e * T.uint16(8) + p]
-                    codes = T.load(grid.values, at=indices, bounds="in_bounds")
-                    products = T.alloc_local((8,), "int32")
-                    T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
-                    main_terms, corrections = T.alloc_local((8,), "int32"), T.alloc_local((8,), "int32")
-                    for group in T.Parallel(8):
-                        g = T.cast(group, "uint16")
-                        scale = T.cast(((metadata[g] >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
-                        delta = T.cast((T.cast(metadata[g], "int16") >> T.int16(15)) | T.int16(1), "int32")
-                        main_terms[group] = scale * products[group]
-                        corrections[group] = scale * delta * (T.cast(sums[g * T.uint16(2)], "int32") + T.cast(sums[g * T.uint16(2) + T.uint16(1)], "int32"))
-                    main_sum, correction_sum = T.alloc_local((1,), "int32"), T.alloc_local((1,), "int32")
-                    T.reduce_sum(main_terms, main_sum, dim=0)
-                    T.reduce_sum(corrections, correction_sum, dim=0)
-                    combined = T.cast(main_sum[0], "float32") + T.cast(correction_sum[0], "float32") * 0.125
+                    main, correction = T.alloc_var("int32", init=0), T.alloc_var("int32", init=0)
+                    for part in T.unroll(8 // groups_per_step):
+                        indices = T.alloc_local((groups_per_step, 4, 8), "uint16")
+                        inputs = T.alloc_local((groups_per_step, 4, 8), "int8")
+                        for group, entry, payload in T.Parallel(groups_per_step, 4, 8):
+                            g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
+                            e, p = T.cast(entry, "uint16"), T.cast(payload, "uint16")
+                            high = (metadata[g] >> (e * T.uint16(3))) & T.uint16(7)
+                            index = T.cast(q[g * T.uint16(4) + e], "uint16") | (high << T.uint16(8))
+                            indices[group, entry, payload] = index * T.uint16(8) + p
+                            inputs[group, entry, payload] = activation[g * T.uint16(32) + e * T.uint16(8) + p]
+                        codes = T.load(grid.values, at=indices, bounds="in_bounds")
+                        products = T.alloc_local((groups_per_step,), "int32")
+                        T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                        main_terms = T.alloc_local((groups_per_step,), "int32")
+                        corrections = T.alloc_local((groups_per_step,), "int32")
+                        for group in T.Parallel(groups_per_step):
+                            g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
+                            scale = T.cast(((metadata[g] >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
+                            delta = T.cast((T.cast(metadata[g], "int16") >> T.int16(15)) | T.int16(1), "int32")
+                            main_terms[group] = scale * products[group]
+                            corrections[group] = scale * delta * (T.cast(sums[g * T.uint16(2)], "int32") + T.cast(sums[g * T.uint16(2) + T.uint16(1)], "int32"))
+                        main_sum, correction_sum = T.alloc_local((), "int32"), T.alloc_local((), "int32")
+                        T.reduce_sum(main_terms, main_sum, dim=0)
+                        T.reduce_sum(corrections, correction_sum, dim=0)
+                        main += main_sum[()]
+                        correction += correction_sum[()]
+                    combined = T.cast(main, "float32") + T.cast(correction, "float32") * 0.125
                     total += block_scale * combined
                 result = T.alloc_local((1,), "float32")
                 result[0] = total
