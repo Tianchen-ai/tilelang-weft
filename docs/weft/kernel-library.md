@@ -97,6 +97,10 @@ as Level subtiles, keeping the minimum correction in a separate integer branch.
 `scaled_groups` uses 16-term subtiles for Q3_K and Q6_K. Each group reads payload
 and scalar metadata from the original record snapshot, performs its I32 partial,
 and applies its integer scale before the record's floating-point update.
+`scaled_planes` instead retains the explicit `(4, 2, 16)` payload organization
+through each half-record dot, with independent plane/group partials and their
+integer scales. These factories expose different source reuse scopes; neither
+changes the stored record or the final per-record floating update.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.

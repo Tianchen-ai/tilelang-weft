@@ -80,6 +80,9 @@ RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
 的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
 和 Q6_K 使用 16 项子块。每组从原 record 快照读取 payload 与标量 metadata，
 完成 I32 partial 和整数 scale 更新，再执行 record 的浮点累加。
+`scaled_planes` 则在每个半 record 中保留 `(4, 2, 16)` payload 组织，显式计算
+plane/group partial 及其整数 scale。两个 factory 表达不同的源码复用范围；
+存储 record 和最终逐 record 浮点更新保持一致。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
 索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`

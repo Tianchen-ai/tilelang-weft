@@ -437,6 +437,65 @@ def affine_groups(M, K, format="Q5_K"):
 
 
 @tilelang.jit(target="weft")
+def scaled_planes(M, K, format="Q3_K"):
+    """Finish signed sixteen-element dots before the record's floating update."""
+    assert format in ("Q3_K", "Q6_K") and M > 0 and K > 0 and K % 256 == 0
+    encoding = getattr(F, format)
+    record_bytes = encoding.schema.storage_bits // 8
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * record_bytes), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            with T.level.rows(M, group=1) as row:
+                total = T.alloc_var("float32", init=0)
+                with T.level.blocks(K, extent=256) as block:
+                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+                    low = w.q if format == "Q3_K" else w.ql
+                    high = w.hmask if format == "Q3_K" else w.qh
+                    activation, d, ds = x.q, w.d, x.ds
+                    if format == "Q3_K":
+                        scale_low, scale_high = w.scale_low, w.scale_high
+                        scales = T.alloc_local((16,), "int8")
+                        for g in T.Parallel(16):
+                            scales[g] = T.cast(T.cast(scale_low[g], "uint8") | (T.cast(scale_high[g], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                    else:
+                        scales = w.scales
+                    integer = T.alloc_var("int32", init=0)
+                    for half in T.unroll(2):
+                        codes = T.alloc_local((4, 2, 16), "int8")
+                        inputs = T.alloc_local((4, 2, 16), "int8")
+                        for plane, group, k in T.Parallel(4, 2, 16):
+                            coordinate = T.uint8(half * 128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
+                            codes[plane, group, k] = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
+                            inputs[plane, group, k] = activation[coordinate]
+                        products = T.alloc_local((4, 2), "int32")
+                        terms = T.alloc_local((4, 2), "int32")
+                        plane_sums = T.alloc_local((4,), "int32")
+                        half_sum = T.alloc_local((1,), "int32")
+                        T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
+                        for plane, group in T.Parallel(4, 2):
+                            scale_index = T.uint8(half * 8) + T.cast(plane, "uint8") * T.uint8(2) + T.cast(group, "uint8")
+                            terms[plane, group] = products[plane, group] * T.cast(scales[scale_index], "int32")
+                        T.reduce_sum(terms, plane_sums, dim=1)
+                        T.reduce_sum(plane_sums, half_sum, dim=0)
+                        integer += half_sum[0]
+                    total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
+                result = T.alloc_local((1,), "float32")
+                result[0] = total
+                T.copy(result, output[row])
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def scaled_groups(M, K, format="Q3_K"):
     """Finish signed sixteen-element dots before the record's floating update."""
     assert format in ("Q3_K", "Q6_K") and M > 0 and K > 0 and K % 256 == 0
