@@ -127,6 +127,8 @@ def indexed_xxs_record(w, x, total, rows, parity, grid):
 @T.macro
 def indexed_subgroups_rows(weights, values, output, grid, M, K, format, rows, windows, axis):
     payload = 8 if format == "IQ2_S" else 4
+    window_elements = 256 // windows
+    entries = window_elements // payload
     if format == "IQ3_XXS":
         parity = T.alloc_local((16,), "uint8")
         for i in T.Parallel(16):
@@ -210,8 +212,6 @@ def indexed_subgroups(M, K, format="IQ2_S", rows=1, windows=4):
     weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
     assert windows in (1, 2, 4)
     payload = 8 if format == "IQ2_S" else 4
-    window_elements = 256 // windows
-    entries = window_elements // payload
     grid_bytes = {"IQ2_S": 8192, "IQ3_S": 2048, "IQ3_XXS": 1024}[format]
     grid_encoding = F.I8X8 if payload == 8 else F.I8X4
 
