@@ -127,8 +127,6 @@ def indexed_xxs_record(w, x, total, rows, parity, grid):
 @T.macro
 def indexed_subgroups_rows(weights, values, output, grid, M, K, format, rows, windows, axis):
     payload = 8 if format == "IQ2_S" else 4
-    window_elements = 256 // windows
-    entries = window_elements // payload
     if format == "IQ3_XXS":
         parity = T.alloc_local((16,), "uint8")
         for i in T.Parallel(16):
@@ -470,7 +468,7 @@ def scaled_planes(M, K, format="Q3_K"):
                         scales = w.scales
                     integer = T.alloc_var("int32", init=0)
                     half = T.alloc_var("uint8", init=0)
-                    with T.level.subtiles(block, extent=128) as half_block:
+                    with T.level.subtiles(block, extent=128) as _half_block:
                         codes = T.alloc_local((4, 2, 16), "int8")
                         inputs = T.alloc_local((4, 2, 16), "int8")
                         for plane, group, k in T.Parallel(4, 2, 16):

@@ -110,7 +110,7 @@ def q6_k_single(weight, activation, total, scale_groups, part):
             integer += subtotal[0]
     else:
         window = T.alloc_var("uint8", init=0)
-        with T.level.subtiles(part, extent=scale_groups * 16) as half:
+        with T.level.subtiles(part, extent=scale_groups * 16) as _half:
             subtotal = T.alloc_local((1,), "int32")
             q6_scale_window(low, high, scales, x, subtotal, scale_groups, window)
             integer += subtotal[0]

@@ -145,7 +145,7 @@ def xxs_subgroups(M, K):
                     q, metadata, d, activation, ds = w.q, w.metadata, w.d, x.q, x.ds
                     block_sum = T.alloc_var("int32", init=0)
                     group_index = T.alloc_var("uint16", init=0)
-                    with T.level.subtiles(block, extent=64) as window:
+                    with T.level.subtiles(block, extent=64) as _window:
                         indices = T.alloc_local((2, 4, 2, 4), "uint16")
                         sign_indices = T.alloc_local((2, 4, 8), "uint16")
                         for half, pair_entry, pair, payload in T.Parallel(2, 4, 2, 4):

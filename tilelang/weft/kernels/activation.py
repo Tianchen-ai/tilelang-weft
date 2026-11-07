@@ -62,7 +62,7 @@ def affine(N, block=128, cpu_num_threads=0, blocks_per_program=1):
         xv = T.view(X, shape=(N,), axes=("k",), abi=True)
         yv = T.view(Y, shape=(N,), axes=("k",), abi=True)
         with T.Kernel(T.ceildiv(N, block * blocks_per_program), cpu_num_threads=cpu_num_threads) as tile:
-            begin = 0 if N <= block * blocks_per_program else tile * block * blocks_per_program
+            begin = 0 if block * blocks_per_program >= N else tile * block * blocks_per_program
             source = xv[begin : begin + block * blocks_per_program]
             output = yv[begin : begin + block * blocks_per_program]
             with T.level.blocks(T.extent(source, 0), extent=block) as part:
