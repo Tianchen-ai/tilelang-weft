@@ -159,6 +159,12 @@ byte-width wrap and the five constant powers in the DSL. `panel_projection`
 consumes these codes in its ordinary preparation and contraction program;
 preparing the panels remains part of the measured call.
 
+`panel_projection.projection` exposes `unroll_decode` to expand the finite
+column decode loop in the author program. `pairwise=True, engine="vector"`
+uses an invocation-local `(pair, column, term)` I16 panel and typed two-term
+I32 partials. Activation quantization, panel preparation and contraction remain
+inside the call; both choices use the ordinary frontend and shared core.
+
 `row_partials.k_projection` reuses the grouped Q2/Q3/Q4/Q5/Q6 dot body after
 in-call Q8_K quantization. The indexed projection wrappers likewise reuse the
 same integer partials as their row-dot programs. Source parameters choose

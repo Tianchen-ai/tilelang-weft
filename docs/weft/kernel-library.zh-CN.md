@@ -129,6 +129,11 @@ cohort；`rows=1` 直接遍历连续存储，更大的 row group 保留作者声
 字节位宽回绕与五个常量幂直接写在 DSL 中。`panel_projection` 在普通准备与
 contraction 程序中消费这些码，面板准备仍计入调用耗时。
 
+`panel_projection.projection` 的 `unroll_decode` 由作者选择是否展开有限的列解码循环。
+`pairwise=True, engine="vector"` 使用调用内的 `(pair, column, term)` I16 面板，
+并显式表达两项乘积的 I32 partial。Activation 量化、面板准备和 contraction 都保留
+在调用内；两种选择均经过普通前端与共享 core。
+
 `row_partials.k_projection` 在调用内完成 Q8_K 量化后，复用 Q2/Q3/Q4/Q5/Q6
 分组 dot 的主体。indexed projection 同样复用对应行 dot 的整数 partial。
 源码参数选择列 cohort 和 record 窗口，目标 passes 选择局部机器指令。
