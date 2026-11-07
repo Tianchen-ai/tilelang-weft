@@ -30,6 +30,7 @@ _entries = [
     Program("where", "selection", activation.where),
     Program("fill", "memory", activation.fill),
     Program("matmul", "projection", linear.matmul),
+    Program("blocked_matmul", "projection", linear.blocked_matmul),
     Program("batched_matmul", "projection", linear.projection, (("transpose_weight", False), ("bias", False))),
     *(
         Program(name, "projection", linear.projection, (("transpose_weight", transpose), ("bias", bias), ("activation", act)))

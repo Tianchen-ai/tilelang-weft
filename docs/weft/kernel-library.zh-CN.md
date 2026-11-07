@@ -49,6 +49,10 @@ kernel(a, b, c)
 静态分块描述作者程序。运行时标量、Tensor shape/stride 绑定、编译缓存和输出分配继续
 使用 TileLang。相同数学类别可以有不同作者布局；编译器则为同一程序选择局部机器实现。
 
+`linear.blocked_matmul` 在显式 `tile_m`/`tile_n` Level 和 `rows`/`columns` 输出 cohort
+内完成整个 K 的缩并，以普通 `T.gemm` 保留权重的存储顺序。`linear.matmul` 则单独表达
+分块 K 循环及各输出程序的 grid。
+
 格式声明统一位于 `weft_core.formats.ggml`，`ggml_formats` 将其接入 TileLang；
 lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，完整流程见
 [示例 05](https://github.com/Tianchen-ai/tilelang-weft/blob/main/examples/weft/05_derived_layout.py)。

@@ -46,6 +46,11 @@ through TileLang. More than one factory may implement the same mathematical
 family with different author layouts; that is distinct from a compiler selecting
 local instructions for one program.
 
+`linear.blocked_matmul` closes each complete K contraction inside explicit
+`tile_m`/`tile_n` Levels and `rows`/`columns` output cohorts. It uses ordinary
+`T.gemm` with the weight's storage order retained. `linear.matmul` separately
+exposes a tiled K loop and a grid of independent output programs.
+
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
 `packed.projection` uses explicit integer block partials and F32 scale updates.
