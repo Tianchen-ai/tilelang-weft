@@ -304,6 +304,7 @@ the shared compiler.
 `indexed_rows` macro for IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S. The author retains
 sixteen-lane I16 pair partials, I32 group accumulation, explicit codebook inputs
 and per-record floating scales. `groups_per_step` bounds source unrolling
-without specifying a hardware vector width. Projection prepares its caller's
+without specifying a hardware vector width; sixteen-group formats also accept
+`groups_per_step=16`. Projection prepares its caller's
 Q8_K buffer once inside the invocation; `extreme_policy` preserves the selected
 quantization tie rule before the same indexed row program consumes that buffer.

@@ -416,7 +416,7 @@ def vec_dot(M, K, format="IQ1_S", groups_per_step=1):
     entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256, "IQ2_S": 1024}[format]
     signed_table = format in ("IQ2_XS", "IQ2_XXS")
     groups = 8 if format in ("IQ1_S", "IQ2_XXS") else 16
-    assert groups_per_step in (1, 2, 4, 8) and groups % groups_per_step == 0
+    assert groups_per_step in (1, 2, 4, 8, 16) and groups % groups_per_step == 0
 
     @T.prim_func
     def main(
@@ -452,7 +452,7 @@ def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first
     entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256, "IQ2_S": 1024}[format]
     signed_table = format in ("IQ2_XS", "IQ2_XXS")
     groups = 8 if format in ("IQ1_S", "IQ2_XXS") else 16
-    assert groups_per_step in (1, 2, 4, 8) and groups % groups_per_step == 0
+    assert groups_per_step in (1, 2, 4, 8, 16) and groups % groups_per_step == 0
 
     @T.prim_func
     def main(
