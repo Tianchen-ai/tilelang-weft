@@ -17,6 +17,87 @@ from .decoding import (
 
 
 @tilelang.jit(target="weft")
+def iq1_windows(M, K):
+    """Reuse one scalar metadata word inside each explicit 32-value window."""
+    assert M > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(Weights: T.Tensor((M, K // 256 * 50), "uint8"), Grid: T.Tensor((16384,), "int8"), Output: T.Tensor((M, K), "float32")):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=F.IQ1_S, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("code", "payload"), abi=True)
+        with T.Kernel(1):
+            with T.level.blocks(M * K, extent=256) as block:
+                record = T.load(weights[block])
+                entry = T.alloc_var("uint16", init=0)
+                with T.level.subtiles(block, extent=32) as window:
+                    high = T.load(record.qh, at=window)
+                    metadata = high[()]
+                    delta = T.if_then_else(metadata & T.uint16(32768) != T.uint16(0), -0.125, 0.125)
+                    scale = T.cast(record.d[()], "float32") * T.cast(
+                        ((metadata >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "float32")
+                    with T.level.subtiles(window, extent=8) as payload:
+                        index = T.cast(record.q[entry], "uint16") | (
+                            ((metadata >> ((entry % T.uint16(4)) * T.uint16(3))) & T.uint16(7)) << T.uint16(8))
+                        selected = T.load(grid[index, :])
+                        values = T.alloc_local((8,), "float32")
+                        for k in T.Parallel(8):
+                            values[k] = scale * (T.cast(selected.values[k], "float32") + delta)
+                        T.copy(values, output[payload])
+                        entry += T.uint16(1)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def iq2_windows(M, K, format="IQ2_XS"):
+    """Keep scale groups and contiguous table rows in separate source Levels."""
+    assert M > 0 and K > 0 and K % 256 == 0 and format in ("IQ2_XS", "IQ2_XXS")
+    encoding = getattr(F, format)
+    size = encoding.schema.storage_bits // 8
+    entries = 4096 if format == "IQ2_XS" else 2048
+
+    @T.prim_func
+    def main(Weights: T.Tensor((M, K // 256 * size), "uint8"), Grid: T.Tensor((entries,), "int8"), Signs: T.Tensor((1024,), "int8"), Output: T.Tensor((M, K), "float32")):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Grid": "input", "Signs": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=encoding, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        grid = T.view(Grid, shape=(entries // 8, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        with T.Kernel(1):
+            with T.level.blocks(M * K, extent=256) as block:
+                record = T.load(weights[block])
+                entry = T.alloc_var("uint16", init=0)
+                with T.level.subtiles(block, extent=32) as group:
+                    if format == "IQ2_XS":
+                        scale = T.load(record.scales, at=group)
+                    else:
+                        base = entry // T.uint16(4) * T.uint16(4)
+                        metadata = T.cast(record.q[base + T.uint16(2)], "uint32") | (T.cast(record.q[base + T.uint16(3)], "uint32") << T.uint32(16))
+                    with T.level.subtiles(group, extent=8) as payload:
+                        if format == "IQ2_XS":
+                            word = T.cast(record.q[entry], "uint16")
+                            index, sign = word & T.uint16(511), word >> T.uint16(9)
+                            sc = T.cast(scale[()], "uint16") >> ((entry % T.uint16(4) // T.uint16(2)) * T.uint16(4)) & T.uint16(15)
+                        else:
+                            base = entry // T.uint16(4) * T.uint16(4)
+                            word = T.cast(record.q[base + entry % T.uint16(4) // T.uint16(2)], "uint16")
+                            index = word >> (entry % T.uint16(2) * T.uint16(8)) & T.uint16(255)
+                            sign = metadata >> (T.cast(entry % T.uint16(4), "uint32") * T.uint32(7)) & T.uint32(127)
+                            sc = metadata >> T.uint32(28)
+                        factor = T.cast(record.d[()], "float32") * (0.5 + T.cast(sc, "float32")) * 0.25
+                        selected, parity = T.load(grid[index, :]), T.load(signs[sign, :])
+                        values = T.alloc_local((8,), "float32")
+                        for k in T.Parallel(8):
+                            values[k] = factor * T.cast(T.cast(selected.values[k], "int32") * T.cast(parity.values[k], "int32"), "float32")
+                        T.copy(values, output[payload])
+                        entry += T.uint16(1)
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def iq1_s(M, K, rows=1, chunk=32):
     assert K % 256 == 0 and chunk in (32, 64, 128, 256)
 

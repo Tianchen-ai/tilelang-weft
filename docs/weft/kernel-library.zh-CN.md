@@ -61,6 +61,10 @@ lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，�
 同一 entry 复用 scale 和 delta，通过 typed I8X8 表 View 查值。
 IQ2_XS/XXS 同样保留 entry/sign 行，并使用完整范围可容纳于已声明表内的 U16
 表偏移。最终 reshape 保持输出行主序和逐 entry 的浮点公式。
+`codebook.iq1_windows` 与 `iq2_windows` 显式嵌套 record、scale-group 和八元素表行
+Level。每个 entry 选择一个连续的 I8X8 codebook 行，IQ2 另外选择对应的 sign 行。
+scale metadata 保留原 record 快照，输出仍为公开的 `(M, K)` 布局。该源码组织共享
+标量 metadata，并限定每个 payload 的生命周期，无需持久化的解码数组。
 
 `indexed_lanes.xxs_subgroups` 用 64 元素的 Level 窗口表达 IQ3_XXS。
 每个窗口保留两个整数 scale group，以及各自的 codebook 行和 sign 行，随后加入 block 和。
