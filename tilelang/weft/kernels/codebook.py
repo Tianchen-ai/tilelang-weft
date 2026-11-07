@@ -92,7 +92,7 @@ def iq2_windows(M, K, format="IQ2_XS"):
                         selected, parity = T.load(grid[index, :]), T.load(signs[sign, :])
                         values = T.alloc_local((8,), "float32")
                         for k in T.Parallel(8):
-                            values[k] = factor * T.cast(T.cast(selected.values[k], "int32") * T.cast(parity.values[k], "int32"), "float32")
+                            values[k] = factor * T.cast(T.cast(selected.values[k], "int16") * T.cast(parity.values[k], "int16"), "float32")
                         T.copy(values, output[payload])
                         entry += T.int64(1)
                     group_index += T.int64(1)

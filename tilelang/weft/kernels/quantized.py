@@ -140,7 +140,7 @@ def field_windows(M, K, format="Q4_K"):
                 with T.level.subtiles(block, extent=width) as window:
                     result = T.alloc_local((1, width), "float32")
                     decode_dequantize(record, result, 1, format, elements, 0, 0, 0, 0, 0, 0,
-                                      width=width, single=True, point=window)
+                                      width=width, single=True, point=window, code_dtype="int8")
                     T.copy(result[0, :], output[window])
 
     return main

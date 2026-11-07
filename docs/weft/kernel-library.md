@@ -66,10 +66,14 @@ The final reshape preserves the output's row-major order and the per-entry
 floating-point formula.
 `codebook.iq1_windows` and `iq2_windows` expose nested record, scale-group and
 eight-element table-row Levels. Each entry selects one contiguous I8X8 codebook
-row; IQ2 selects its sign row independently. The scale metadata belongs to the
-original record snapshot, and the output retains the public `(M, K)` layout.
-This source organization shares scalar metadata and bounds each payload's
-lifetime without preparing a persistent decoded array.
+row; IQ2 selects its sign row independently.
+The scale metadata belongs to the original record snapshot, and the output
+retains the public `(M, K)` layout. The author shares metadata within these
+bounded windows without preparing a persistent decoded array.
+IQ2 codebook and sign rows contain I8 elements. Their product is explicitly I16,
+which represents the complete I8-by-I8 product range exactly; conversion to F32
+follows the product. This lets the shared target passes use a widening multiply
+and widening integer-to-float conversion directly.
 `codebook.indexed_windows` uses the same bounded table-row structure for IQ1_M,
 IQ2_S and IQ3_XXS. The IQ1_M half-bit lookup and the IQ2_S packed signs remain
 explicit source inputs and fields. `iq3_windows` pairs two four-element table
@@ -84,6 +88,9 @@ decoded record array or changing the caller's stored layout.
 For Q2_K/Q3_K/Q6_K the window program converts the scalar group scale before
 the payload multiplication. The author makes that numerical organization
 explicit, allowing one scalar scale conversion to serve the whole window.
+Its Q6_K decoder keeps the reconstructed code in I8, whose exact range is
+[-32, 31], until conversion to F32. The common decoding macro retains an explicit
+`code_dtype` source argument; the ordinary whole-record program uses I32.
 `indexed_lanes.xxs_subgroups` expresses IQ3_XXS as 64-element Level windows.
 Each window retains two integer scale groups, codebook rows and sign rows before
 the block sum. Explicit pair-entry, pair and payload axes preserve each sign
@@ -159,6 +166,14 @@ retaining packed sign planes alongside the payload. The scalar program reads
 the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
+
+`subblock_partials.window_dot` uses closed integer dots within each encoded
+record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
+NVFP4 shares the staged codebook while closing each 16-element scaled product;
+TQ2_0 closes one 256-element signed dot. `rows_per_program` selects the author's
+row cohort, and the native grid covers all cohorts. `window_projection` reuses
+the same macro after quantizing activation into the caller-provided `Quantized`
+buffer during the call. Its preparation cost and output layouts stay explicit.
 
 Affine short records retain the weight scale/minimum and activation scale/sum as
 two-element metadata tiles. Their conversion and multiplication are expressed

@@ -62,9 +62,12 @@ lookup 表仍是显式输入。持久 interleave 由独立准备程序生成，�
 IQ2_XS/XXS 同样保留 entry/sign 行，并使用完整范围可容纳于已声明表内的 U16
 表偏移。最终 reshape 保持输出行主序和逐 entry 的浮点公式。
 `codebook.iq1_windows` 与 `iq2_windows` 显式嵌套 record、scale-group 和八元素表行
-Level。每个 entry 选择一个连续的 I8X8 codebook 行，IQ2 另外选择对应的 sign 行。
-scale metadata 保留原 record 快照，输出仍为公开的 `(M, K)` 布局。该源码组织共享
-标量 metadata，并限定每个 payload 的生命周期，无需持久化的解码数组。
+Level。每个 entry 选择一个连续的 I8X8 codebook 行，IQ2 另外选择对应
+的 sign 行。scale metadata 保留原 record 快照，输出仍为公开的 `(M, K)` 布局。
+作者在有界窗口内复用 metadata，无需持久化的解码数组。
+IQ2 的 codebook 与 sign 行均为 I8 元素，源码显式以 I16 计算乘积，再转换为 F32。
+I16 能精确容纳完整的 I8×I8 乘积范围，共同目标 passes 因而可以直接选择
+widening multiply 与 widening 整数到浮点转换。
 `codebook.indexed_windows` 将同一表行窗口结构用于 IQ1_M、IQ2_S 与 IQ3_XXS。
 IQ1_M 的 half-bit 查表与 IQ2_S 的 packed signs 仍是显式源码输入及字段。
 `iq3_windows` 在八元素符号窗口内配对两个四元素表行，并在父层 32 元素 Level
@@ -126,6 +129,13 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 使 packed sign plane 与 payload 一起保留；标量程序直接读取选定字段。两者均明确保留
 源码的读取边界。这些是作者明确选择的数值组织，目标 passes
 负责实现所选组织的物理计算。
+
+`subblock_partials.window_dot` 在各编码 record 内闭合整数 dot。Q1_0 先保留四个
+Q8_0 子 record 的 scale，再应用权重 scale；NVFP4 共享 staged codebook，分别闭合
+各 16 元素缩放乘积；TQ2_0 闭合一个 256 元素有符号 dot。`rows_per_program` 表达
+作者的行 cohort，native grid 覆盖全部 cohort。`window_projection` 在调用内将
+activation 量化到调用者提供的 `Quantized` buffer，再复用同一宏，准备成本与
+输出布局均保持显式。
 
 Affine 短 record 将权重 scale/minimum 和 activation scale/sum 分别保留为双元素
 metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更新 payload 乘积与
@@ -191,6 +201,8 @@ Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `col
 Encoding 的字段关系，不另建解码后的完整 record 数组，也不改变调用方存储布局。
 Q2_K/Q3_K/Q6_K 的窗口程序先转换标量 group scale，再乘 payload。作者在源码中
 明确这项数值组织，使一次标量 scale 转换可供整个窗口使用。
+其中 Q6_K 将重建 code 保留为 I8，精确范围为 [-32, 31]，再转换为 F32。
+共同解码宏保留显式的 `code_dtype` 源码参数，普通整 record 程序仍使用 I32。
 
 `indexed_lanes.vec_dot` 与 `indexed_lanes.projection` 复用普通 `indexed_rows`
 宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的 I16 pair partial、

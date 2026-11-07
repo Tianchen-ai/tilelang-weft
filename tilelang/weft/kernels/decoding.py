@@ -4,7 +4,7 @@ from tilelang.weft import language as T
 
 
 @T.macro
-def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None, single=False, point=None):
+def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codebook, Scale, HalfBits, Powers, offset=0, width=None, single=False, point=None, code_dtype="int32"):
     width = elements if width is None else width
     if format == "Q6_K":
         (q, high, scales, d) = (record.ql, record.qh, record.scales, record.d)
@@ -45,7 +45,7 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
         elif format == "Q5_K":
             value = T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4
         elif format == "Q6_K":
-            value = (T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4) - 32
+            value = (T.cast(q[(k,) if single else (r, k)], code_dtype) | T.cast(high[(k,) if single else (r, k)], code_dtype) << T.cast(4, code_dtype)) - T.cast(32, code_dtype)
         else:
             value = T.cast(q[(k,) if single else (r, k)], "int32")
             if format == "Q4_0":

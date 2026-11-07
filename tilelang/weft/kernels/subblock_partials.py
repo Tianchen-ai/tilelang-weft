@@ -362,6 +362,127 @@ def subblocks(M, K, format="Q1_0", rows=1):
     return main
 
 
+@T.macro
+def window_products(weights, activation, output, table, scale_table, M, K, format, elements):
+    for row in T.serial(M):
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=elements) as block:
+            weight = T.load(weights[row, block])
+            if format == "TQ2_0":
+                source = T.load(activation[block])
+                codes = T.alloc_local((256,), "int8")
+                for k in T.Parallel(256):
+                    codes[k] = T.cast(weight.q[k], "int8") - T.int8(1)
+                product = T.alloc_local((), "int32")
+                T.reduce_dot(source.q, codes, product, over="k", acc_dtype="int32", engine="vector")
+                factor = source.ds[()] * T.cast(weight.d[()], "float32")
+                total += T.cast(product[()], "float32") * factor
+            else:
+                subtotal = T.alloc_var("float32", init=0)
+                with T.level.subtiles(block, extent=32) as input_block:
+                    source = T.load(activation[input_block])
+                    if format == "Q1_0":
+                        positive = T.load(weight.q, at=input_block)
+                        codes = T.alloc_local((32,), "int8")
+                        for k in T.Parallel(32):
+                            codes[k] = T.cast(positive[k], "int8") * T.int8(2) - T.int8(1)
+                        product = T.alloc_local((), "int32")
+                        T.reduce_dot(source.q, codes, product, over="k", acc_dtype="int32", engine="vector")
+                        subtotal += T.cast(source.d[()], "float32") * T.cast(product[()], "float32")
+                    else:
+                        with T.level.subtiles(input_block, extent=16) as payload:
+                            indices = T.load(weight.q, at=payload)
+                            inputs = T.load(source.q, at=payload)
+                            exponent = T.load(weight.d, at=payload)
+                            codes = T.load(table, at=indices, bounds="in_bounds")
+                            product = T.alloc_local((), "int32")
+                            T.reduce_dot(inputs, codes, product, over="k", acc_dtype="int32", engine="vector")
+                            factor = scale_table[T.cast(exponent[()], "uint8")] * T.cast(source.d[()], "float32")
+                            total += factor * T.cast(product[()], "float32")
+                if format == "Q1_0":
+                    total += T.cast(weight.d[()], "float32") * subtotal
+        result = T.alloc_local((1,), "float32")
+        result[0] = total
+        T.copy(result, output[row])
+
+
+@tilelang.jit(target="weft")
+def window_dot(M, K, format="Q1_0", rows_per_program=1):
+    """Close integer dots in source sub-Levels before each scale update."""
+    assert format in ("Q1_0", "NVFP4", "TQ2_0") and M > 0 and K > 0
+    encoding = getattr(F, format)
+    partner = F.Q8_K if format == "TQ2_0" else F.Q8_0
+    elements = encoding.schema.elements
+    assert K % elements == 0 and rows_per_program > 0 and M % rows_per_program == 0
+    lookup = format == "NVFP4"
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // elements * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((K // partner.schema.elements * (partner.schema.storage_bits // 8),), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Codebook: T.Tensor((16 if lookup else 0,), "int8"),
+        Scale: T.Tensor((256 if lookup else 0,), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Output": "output", "Codebook": "input", "Scale": "input"}})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        activation = T.view(Activation, shape=(K,), encoding=partner, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        with T.Kernel(M // rows_per_program, cpu_num_threads=1) as program:
+            first = program * rows_per_program
+            if lookup:
+                codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+                table = T.stage(T.load(codebook))
+                window_products(weights[first : first + rows_per_program, :], activation,
+                                output[first : first + rows_per_program], table, Scale,
+                                rows_per_program, K, format, elements)
+            else:
+                window_products(weights[first : first + rows_per_program, :], activation,
+                                output[first : first + rows_per_program], Codebook, Scale,
+                                rows_per_program, K, format, elements)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def window_projection(M, N, K, format="Q1_0", extreme_policy="first", inverse_policy="reciprocal"):
+    """Prepare Q8 activation in the call, then reuse the explicit window dots."""
+    assert format in ("Q1_0", "NVFP4", "TQ2_0") and min(M, N, K) > 0
+    encoding = getattr(F, format)
+    partner = F.Q8_K if format == "TQ2_0" else F.Q8_0
+    elements = encoding.schema.elements
+    assert K % elements == 0
+    lookup = format == "NVFP4"
+    activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // elements * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, activation_bytes), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Codebook: T.Tensor((16 if lookup else 0,), "int8"),
+        Scale: T.Tensor((256 if lookup else 0,), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Quantized": "quantized", "Output": "output", "Codebook": "input", "Scale": "input"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        activation = T.view(Quantized, shape=(M, K), encoding=partner, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            if lookup:
+                codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+                table = T.stage(T.load(codebook))
+            quantize_rows(source, activation, M, K, "Q8_K" if format == "TQ2_0" else "Q8_0", partner.schema.elements, extreme_policy, inverse_policy, "rne")
+            for m in T.serial(M):
+                if lookup:
+                    window_products(weights, activation[m, :], output[m, :], table, Scale, N, K, format, elements)
+                else:
+                    window_products(weights, activation[m, :], output[m, :], Codebook, Scale, N, K, format, elements)
+
+    return main
+
+
 @tilelang.jit(target="weft")
 def ternary_lanes(M, K):
     """Retain sixteen exact I16 ternary partials across the five digit planes."""
