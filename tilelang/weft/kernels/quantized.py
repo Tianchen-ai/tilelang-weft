@@ -120,12 +120,14 @@ def dequantize(M, K, format="Q4_0", rows=4, chunk=32, records=1, cache_hint="nor
 
 
 @tilelang.jit(target="weft")
-def field_windows(M, K, format="Q4_K"):
+def field_windows(M, K, format="Q4_K", chunk=None):
     """Decode one scale group at a time from its original record snapshot."""
     assert format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ2_0")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
-    width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
+    group_width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
+    width = group_width if chunk is None else chunk
+    assert width in (8, 16, 32) and group_width % width == 0
     record_bytes = encoding.schema.storage_bits // 8
     assert M > 0 and K > 0 and K % elements == 0
 
@@ -137,11 +139,17 @@ def field_windows(M, K, format="Q4_K"):
         with T.Kernel(1, cpu_num_threads=1):
             with T.level.blocks(M * K, extent=elements) as block:
                 record = T.load(weights[block])
-                with T.level.subtiles(block, extent=width) as window:
+                if elements == width:
                     result = T.alloc_local((1, width), "float32")
                     decode_dequantize(record, result, 1, format, elements, 0, 0, 0, 0, 0, 0,
-                                      width=width, single=True, point=window, code_dtype="int8")
-                    T.copy(result[0, :], output[window])
+                                      width=width, single=True, code_dtype="int8")
+                    T.copy(result[0, :], output[block])
+                else:
+                    with T.level.subtiles(block, extent=width) as window:
+                        result = T.alloc_local((1, width), "float32")
+                        decode_dequantize(record, result, 1, format, elements, 0, 0, 0, 0, 0, 0,
+                                          width=width, single=True, point=window, code_dtype="int8")
+                        T.copy(result[0, :], output[window])
 
     return main
 

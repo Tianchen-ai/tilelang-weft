@@ -419,14 +419,17 @@ def affine_group_rows(weights, values, output, M, K, format, group_size, groups,
                     integer += product[0] * (T.cast(scale[()], "int32") & T.int32(15))
                 else:
                     integer += product[0] * T.cast(scale[()], "int32")
-            terms = T.alloc_local((groups,), "int32")
             correction = T.alloc_local((1,), "int32")
-            for g in T.Parallel(groups):
-                if format == "Q2_K":
-                    terms[g] = T.cast(metadata[g] >> T.uint8(4), "int32") * T.cast(sums[g], "int32")
-                else:
+            if format == "Q2_K":
+                minima = T.alloc_local((groups,), "int16")
+                for g in T.Parallel(groups):
+                    minima[g] = T.cast(metadata[g] >> T.uint8(4), "int16")
+                T.reduce_dot(sums, minima, correction, over="k", acc_dtype="int32", engine="vector")
+            else:
+                terms = T.alloc_local((groups,), "int32")
+                for g in T.Parallel(groups):
                     terms[g] = T.cast(minima[g], "int32") * (T.cast(sums[g * 2], "int32") + T.cast(sums[g * 2 + 1], "int32"))
-            T.reduce_sum(terms, correction, dim=0)
+                T.reduce_sum(terms, correction, dim=0)
             if format == "Q2_K":
                 total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32")
                                   - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))

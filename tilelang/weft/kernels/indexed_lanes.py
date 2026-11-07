@@ -184,64 +184,115 @@ def xxs_subgroups(M, K):
 
 
 @tilelang.jit(target="weft")
-def iq1_planes(M, K, groups_per_step=8):
+def iq1_planes(M, K, groups_per_step=8, format="IQ1_S"):
     """Expose independent record groups, codebook entries and payload lanes."""
     assert M > 0 and K > 0 and K % 256 == 0
     assert groups_per_step in (1, 2, 4, 8)
-
-    @T.prim_func
-    def main(
-        Weights: T.Tensor((M, K // 256 * 50), "uint8"),
-        Activation: T.Tensor((K // 256 * 292,), "uint8"),
-        Output: T.Tensor((M,), "float32"),
-        Grid: T.Tensor((16384,), "int8"),
-    ):
-        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Output": "output"}})
-        weights = T.view(Weights, shape=(M, K), encoding=F.IQ1_S, axes=("m", "k"), abi=True)
-        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
-        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
-        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
-        with T.Kernel(1, cpu_num_threads=1):
-            with T.level.rows(M, group=1) as row:
-                total = T.alloc_var("float32", init=0)
-                with T.level.blocks(K, extent=256) as block:
-                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
-                    q, metadata, d, activation, sums, ds = w.q, w.qh, w.d, x.q, x.bsum, x.ds
-                    block_scale = T.cast(d[()], "float32") * ds[()]
-                    main, correction = T.alloc_var("int32", init=0), T.alloc_var("int32", init=0)
-                    for part in T.unroll(8 // groups_per_step):
-                        indices = T.alloc_local((groups_per_step, 4, 8), "uint16")
-                        inputs = T.alloc_local((groups_per_step, 4, 8), "int8")
-                        for group, entry, payload in T.Parallel(groups_per_step, 4, 8):
-                            g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
-                            e, p = T.cast(entry, "uint16"), T.cast(payload, "uint16")
-                            high = (metadata[g] >> (e * T.uint16(3))) & T.uint16(7)
-                            index = T.cast(q[g * T.uint16(4) + e], "uint16") | (high << T.uint16(8))
-                            indices[group, entry, payload] = index * T.uint16(8) + p
-                            inputs[group, entry, payload] = activation[g * T.uint16(32) + e * T.uint16(8) + p]
-                        codes = T.load(grid.values, at=indices, bounds="in_bounds")
-                        products = T.alloc_local((groups_per_step,), "int32")
-                        T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
-                        main_terms = T.alloc_local((groups_per_step,), "int32")
-                        corrections = T.alloc_local((groups_per_step,), "int32")
-                        for group in T.Parallel(groups_per_step):
-                            g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
-                            scale = T.cast(((metadata[g] >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
-                            delta = T.cast((T.cast(metadata[g], "int16") >> T.int16(15)) | T.int16(1), "int32")
-                            main_terms[group] = scale * products[group]
-                            corrections[group] = scale * delta * (T.cast(sums[g * T.uint16(2)], "int32") + T.cast(sums[g * T.uint16(2) + T.uint16(1)], "int32"))
-                        main_sum, correction_sum = T.alloc_local((), "int32"), T.alloc_local((), "int32")
-                        T.reduce_sum(main_terms, main_sum, dim=0)
-                        T.reduce_sum(corrections, correction_sum, dim=0)
-                        main += main_sum[()]
-                        correction += correction_sum[()]
-                    combined = T.cast(main, "float32") + T.cast(correction, "float32") * 0.125
-                    total += block_scale * combined
-                result = T.alloc_local((1,), "float32")
-                result[0] = total
-                T.copy(result, output[row])
-
+    assert format in ("IQ1_S", "IQ1_M")
+    medium = format == "IQ1_M"
+    encoding = getattr(F, format)
+    record_bytes = encoding.schema.storage_bits // 8
+    groups, entries = (16, 2) if medium else (8, 4)
+    if medium:
+        @T.prim_func
+        def main(
+            Weights: T.Tensor((M, K // 256 * record_bytes), "uint8"),
+            Activation: T.Tensor((K // 256 * 292,), "uint8"),
+            Output: T.Tensor((M,), "float32"),
+            Grid: T.Tensor((16384,), "int8"),
+            HalfBits: T.Tensor((65536,), "float32"),
+        ):
+            T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "HalfBits": "input", "Output": "output"}})
+            weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+            values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+            output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+            grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+            with T.Kernel(1, cpu_num_threads=1):
+                iq1_plane_rows(weights, values, output, grid, HalfBits, M, K, groups_per_step, medium, groups, entries)
+    else:
+        @T.prim_func
+        def main(
+            Weights: T.Tensor((M, K // 256 * record_bytes), "uint8"),
+            Activation: T.Tensor((K // 256 * 292,), "uint8"),
+            Output: T.Tensor((M,), "float32"),
+            Grid: T.Tensor((16384,), "int8"),
+        ):
+            T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input", "Grid": "input", "Output": "output"}})
+            weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+            values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+            output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+            grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+            with T.Kernel(1, cpu_num_threads=1):
+                iq1_plane_rows(weights, values, output, grid, 0, M, K, groups_per_step, medium, groups, entries)
     return main
+
+
+@T.macro
+def iq1_plane_rows(weights, values, output, grid, HalfBits, M, K, groups_per_step, medium, groups, entries):
+    with T.level.rows(M, group=1) as row:
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=256) as block:
+            w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+            q, metadata, activation, sums, ds = w.q, w.qh, x.q, x.bsum, x.ds
+            if medium:
+                scales = w.scales
+                sc0 = T.cast(scales[0], "uint16") | T.cast(scales[1], "uint16") << T.uint16(8)
+                sc1 = T.cast(scales[2], "uint16") | T.cast(scales[3], "uint16") << T.uint16(8)
+                sc2 = T.cast(scales[4], "uint16") | T.cast(scales[5], "uint16") << T.uint16(8)
+                sc3 = T.cast(scales[6], "uint16") | T.cast(scales[7], "uint16") << T.uint16(8)
+                bits = sc0 >> T.uint16(12) | sc1 >> T.uint16(8) & T.uint16(240)
+                bits |= sc2 >> T.uint16(4) & T.uint16(3840) | sc3 & T.uint16(61440)
+                block_scale = HalfBits[bits] * ds[()]
+            else:
+                block_scale = T.cast(w.d[()], "float32") * ds[()]
+            main, correction = T.alloc_var("int32", init=0), T.alloc_var("int32", init=0)
+            for part in T.unroll(groups // groups_per_step):
+                indices = T.alloc_local((groups_per_step, entries, 8), "uint16")
+                inputs = T.alloc_local((groups_per_step, entries, 8), "int8")
+                for group, entry, payload in T.Parallel(groups_per_step, entries, 8):
+                    g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
+                    e, p = T.cast(entry, "uint16"), T.cast(payload, "uint16")
+                    high = (T.cast(metadata[g], "uint16") >> (e * T.uint16(4 if medium else 3))) & T.uint16(7)
+                    index = T.cast(q[g * T.uint16(entries) + e], "uint16") | (high << T.uint16(8))
+                    indices[group, entry, payload] = index * T.uint16(8) + p
+                    inputs[group, entry, payload] = activation[g * T.uint16(entries * 8) + e * T.uint16(8) + p]
+                codes = T.load(grid.values, at=indices, bounds="in_bounds")
+                products = T.alloc_local((groups_per_step,), "int32")
+                T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                if medium:
+                    deltas = T.alloc_local((groups_per_step, entries, 8), "int8")
+                    delta_products = T.alloc_local((groups_per_step,), "int32")
+                    for group, entry, payload in T.Parallel(groups_per_step, entries, 8):
+                        g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
+                        shift = T.uint16(3) + T.cast(entry, "uint16") * T.uint16(4)
+                        delta_bit = T.cast(metadata[g], "uint16") >> shift & T.uint16(1)
+                        deltas[group, entry, payload] = T.int8(1) - T.cast(delta_bit, "int8") * T.int8(2)
+                    T.reduce_dot(inputs, deltas, delta_products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                main_terms = T.alloc_local((groups_per_step,), "int32")
+                corrections = T.alloc_local((groups_per_step,), "int32")
+                for group in T.Parallel(groups_per_step):
+                    g = T.uint16(part * groups_per_step) + T.cast(group, "uint16")
+                    if medium:
+                        scale_word = sc0 if g < T.uint16(4) else sc1 if g < T.uint16(8) else sc2 if g < T.uint16(12) else sc3
+                        scale = T.cast((scale_word >> (g % T.uint16(4) * T.uint16(3)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
+                        correction_value = delta_products[group]
+                    else:
+                        scale = T.cast(((metadata[g] >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
+                        delta = T.cast((T.cast(metadata[g], "int16") >> T.int16(15)) | T.int16(1), "int32")
+                        correction_value = delta * (T.cast(sums[g * T.uint16(2)], "int32") + T.cast(sums[g * T.uint16(2) + T.uint16(1)], "int32"))
+                    main_terms[group] = scale * products[group]
+                    corrections[group] = scale * correction_value
+                main_sum, correction_sum = T.alloc_local((), "int32"), T.alloc_local((), "int32")
+                T.reduce_sum(main_terms, main_sum, dim=0)
+                T.reduce_sum(corrections, correction_sum, dim=0)
+                main += main_sum[()]
+                correction += correction_sum[()]
+            combined = T.cast(main, "float32") + T.cast(correction, "float32") * 0.125
+            total += block_scale * combined
+        result = T.alloc_local((1,), "float32")
+        result[0] = total
+        T.copy(result, output[row])
+
 
 
 @T.macro

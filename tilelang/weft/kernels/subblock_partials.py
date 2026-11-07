@@ -363,12 +363,9 @@ def subblocks(M, K, format="Q1_0", rows=1):
 
 
 @T.macro
-def window_products(weights, activation, output, table, scale_table, M, K, format, elements, record_partials):
+def window_products(weights, activation, output, table, scale_table, M, K, format, elements):
     for row in T.serial(M):
         total = T.alloc_var("float32", init=0)
-        if record_partials == 2:
-            second = T.alloc_var("float32", init=0)
-            record_index = T.alloc_var("uint32", init=0)
         with T.level.blocks(K, extent=elements) as block:
             weight = T.load(weights[row, block])
             if format == "TQ2_0":
@@ -403,24 +400,16 @@ def window_products(weights, activation, output, table, scale_table, M, K, forma
                             factor = scale_table[T.cast(exponent[()], "uint8")] * T.cast(source.d[()], "float32")
                             total += factor * T.cast(product[()], "float32")
                 if format == "Q1_0":
-                    if record_partials == 2:
-                        if record_index & T.uint32(1) == T.uint32(0):
-                            total += T.cast(weight.d[()], "float32") * subtotal
-                        else:
-                            second += T.cast(weight.d[()], "float32") * subtotal
-                        record_index += T.uint32(1)
-                    else:
-                        total += T.cast(weight.d[()], "float32") * subtotal
+                    total += T.cast(weight.d[()], "float32") * subtotal
         result = T.alloc_local((1,), "float32")
-        result[0] = total + second if record_partials == 2 else total
+        result[0] = total
         T.copy(result, output[row])
 
 
 @tilelang.jit(target="weft")
-def window_dot(M, K, format="Q1_0", rows_per_program=1, record_partials=1):
+def window_dot(M, K, format="Q1_0", rows_per_program=1):
     """Close integer dots in source sub-Levels before each scale update."""
     assert format in ("Q1_0", "NVFP4", "TQ2_0") and M > 0 and K > 0
-    assert record_partials in (1, 2) and (record_partials == 1 or format == "Q1_0")
     encoding = getattr(F, format)
     partner = F.Q8_K if format == "TQ2_0" else F.Q8_0
     elements = encoding.schema.elements
@@ -446,11 +435,11 @@ def window_dot(M, K, format="Q1_0", rows_per_program=1, record_partials=1):
                 table = T.stage(T.load(codebook))
                 window_products(weights[first : first + rows_per_program, :], activation,
                                 output[first : first + rows_per_program], table, Scale,
-                                rows_per_program, K, format, elements, record_partials)
+                                rows_per_program, K, format, elements)
             else:
                 window_products(weights[first : first + rows_per_program, :], activation,
                                 output[first : first + rows_per_program], Codebook, Scale,
-                                rows_per_program, K, format, elements, record_partials)
+                                rows_per_program, K, format, elements)
 
     return main
 
@@ -487,9 +476,9 @@ def window_projection(M, N, K, format="Q1_0", extreme_policy="first", inverse_po
             quantize_rows(source, activation, M, K, "Q8_K" if format == "TQ2_0" else "Q8_0", partner.schema.elements, extreme_policy, inverse_policy, "rne")
             for m in T.serial(M):
                 if lookup:
-                    window_products(weights, activation[m, :], output[m, :], table, Scale, N, K, format, elements, 1)
+                    window_products(weights, activation[m, :], output[m, :], table, Scale, N, K, format, elements)
                 else:
-                    window_products(weights, activation[m, :], output[m, :], Codebook, Scale, N, K, format, elements, 1)
+                    window_products(weights, activation[m, :], output[m, :], Codebook, Scale, N, K, format, elements)
 
     return main
 

@@ -93,6 +93,8 @@ Level subtiles. A scale-group window selects its payload and scalar metadata
 from the same record snapshot, reusing the regular decoding macro. This source
 organization exposes the Encoding's field relation without creating a separate
 decoded record array or changing the caller's stored layout.
+`chunk` can subdivide that scale group into 8/16/32-element source windows.
+An entire short record uses its existing record Level directly.
 For Q2_K/Q3_K/Q6_K the window program converts the scalar group scale before
 the payload multiplication. The author makes that numerical organization
 explicit, allowing one scalar scale conversion to serve the whole window.
@@ -157,6 +159,18 @@ uses the Encoding-aware reshape to keep its record and payload axes separate.
 The codebook is a saved stage. `cache_hint="streaming"` is a source store hint
 whose alignment and alias legality are checked by the target memory pass.
 
+`codebook.metadata_windows` stages the 16-element codebook and keeps IQ4_XS
+or NVFP4 scale metadata scalar in each 32/16-element Level window. The payload
+uses an indexed read of that saved table. `ternary_planes` reuses TQ1's
+32-byte, 16-byte and four-byte payloads across independent digit/payload axes,
+then reshapes each decoded plane into its contiguous output window. Its power
+table is an explicit staged input; the payload loads remain in the record body.
+
+The shared Q4_1/Q5_1 decoder expresses scaling and minimum correction in one
+affine expression. Q5 reconstructs its five-bit code in U8 before widening the
+complete value. These source expressions expose the legal local FMA and avoid
+wide bitfield work without changing the decoded range or output layout.
+
 Panel workspaces are invocation storage. `panel_dense.projection` populates
 `Scratch` and `PackedActivation` during the call; `round_f16` chooses whether
 activation is rounded to F16 before F32 accumulation. Packed projections also
@@ -183,14 +197,13 @@ record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale
 NVFP4 shares the staged codebook while closing each 16-element scaled product;
 TQ2_0 closes one 256-element signed dot. `rows_per_program` selects the author's
 row cohort, and the native grid covers all cohorts.
-`record_partials=2` keeps independent even/odd Q1 record sums before the final
-F32 combination. `rows_per_program` can instead retain several complete rows
-inside one instance; both choices are visible author structure.
+`rows_per_program` can retain several complete rows inside one instance.
 `window_projection` reuses the same macro after quantizing activation into the caller-provided `Quantized`
 buffer during the call. Its preparation cost and output layouts stay explicit.
 
-`row_partials.scale_projection` similarly reuses `affine_group_rows` for Q2_K,
-Q4_K and Q5_K, retaining separate scaled integer and minimum-correction sums.
+`row_partials.scale_projection` reuses `affine_group_rows` for Q2_K/Q4_K/Q5_K,
+retaining separate scaled integer and minimum-correction sums. Q2_K keeps its
+minimum coefficients in I16 and explicitly contracts them with the Q8_K group sums.
 Both scale and indexed projection factories expose the existing activation
 extreme and inverse policies, so a workload keeps its required quantization
 contract while reusing a row program.
@@ -207,6 +220,10 @@ activation-sum correction remain separate integer expressions. Its `rows` and
 `columns` parameters describe that reuse; the common compiler selects VNNI or
 another legal vector implementation. `ternary_planes` and `iq1_planes` retain
 their group/entry/payload axes until the author's final reduction.
+`iq1_planes(format="IQ1_S"/"IQ1_M", groups_per_step=...)` bounds the free
+group cohort independently of entry/payload contraction. Both formats use one
+shared row macro. IQ1_M retains separate grid and signed-delta partials and its
+explicit half-bit lookup; IQ1_S retains its activation-group sum correction.
 
 `attention.rope` exposes `rows_per_program`, `heads_per_program` and `pair_tile`.
 The grid covers those explicit cohorts. Within each pair Level, coefficient

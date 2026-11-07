@@ -17,6 +17,92 @@ from .decoding import (
 
 
 @tilelang.jit(target="weft")
+def metadata_windows(M, K, format="NVFP4"):
+    """Read scalar scale metadata once per explicit contiguous output window."""
+    assert format in ("IQ4_XS", "NVFP4") and M > 0 and K > 0
+    encoding = getattr(F, format)
+    elements, size = encoding.schema.elements, encoding.schema.storage_bits // 8
+    width = 32 if format == "IQ4_XS" else 16
+    assert K % elements == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // elements * size), "uint8"),
+        Codebook: T.Tensor((16,), "int8"),
+        Scale: T.Tensor((256 if format == "NVFP4" else 0,), "float32"),
+        Output: T.Tensor((M, K), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Codebook": "input", "Scale": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=encoding, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            table = T.stage(T.load(codebook))
+            with T.level.blocks(M * K, extent=elements) as block:
+                record = T.load(weights[block])
+                if format != "NVFP4":
+                    block_scale = T.cast(record.d[()], "float32")
+                if format == "IQ4_XS":
+                    high = T.cast(record.scales_h[()], "uint16")
+                entry = T.alloc_var("uint32", init=0)
+                with T.level.subtiles(block, extent=width) as window:
+                    result = T.alloc_local((width,), "float32")
+                    if format == "IQ4_XS":
+                        low = T.cast(record.scales_l[entry // T.uint32(2)], "uint8")
+                        lower = low >> T.cast(entry % T.uint32(2) * T.uint32(4), "uint8") & T.uint8(15)
+                        upper = T.cast(high >> T.cast(entry * T.uint32(2), "uint16") & T.uint16(3), "uint8")
+                        scale = block_scale * T.cast(T.cast(lower | upper << T.uint8(4), "int8") - T.int8(32), "float32")
+                    else:
+                        exponent = T.load(record.d, at=window)
+                        scale = Scale[T.cast(exponent[()], "uint8")]
+                    codes = T.load(record.q, at=window)
+                    values = T.load(table, at=codes, bounds="in_bounds")
+                    for k in T.Parallel(width):
+                        result[k] = scale * T.cast(values[k], "float32")
+                    T.copy(result, output[window])
+                    entry += T.uint32(1)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def ternary_planes(M, K):
+    """Keep independent digit and payload axes for each radix-3 byte plane."""
+    assert M > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(Weights: T.Tensor((M, K // 256 * 54), "uint8"), Powers: T.Tensor((5,), "uint32"), Output: T.Tensor((M, K), "float32")):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Powers": "input", "Output": "output"}})
+        weights = T.view(Weights, shape=(M * K,), encoding=F.TQ1_0, axes=("k",))
+        output = T.view(Output, shape=(M * K,), axes=("k",))
+        powers = T.view(Powers, shape=(5,), axes=("digit",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            table = T.stage(T.load(powers))
+            with T.level.blocks(M * K, extent=256) as block:
+                record = T.load(weights[block])
+                first = T.load(record.q[:32])
+                second = T.load(record.q[32:48])
+                tail = T.load(record.qh)
+                scale = T.cast(record.d[()], "float32")
+                ternary_plane(first, output[block][:160], 32, 5, table, scale)
+                ternary_plane(second, output[block][160:240], 16, 5, table, scale)
+                ternary_plane(tail, output[block][240:256], 4, 4, table, scale)
+
+    return main
+
+
+@T.macro
+def ternary_plane(packed, output, width, digits, powers, scale):
+    result = T.alloc_local((digits, width), "float32")
+    for d, k in T.Parallel(digits, width):
+        wrapped = T.cast(T.cast(powers[d], "uint8") * packed[k], "uint8")
+        code = T.cast(T.cast(wrapped, "uint16") * T.uint16(3) >> T.uint16(8), "int8")
+        result[d, k] = scale * T.cast(code - T.int8(1), "float32")
+    flat = T.reshape(result, (digits * width,))
+    T.copy(flat, output)
+
+
+@tilelang.jit(target="weft")
 def iq1_windows(M, K):
     """Reuse one scalar metadata word inside each explicit 32-value window."""
     assert M > 0 and K > 0 and K % 256 == 0

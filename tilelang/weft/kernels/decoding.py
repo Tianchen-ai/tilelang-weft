@@ -37,7 +37,8 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
         if format == "Q1_0":
             value = T.cast(q[(k,) if single else (r, k)], "int32") * 2 - 1
         elif format in ("Q5_0", "Q5_1"):
-            value = T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4
+            packed = T.cast(q[(k,) if single else (r, k)], "uint8") | T.cast(high[(k,) if single else (r, k)], "uint8") << T.uint8(4)
+            value = T.cast(packed, "int32")
             if format == "Q5_0":
                 value = value - 16
         elif format == "Q3_K":
@@ -80,10 +81,10 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
                 result[r, lane] = (T.cast(d[()], "float32") * T.cast(scale, "float32")) * T.cast(value, "float32")
             else:
                 result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(T.cast(scale, "int32") * value, "float32")
+        elif format in ("Q4_1", "Q5_1"):
+            result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(value, "float32") + T.cast(minimum[() if single else (r,)], "float32")
         else:
             result[r, lane] = T.cast(d[() if single else (r,)], "float32") * T.cast(value, "float32")
-        if format in ("Q4_1", "Q5_1"):
-            result[r, lane] += T.cast(minimum[() if single else (r,)], "float32")
 
 
 @T.macro

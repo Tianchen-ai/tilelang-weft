@@ -84,6 +84,8 @@ IQ1_M 的 half-bit 查表与 IQ2_S 的 packed signs 仍是显式源码输入及�
 显式的 pair-entry、pair、payload 轴保留一行八个 sign 元素与两行四元素 codebook 的对应关系。
 有符号 payload 与 activation 通过普通 `T.reduce_dot` 计算，直接暴露局部复用，
 不先建立完整的解码 record 数组。
+`quantized.field_windows(chunk=...)` 可将 scale group 细分成 8/16/32 元素的
+作者窗口；完整短 record 直接复用已有 record Level。
 `packed.projection` 使用显式整数 block partial 和 F32 scale 更新。
 Q4_K、Q6_K 通过共享 `partials` 宏保留整数 partial 和独立的
 scale/correction 支路。`composition.packed_projection` 的显式解码到 workspace
@@ -144,13 +146,23 @@ Q8_0 子 record 的 scale，再应用权重 scale；NVFP4 共享 staged codebook
 作者的行 cohort，native grid 覆盖全部 cohort。`window_projection` 在调用内将
 activation 量化到调用者提供的 `Quantized` buffer，再复用同一宏，准备成本与
 输出布局均保持显式。
-`record_partials=2` 分别保留 Q1 偶数与奇数 record 的和，最后在 F32 中合并。
-`rows_per_program` 也可以让一个实例保留多行完整计算，两者都是显式作者结构。
+`rows_per_program` 也可以让一个实例保留多行完整计算。
 
-`row_partials.scale_projection` 为 Q2_K、Q4_K、Q5_K 复用 `affine_group_rows`，
-分别保留带 scale 的整数和及 minimum 校正和。scale 与 indexed projection
+`row_partials.scale_projection` 为 Q2_K/Q4_K/Q5_K 复用 `affine_group_rows`，
+分别保留带 scale 的整数和及 minimum 校正和。Q2_K 以 I16 表示 minimum
+系数，与 Q8_K 的分组和显式 contraction。scale 与 indexed projection
 factory 均公开已有 activation extreme/inverse 策略，复用行程序时保持 workload
 要求的量化合同。
+
+`codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
+Level 窗口中以标量复用 IQ4_XS/NVFP4 scale metadata，再索引读取保存的表。
+`ternary_planes` 以独立的 digit/payload 轴复用 TQ1 的 32-byte、16-byte 与四 byte payload，
+再将各平面的解码结果 reshape 到连续输出窗口。幂表是显式 stage 输入，payload
+读取保留在 record body 中。
+
+共享 Q4_1/Q5_1 解码器用一个仿射表达式表示 scale 和 minimum 校正。
+Q5 先在 U8 中构成完整五位码，再扩大位宽。这些源码表达暴露了合法的局部
+FMA，并减少宽位域运算，保持解码范围和输出布局。
 
 Affine 短 record 将权重 scale/minimum 和 activation scale/sum 分别保留为双元素
 metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更新 payload 乘积与
@@ -160,6 +172,9 @@ metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更�
 分组 factor、带偏置的乘积与精确 activation sum 校正保持独立的整数表达式。
 `rows`、`columns` 表达这层复用，共同编译器选择 VNNI 或其他合法向量实现。
 `ternary_planes` 与 `iq1_planes` 保留 group/entry/payload 轴，直到作者指定的最终归约。
+`iq1_planes(format="IQ1_S"/"IQ1_M", groups_per_step=...)` 独立控制 free group
+cohort，通过同一个行 macro 收口。IQ1_M 保留 grid 与 signed-delta 两条整数 partial
+以及显式 half-bit 查表；IQ1_S 保留 activation group sum 校正。
 
 `attention.rope` 公开 `rows_per_program`、`heads_per_program` 与 `pair_tile`，grid
 覆盖这些显式 cohort。每个 pair Level 的系数 stage 跨 head 复用，每个 head 在写出前
