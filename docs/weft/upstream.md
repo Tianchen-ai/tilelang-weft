@@ -23,6 +23,10 @@ Upstream GPU backends keep their existing pipeline/codegen path.
 MLIR C++ objects do not cross the boundary. The shared native runtime is independent
 of the compiler and both frontends. Target passes have one source owner in
 Triton–Weft's `third_party/weft` subproject.
+The cache target also includes the installed Weft frontend and shared SDK's
+Python support identity. An importer, launcher or toolchain-support update must
+invalidate its compiled artifact, even if the native compiler library is unchanged.
+These relative file/stat facts are captured once per immutable installed process.
 
 Weft helper and Level phases use native TIRx attribute regions, rather than
 scheduled tensor blocks. Local buffers are allocated where declared, including

@@ -1,15 +1,36 @@
 """Resolve TileLang CPU requests through the shared SDK target discovery."""
 
 from dataclasses import asdict
+from functools import cache
+import hashlib
 import json
 import os
+from pathlib import Path
 
 from tilelang.backend.target import register_target_normalizer
 from tvm.target import Target
 
 
-def target(profile="native", *, toolchain=None, backend_options=None):
+def _frontend_identity():
+    root = Path(__file__).parent
+    files = {}
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if relative.parts[0] == "kernels":
+            continue
+        stat = path.stat()
+        files[str(relative)] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+@cache
+def compilation_identity():
     from weft_core.compiler import identity
+
+    return json.dumps({"compiler": identity(), "frontend": _frontend_identity()}, sort_keys=True)
+
+
+def target(profile="native", *, toolchain=None, backend_options=None):
     from weft_core.cpu import target as cpu_target
     from weft_core.toolchain import Toolchain
 
@@ -23,7 +44,7 @@ def target(profile="native", *, toolchain=None, backend_options=None):
             **values,
             "toolchain": json.dumps(configuration, sort_keys=True),
             "options": json.dumps(backend_options or {}, sort_keys=True),
-            "core": json.dumps(identity(), sort_keys=True),
+            "core": compilation_identity(),
         }
     )
 
@@ -54,7 +75,6 @@ def normalize(value):
 
 
 def target_from_descriptor(value, *, toolchain=None, backend_options=None):
-    from weft_core.compiler import identity
     from weft_core.toolchain import Toolchain
 
     values = asdict(value)
@@ -65,7 +85,7 @@ def target_from_descriptor(value, *, toolchain=None, backend_options=None):
             **values,
             "toolchain": json.dumps(Toolchain.resolve(toolchain or {}, value).to_dict(), sort_keys=True),
             "options": json.dumps(backend_options or {}, sort_keys=True),
-            "core": json.dumps(identity(), sort_keys=True),
+            "core": compilation_identity(),
         }
     )
 

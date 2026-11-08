@@ -17,12 +17,12 @@ from weft_core.options import WeftOptions, X86Options
 from weft_core.toolchain import Toolchain
 
 from .frontend import import_module
-from .target import descriptor
+from .target import compilation_identity, descriptor
 
 
 def compile_artifact(mod, context, *, params, runtime_only, enable_device_compile):
-    if json.loads(str(context.target.attrs["core"])) != compiler.identity():
-        raise RuntimeError("the resolved TileLang target requires a different weft-core compiler build")
+    if str(context.target.attrs["core"]) != compilation_identity():
+        raise RuntimeError("the resolved TileLang target requires a different frontend or weft-core compiler build")
     canonical, imported = import_module(mod)
     target = descriptor(context.target)
     option_type = X86Options if target.arch == "x86_64" else WeftOptions

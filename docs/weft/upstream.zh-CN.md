@@ -26,6 +26,9 @@ TIRx 在 tile 展开前保留 Encoding、Level、state/stage 和数值边界；i
 `libweft_compiler` 通过 C handle 持有自己的 MLIR context/module，TVM 与 MLIR
 的 C++ 对象不跨 ABI。共同 native runtime 与编译器和两种前端相互独立。
 目标 passes 的唯一源码归属为 Triton–Weft 的 `third_party/weft` 子项目。
+缓存 target 也包含安装后 Weft 前端及共享 SDK 的 Python 支持代码身份。即使原生编译库
+不变，importer、launcher 或工具链支持代码更新也使对应产物失效。相对路径和文件 stat
+在安装包不可变的进程中采集一次并复用。
 
 Weft helper 和 Level 的三个阶段使用原生 TIRx 属性区域。局部 buffer 在声明处
 分配，包括 helper 和初始化区域内部。importer 从有类型的语句及 View 操作建立
