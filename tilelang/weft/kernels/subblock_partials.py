@@ -645,6 +645,89 @@ def ternary_planes(M, K):
 
 
 @T.macro
+def ternary_window_partial(packed, activation, table, partial, width, payload, first_input, digits):
+    """Accumulate one stored byte window before its exact integer reduction."""
+    T.fill(partial, 0)
+    for digit in T.unroll(digits):
+        power = T.cast(table[digit], "uint8")
+        for lane in T.Parallel(width):
+            k = T.cast(lane, "uint16")
+            wrapped = T.cast(packed[T.uint16(payload) + k], "uint8") * power
+            code = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8")
+            coordinate = T.uint16(first_input) + T.cast(digit, "uint16") * T.uint16(width) + k
+            partial[lane] += T.cast(activation[coordinate], "int16") * T.cast(code, "int16")
+
+
+@T.macro(noinline=True)
+def ternary_window_row(weights, values, powers, K):
+    """Keep the three radix payload windows and the stored activation sums."""
+    total = T.alloc_var("float32", init=0)
+    table = T.load(powers)
+    with T.level.blocks(K, extent=256) as block:
+        w, x = T.load(weights[block]), T.load(values[block])
+        q, high, activation, d, ds, sums = w.q, w.qh, x.q, w.d, x.ds, x.bsum
+        first = T.alloc_local((32,), "int16")
+        second = T.alloc_local((16,), "int16")
+        third = T.alloc_local((4,), "int16")
+        ternary_window_partial(q, activation, table, first, 32, 0, 0, 5)
+        ternary_window_partial(q, activation, table, second, 16, 32, 160, 5)
+        ternary_window_partial(high, activation, table, third, 4, 0, 240, 4)
+        wide_first = T.alloc_local((32,), "int32")
+        wide_second = T.alloc_local((16,), "int32")
+        wide_third = T.alloc_local((4,), "int32")
+        wide_sums = T.alloc_local((16,), "int32")
+        for lane in T.Parallel(32):
+            wide_first[lane] = T.cast(first[lane], "int32")
+        for lane in T.Parallel(16):
+            wide_second[lane] = T.cast(second[lane], "int32")
+            wide_sums[lane] = T.cast(sums[lane], "int32")
+        for lane in T.Parallel(4):
+            wide_third[lane] = T.cast(third[lane], "int32")
+        a, b = T.alloc_local((1,), "int32"), T.alloc_local((1,), "int32")
+        c, correction = T.alloc_local((1,), "int32"), T.alloc_local((1,), "int32")
+        T.reduce_sum(wide_first, a, dim=0)
+        T.reduce_sum(wide_second, b, dim=0)
+        T.reduce_sum(wide_third, c, dim=0)
+        T.reduce_sum(wide_sums, correction, dim=0)
+        integer = a[0] + b[0] + c[0] - correction[0]
+        total += T.cast(integer, "float32") * (T.cast(d[()], "float32") * ds[()])
+    return total
+
+
+@tilelang.jit(target="weft")
+def ternary_window_projection(M, N, K, extreme_policy="first", inverse_policy="direct"):
+    """Complete TQ1 projection using bounded radix partials in each native row."""
+    assert M > 0 and N > 0 and K > 0 and K % 256 == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // 256 * 54), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Powers: T.Tensor((5,), "uint32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Powers": "input", "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=F.TQ1_0, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        powers = T.view(Powers, shape=(5,), axes=("power",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, "Q8_K", 256,
+                          extreme_policy, inverse_policy, "rne", 64)
+            for m in T.serial(M):
+                for n in T.serial(N):
+                    value = ternary_window_row(weights[n, :], prepared[m, :], powers, K)
+                    result = T.alloc_local((1,), "float32")
+                    result[0] = value
+                    T.copy(result, output[m, n : n + 1])
+
+    return main
+
+
+@T.macro
 def ternary_rows(weights, values, output, Powers, M, K, format, rows, records, axis):
     packed = format == "TQ1_0"
     with T.level.rows(M, group=rows, axis=axis) as row:
