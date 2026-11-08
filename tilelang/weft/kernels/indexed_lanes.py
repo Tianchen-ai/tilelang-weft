@@ -91,9 +91,11 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
 
 
 @tilelang.jit(target="weft")
-def scaled_entries(M, K, format="IQ3_S"):
+def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
     """Contract each codebook scale group before applying its integer scale."""
     assert format in ("IQ2_S", "IQ3_S", "IQ4_XS") and M > 0 and K > 0 and K % 256 == 0
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
     encoding = getattr(F, format)
     payload = 8 if format == "IQ2_S" else 4
     entries = 2 if format == "IQ2_S" else 8
@@ -117,8 +119,11 @@ def scaled_entries(M, K, format="IQ3_S"):
         else:
             grid = T.view(Grid, shape=(table_entries, payload), encoding=table_encoding,
                           axes=("entry", "payload"), abi=True)
-        with T.Kernel(1, cpu_num_threads=1):
-            scaled_entries_rows(weights, values, output, grid, M, K, format, groups, entries, payload, "m")
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            first = program * cohort
+            scaled_entries_rows(weights[first : first + cohort, :], values,
+                                output[first : first + cohort], grid,
+                                cohort, K, format, groups, entries, payload, "m")
 
     return main
 
@@ -230,9 +235,11 @@ def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
 
 
 @tilelang.jit(target="weft")
-def xxs_subgroups(M, K):
+def xxs_subgroups(M, K, rows_per_program=None):
     """Keep two scale groups and their codebook/sign rows in each 64-term Level."""
     assert M > 0 and K > 0 and K % 256 == 0
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
 
     @T.prim_func
     def main(
@@ -248,8 +255,10 @@ def xxs_subgroups(M, K):
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         grid = T.view(Grid, shape=(256, 4), encoding=F.I8X4, axes=("code", "payload"), abi=True)
         signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "sign_payload"), abi=True)
-        with T.Kernel(1, cpu_num_threads=1):
-            xxs_subgroups_rows(weights, values, output, grid, signs, M, K, "m")
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            first = program * cohort
+            xxs_subgroups_rows(weights[first : first + cohort, :], values,
+                               output[first : first + cohort], grid, signs, cohort, K, "m")
 
     return main
 
@@ -484,7 +493,7 @@ def indexed_rows(weights, values, output, grid, signs, M, K, format, groups_per_
 
 
 @tilelang.jit(target="weft")
-def vec_dot(M, K, format="IQ1_S", groups_per_step=1):
+def vec_dot(M, K, format="IQ1_S", groups_per_step=1, rows_per_program=None):
     """Keep exact integer groups separate from each record's float scaling.
 
     The sixteen-element tile expresses numerical parallelism; it does not
@@ -493,6 +502,8 @@ def vec_dot(M, K, format="IQ1_S", groups_per_step=1):
     """
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S")
     assert M > 0 and K > 0 and K % 256 == 0
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
     entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256, "IQ2_S": 1024}[format]
@@ -517,8 +528,11 @@ def vec_dot(M, K, format="IQ1_S", groups_per_step=1):
             signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign_entry", "sign_payload"), abi=True)
         else:
             signs = grid
-        with T.Kernel(1, cpu_num_threads=1):
-            indexed_rows(weights, values, output, grid, signs, M, K, format, groups_per_step, signed_table, groups, "m")
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            first = program * cohort
+            indexed_rows(weights[first : first + cohort, :], values,
+                         output[first : first + cohort], grid, signs, cohort, K,
+                         format, groups_per_step, signed_table, groups, "m")
 
     return main
 

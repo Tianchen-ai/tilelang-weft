@@ -127,6 +127,13 @@ the author's simultaneously exposed scale groups; it does not select an ISA.
 `q6_planes` also accepts multiple output rows. Its serial row loop retains the
 same plane/lane partials and per-record scaling for each row, without exposing
 all rows as simultaneously resident values.
+Its `rows_per_program` optionally partitions those rows into independent CPU
+programs. Each retains the same plane/lane calculation, with the full native
+grid covering every row. The default keeps all rows in one program.
+`subblock_partials.block32` and the indexed `vec_dot`, `scaled_entries` and
+`xxs_subgroups` factories expose the same row-cohort choice. The explicit grid
+changes the program's traversal boundary, while each factory reuses its existing
+row macro and preserves input preparation and numerical grouping.
 
 For RISC-V, `row_partials.affine_groups` expresses Q2_K/Q4_K/Q5_K scale groups
 as Level subtiles, keeping the minimum correction in a separate integer branch.

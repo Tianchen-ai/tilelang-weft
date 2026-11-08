@@ -211,6 +211,13 @@ payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权�
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
 公开性能结果为 **测试中 / Under evaluation**。
 
+`row_partials.q6_planes` 的 `rows_per_program` 可将多行计算显式分成独立 CPU
+program，每个 program 保留相同的 plane/lane 数值组织，完整 native grid 覆盖全部行。
+默认仍由一个 program 遍历所有行。
+`subblock_partials.block32` 以及 indexed `vec_dot`、`scaled_entries`、
+`xxs_subgroups` 提供相同的行 cohort 选择。显式 grid 改变 program 的遍历边界，
+每个 factory 仍复用原行宏，保留输入准备和数值分组。
+
 短 record 量化器支持 `records=1/2/4/8`。一个 cohort 显式区分 record 与 payload
 轴，每条 record 的极值和编码 scale 只计算一次，其量化 lanes 共享 inverse。
 公开 Tensor shape 和序列化 Encoding 保持不变。整数 field 反量化复用同一有限

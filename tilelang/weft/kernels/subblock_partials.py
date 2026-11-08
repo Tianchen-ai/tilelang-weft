@@ -260,11 +260,13 @@ def block32_rows(weights, values, output, Codebook, Scale, M, K, format, records
 
 
 @tilelang.jit(target="weft")
-def block32(M, K, format="Q5_0", records=2, partials=8):
+def block32(M, K, format="Q5_0", records=2, partials=8, rows_per_program=None):
     """Choose explicit scalar block dots or independent grouped partials."""
     assert M > 0 and format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "MXFP4")
     assert records in (1, 2) and K > 0 and K % (32 * records) == 0
     assert partials in (1, 8)
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
     encoding = getattr(F, format)
     affine = format in ("Q4_1", "Q5_1")
     partner = F.Q8_1 if affine else F.Q8_0
@@ -284,9 +286,11 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
         weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
         values = T.view(Activation, shape=(K,), encoding=partner, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
-        with T.Kernel(1, cpu_num_threads=1):
-            block32_rows(weights, values, output, Codebook, Scale,
-                         M, K, format, records, partials, affine, lookup)
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            first = program * cohort
+            block32_rows(weights[first : first + cohort, :], values,
+                         output[first : first + cohort], Codebook, Scale,
+                         cohort, K, format, records, partials, affine, lookup)
 
     return main
 

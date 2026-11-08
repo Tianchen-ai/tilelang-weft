@@ -742,11 +742,13 @@ def scaled_projection(M, N, K, format="Q6_K", organization="planes", lanes=32,
 
 
 @tilelang.jit(target="weft")
-def q6_planes(M, K, rows=1, lanes=64, planes=4):
+def q6_planes(M, K, rows=1, lanes=64, planes=4, rows_per_program=None):
     """Retain explicitly scaled signed products across the encoded row."""
     assert M > 0 and rows == 1
     assert lanes in (32, 64, 128) and planes >= 2 and 256 % (lanes * planes) == 0
     assert K > 0 and K % 256 == 0
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
 
     @T.prim_func
     def main(
@@ -758,8 +760,9 @@ def q6_planes(M, K, rows=1, lanes=64, planes=4):
         weights = T.view(Weights, shape=(M, K), encoding=F.Q6_K, axes=("m", "k"), abi=True)
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
-        with T.Kernel(1, cpu_num_threads=1):
-            for row in T.serial(M):
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            for local_row in T.serial(cohort):
+                row = program * cohort + local_row
                 total = T.alloc_local((lanes,), "float32")
                 T.fill(total, 0)
                 result = T.alloc_local((1,), "float32")
