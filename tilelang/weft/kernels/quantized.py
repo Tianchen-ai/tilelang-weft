@@ -125,9 +125,10 @@ def field_windows(M, K, format="Q4_K", chunk=None):
     assert format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ2_0")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
-    group_width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
-    width = group_width if chunk is None else chunk
-    assert width in (8, 16, 32) and group_width % width == 0
+    group_width = (elements if format in ("Q1_0", "TQ2_0") else
+                   16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32)
+    width = min(group_width, 32) if chunk is None else chunk
+    assert width in (8, 16, 32, 64, 128, 256) and group_width % width == 0
     record_bytes = encoding.schema.storage_bits // 8
     assert M > 0 and K > 0 and K % elements == 0
 

@@ -95,6 +95,10 @@ organization exposes the Encoding's field relation without creating a separate
 decoded record array or changing the caller's stored layout.
 `chunk` can subdivide that scale group into 8/16/32-element source windows.
 An entire short record uses its existing record Level directly.
+Q1 and TQ2 also accept their complete 128/256-element record as a window. Their
+signed codes stay in I8 until floating conversion. Affine group windows compute
+their scalar scale and minimum coefficients before the payload calculation and
+reuse them across the window.
 For Q2_K/Q3_K/Q6_K the window program converts the scalar group scale before
 the payload multiplication. The author makes that numerical organization
 explicit, allowing one scalar scale conversion to serve the whole window.

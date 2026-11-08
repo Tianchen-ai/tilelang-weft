@@ -86,6 +86,8 @@ IQ1_M 的 half-bit 查表与 IQ2_S 的 packed signs 仍是显式源码输入及�
 不先建立完整的解码 record 数组。
 `quantized.field_windows(chunk=...)` 可将 scale group 细分成 8/16/32 元素的
 作者窗口；完整短 record 直接复用已有 record Level。
+Q1、TQ2 也支持完整 128/256 元素 record 窗口，有符号码在转换为浮点前保持 I8。
+仿射分组窗口先计算标量 scale 与 minimum 系数，再在整个 payload 窗口中复用。
 `packed.projection` 使用显式整数 block partial 和 F32 scale 更新。
 Q4_K、Q6_K 通过共享 `partials` 宏保留整数 partial 和独立的
 scale/correction 支路。`composition.packed_projection` 的显式解码到 workspace
