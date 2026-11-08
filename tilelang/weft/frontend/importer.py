@@ -788,6 +788,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             if owner not in self.locals:
                 return
             axes = self.local_axes_for(node.buffer)
+            # TileLang can wrap a scalar local in a unit-sized Buffer. Its
+            # storage index does not introduce a numerical Parallel axis.
+            if not axes:
+                return
             record = getattr(self, "field_record_extents", {}).get(node.buffer)
             for dimension, (index, extent) in enumerate(zip(node.indices, node.buffer.shape)):
                 index = tirx.stmt_functor.substitute(index, definitions)
