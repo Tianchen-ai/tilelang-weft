@@ -168,6 +168,10 @@ Level 和 contraction 主链交由目标编译器选择物理向量布局。
 factory 均公开已有 activation extreme/inverse 策略，复用行程序时保持 workload
 要求的量化合同。
 
+`row_partials.staged_projection` 在有界的权重列和 activation 行 stage 中复用同一组
+affine 或 signed 分组行宏，覆盖五种 K 格式，无需解码面板或持久重排。
+`batch_rows` 与 `staged_columns` 限定作者的复用范围，Q8_K 准备仍保留在完整 projection 内。
+
 `codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
 Level 窗口中以标量复用 IQ4_XS/NVFP4 scale metadata，再索引读取保存的表。
 `ternary_planes` 以独立的 digit/payload 轴复用 TQ1 的 32-byte、16-byte 与四 byte payload，

@@ -707,6 +707,48 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
 
 
 @tilelang.jit(target="weft")
+def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
+                      extreme_policy="first", inverse_policy="reciprocal"):
+    """Reuse natural K-format stages with the existing grouped row programs."""
+    assert format in ("Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K")
+    assert min(M, N, K, batch_rows, staged_columns) > 0
+    assert M % batch_rows == N % staged_columns == K % 256 == 0
+    encoding = getattr(F, format)
+    group_size = 16 if format == "Q2_K" else 32
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // 256 * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, "Q8_K", 256,
+                          extreme_policy, inverse_policy, "rne", 256)
+            with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
+                weight_stage = T.stage(T.load(weights[nc, :]))
+                with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
+                    activation_stage = T.stage(T.load(prepared[mc, :]))
+                    with T.level.rows(mc, group=1) as row:
+                        values = activation_stage[row, :][0, :]
+                        destination = output[row, nc][0, :]
+                        if format in ("Q2_K", "Q4_K", "Q5_K"):
+                            affine_group_rows(weight_stage, values, destination, nc, K,
+                                              format, group_size, 256 // group_size, "n")
+                        else:
+                            scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def scaled_projection(M, N, K, format="Q6_K", organization="planes", lanes=32,
                       extreme_policy="first", inverse_policy="reciprocal"):
     """Reuse the author's signed row partials after in-call Q8_K preparation."""

@@ -241,6 +241,12 @@ Both scale and indexed projection factories expose the existing activation
 extreme and inverse policies, so a workload keeps its required quantization
 contract while reusing a row program.
 
+`row_partials.staged_projection` reuses the same affine or signed grouped row
+macros across bounded weight-column and activation-row stages. It covers the
+five K formats without a decoded panel or persistent repacking. The public
+`batch_rows` and `staged_columns` bound the author's reuse, and Q8_K preparation
+remains inside the complete projection.
+
 Grouped affine short records retain the weight scale/minimum and activation scale/sum as
 two-element metadata tiles. Their conversion and multiplication are expressed
 in one `T.Parallel(2)` operation before the independent product and correction
