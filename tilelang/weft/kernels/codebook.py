@@ -36,6 +36,8 @@ def metadata_windows(M, K, format="NVFP4"):
         weights = T.view(Weights, shape=(M * K,), encoding=encoding, axes=("k",))
         output = T.view(Output, shape=(M * K,), axes=("k",))
         codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        if format == "NVFP4":
+            scale_table = T.view(Scale, shape=(256,), axes=("exponent",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             table = T.stage(T.load(codebook))
             with T.level.blocks(M * K, extent=elements) as block:
@@ -43,18 +45,19 @@ def metadata_windows(M, K, format="NVFP4"):
                 if format != "NVFP4":
                     block_scale = T.cast(record.d[()], "float32")
                 if format == "IQ4_XS":
-                    high = T.cast(record.scales_h[()], "uint16")
+                    high = T.cast(record.scales_h[()], "uint32")
                 entry = T.alloc_var("uint32", init=0)
                 with T.level.subtiles(block, extent=width) as window:
                     result = T.alloc_local((width,), "float32")
                     if format == "IQ4_XS":
-                        low = T.cast(record.scales_l[entry // T.uint32(2)], "uint8")
-                        lower = low >> T.cast(entry % T.uint32(2) * T.uint32(4), "uint8") & T.uint8(15)
-                        upper = T.cast(high >> T.cast(entry * T.uint32(2), "uint16") & T.uint16(3), "uint8")
-                        scale = block_scale * T.cast(T.cast(lower | upper << T.uint8(4), "int8") - T.int8(32), "float32")
+                        low = T.cast(record.scales_l[entry // T.uint32(2)], "uint32")
+                        lower = low >> (entry % T.uint32(2) * T.uint32(4)) & T.uint32(15)
+                        upper = high >> (entry * T.uint32(2)) & T.uint32(3)
+                        scale = block_scale * T.cast(T.cast(lower | upper << T.uint32(4), "int32") - T.int32(32), "float32")
                     else:
-                        exponent = T.load(record.d, at=window)
-                        scale = Scale[T.cast(exponent[()], "uint8")]
+                        exponent = T.cast(record.d[entry], "uint32")
+                        coefficient = T.load(scale_table, at=exponent, bounds="in_bounds")
+                        scale = coefficient[()]
                     codes = T.load(record.q, at=window)
                     values = T.load(table, at=codes, bounds="in_bounds")
                     for k in T.Parallel(width):
