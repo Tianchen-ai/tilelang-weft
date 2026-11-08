@@ -284,12 +284,14 @@ def ternary_digits(record, result, rows, width=256, offset=0, single=False):
     """Positive radix-3 digits with an explicit byte-width product."""
     q, high = record.q, record.qh
     for r, lane in T.Parallel(rows, width):
-        k = T.int32(offset) + T.cast(lane, "int32")
-        index = T.if_then_else(k < 160, k % 32, 32 + k % 16)
-        packed = T.if_then_else(k < 240, q[(index,) if single else (r, index)],
-                               high[(k % 4,) if single else (r, k % 4)])
-        digit = T.if_then_else(k < 160, k // 32,
-                              T.if_then_else(k < 240, (k - 160) // 16, (k - 240) // 4))
+        k = T.uint16(offset) + T.cast(lane, "uint16")
+        index = T.if_then_else(k < T.uint16(160), k % T.uint16(32),
+                              T.uint16(32) + k % T.uint16(16))
+        packed = T.if_then_else(k < T.uint16(240), q[(index,) if single else (r, index)],
+                               high[(k % T.uint16(4),) if single else (r, k % T.uint16(4))])
+        digit = T.if_then_else(k < T.uint16(160), k // T.uint16(32),
+                              T.if_then_else(k < T.uint16(240), (k - T.uint16(160)) // T.uint16(16),
+                                             (k - T.uint16(240)) // T.uint16(4)))
         power = T.if_then_else(digit == 0, T.uint8(1),
                               T.if_then_else(digit == 1, T.uint8(3),
                                              T.if_then_else(digit == 2, T.uint8(9),
