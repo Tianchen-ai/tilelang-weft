@@ -28,6 +28,8 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
             q, d = w.q, w.d
             if format == "IQ4_XS":
                 scale_low, scale_high = w.scales_l, w.scales_h
+            elif format == "IQ2_XS":
+                scales = w.scales
             else:
                 high, signs, scales = w.qh, w.signs, w.scales
             activation, ds = x.q, x.ds
@@ -47,7 +49,7 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                     window_index += T.uint16(1)
             else:
                 integer = T.alloc_var("int32", init=0)
-                with T.level.subtiles(block, extent=64) as window:
+                with T.level.subtiles(block, extent=256 if format == "IQ2_XS" else 64) as window:
                     if format == "IQ2_S":
                         upper_offset = window_index * T.uint16(2)
                         upper_word = T.cast(high[upper_offset], "uint16") | (T.cast(high[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
@@ -59,14 +61,25 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                         entry = window_index * T.uint16(64 // payload) + T.cast(g * entries + e, "uint16")
                         if format == "IQ2_S":
                             upper = (upper_word >> T.cast((g * entries + e) * 2, "uint16")) & T.uint16(3)
+                        elif format == "IQ2_XS":
+                            upper = T.uint16(0)
                         else:
                             upper = T.cast(high[entry], "uint16")
-                        index = T.cast(q[entry], "uint16") | (upper << T.uint16(8))
+                        index = (T.cast(q[entry], "uint16") & T.uint16(511)) if format == "IQ2_XS" else T.cast(q[entry], "uint16") | (upper << T.uint16(8))
                         indices[g, e, p] = index * T.uint16(payload) + T.cast(p, "uint16")
                     selected = T.load(grid.values, at=indices, bounds="in_bounds")
                     for g, e, p in T.Parallel(groups, entries, payload):
                         coordinate = window_index * T.uint16(64) + T.cast((g * entries + e) * payload + p, "uint16")
-                        sign = T.int8(1) - T.cast(signs[coordinate], "int8") * T.int8(2)
+                        if format == "IQ2_XS":
+                            entry = T.cast(g * entries + e, "uint16")
+                            packed_sign = T.cast(q[entry], "uint16") >> T.uint16(9)
+                            parity = packed_sign ^ (packed_sign >> T.uint16(4))
+                            parity ^= parity >> T.uint16(2)
+                            parity ^= parity >> T.uint16(1)
+                            full_sign = packed_sign | ((parity & T.uint16(1)) << T.uint16(7))
+                            sign = T.int8(1) - T.cast((full_sign >> T.cast(p, "uint16")) & T.uint16(1), "int8") * T.int8(2)
+                        else:
+                            sign = T.int8(1) - T.cast(signs[coordinate], "int8") * T.int8(2)
                         codes[g, e, p] = selected[g, e, p] * sign
                         inputs[g, e, p] = activation[coordinate]
                     products = T.alloc_local((groups,), "int32")
@@ -76,6 +89,8 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                         group = window_index * T.uint16(groups) + T.cast(g, "uint16")
                         if format == "IQ2_S":
                             coefficient = (scale_word >> T.cast(g * 4, "uint16")) & T.uint16(15)
+                        elif format == "IQ2_XS":
+                            coefficient = (T.cast(scales[group // T.uint16(2)], "uint16") >> (group % T.uint16(2) * T.uint16(4))) & T.uint16(15)
                         else:
                             coefficient = T.cast(scales[group], "uint16")
                         factor = T.cast(coefficient * T.uint16(2) + T.uint16(1), "int32")
@@ -86,22 +101,22 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                     window_index += T.uint16(1)
                 total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
         result = T.alloc_local((1,), "float32")
-        result[0] = total * (0.125 if format == "IQ2_S" else 1.0)
+        result[0] = total * (0.125 if format in ("IQ2_S", "IQ2_XS") else 1.0)
         T.copy(result, output[row])
 
 
 @tilelang.jit(target="weft")
 def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
     """Contract each codebook scale group before applying its integer scale."""
-    assert format in ("IQ2_S", "IQ3_S", "IQ4_XS") and M > 0 and K > 0 and K % 256 == 0
+    assert format in ("IQ2_S", "IQ2_XS", "IQ3_S", "IQ4_XS") and M > 0 and K > 0 and K % 256 == 0
     cohort = M if rows_per_program is None else rows_per_program
     assert cohort > 0 and M % cohort == 0
     encoding = getattr(F, format)
-    payload = 8 if format == "IQ2_S" else 4
-    entries = 2 if format == "IQ2_S" else 8
-    groups = 4 if format == "IQ2_S" else 2
+    payload = 8 if format in ("IQ2_S", "IQ2_XS") else 4
+    entries = 2 if format in ("IQ2_S", "IQ2_XS") else 8
+    groups = 16 if format == "IQ2_XS" else 4 if format == "IQ2_S" else 2
     table_entries = 1024 if format == "IQ2_S" else 512
-    table_encoding = F.I8X8 if format == "IQ2_S" else F.I8X4
+    table_encoding = F.I8X8 if format in ("IQ2_S", "IQ2_XS") else F.I8X4
 
     @T.prim_func
     def main(
@@ -130,11 +145,14 @@ def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
 
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=16,
-                      groups_per_step=8, extreme_policy="first", inverse_policy="reciprocal"):
+                      groups_per_step=8, extreme_policy="first", inverse_policy="reciprocal",
+                      numerical_form="grouped"):
     """Reuse encoded column and activation-row stages around the existing dots."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
     assert min(M, N, K, batch_rows, staged_columns) > 0
     assert M % batch_rows == N % staged_columns == K % 256 == 0
+    assert numerical_form in ("grouped", "scaled")
+    assert numerical_form != "scaled" or format in ("IQ1_S", "IQ1_M")
     encoding = getattr(F, format)
     payload = 4 if format in ("IQ3_S", "IQ3_XXS") else 8
     table_entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256,
@@ -177,7 +195,10 @@ def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=1
                     with T.level.rows(mc, group=1) as row:
                         values = activation_stage[row, :][0, :]
                         destination = output[row, nc][0, :]
-                        if format == "IQ3_XXS":
+                        if numerical_form == "scaled":
+                            iq1_scaled_rows(weight_stage, values, destination, grid,
+                                            nc, K, format == "IQ1_M", "n")
+                        elif format == "IQ3_XXS":
                             xxs_subgroups_rows(weight_stage, values, destination, grid, signs, nc, K, "n")
                         elif format in ("IQ3_S", "IQ4_XS"):
                             scaled_entries_rows(weight_stage, values, destination, grid,
@@ -267,9 +288,9 @@ def xxs_subgroups(M, K, rows_per_program=None):
 def iq1_planes(M, K, groups_per_step=8, format="IQ1_S"):
     """Expose independent record groups, codebook entries and payload lanes."""
     assert M > 0 and K > 0 and K % 256 == 0
-    assert groups_per_step in (1, 2, 4, 8)
     assert format in ("IQ1_S", "IQ1_M")
     medium = format == "IQ1_M"
+    assert groups_per_step in (1, 2, 4, 8, 16) and (medium or groups_per_step <= 8)
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
     groups, entries = (16, 2) if medium else (8, 4)
@@ -304,6 +325,90 @@ def iq1_planes(M, K, groups_per_step=8, format="IQ1_S"):
             grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
             with T.Kernel(1, cpu_num_threads=1):
                 iq1_plane_rows(weights, values, output, grid, 0, M, K, groups_per_step, medium, groups, entries)
+    return main
+
+
+@T.macro
+def iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis):
+    """Fold the codebook's eighth-unit offset into exact I16 products."""
+    with T.level.rows(M, group=1, axis=axis) as row:
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=256) as block:
+            w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+            q, high, activation, ds = w.q, w.qh, x.q, x.ds
+            if medium:
+                scales = w.scales
+                sc0 = T.cast(scales[0], "uint16") | (T.cast(scales[1], "uint16") << T.uint16(8))
+                sc1 = T.cast(scales[2], "uint16") | (T.cast(scales[3], "uint16") << T.uint16(8))
+                sc2 = T.cast(scales[4], "uint16") | (T.cast(scales[5], "uint16") << T.uint16(8))
+                sc3 = T.cast(scales[6], "uint16") | (T.cast(scales[7], "uint16") << T.uint16(8))
+                bits = (sc0 >> T.uint16(12)) | ((sc1 >> T.uint16(8)) & T.uint16(240))
+                bits |= ((sc2 >> T.uint16(4)) & T.uint16(3840)) | (sc3 & T.uint16(61440))
+                scale_value = T.cast(T.reinterpret(bits, "float16"), "float32")
+            else:
+                d = w.d
+                scale_value = T.cast(d[()], "float32")
+            indices = T.alloc_local((32, 8), "uint16")
+            for entry, payload in T.Parallel(32, 8):
+                group = T.cast(entry, "uint16") // T.uint16(2 if medium else 4)
+                shift = (T.cast(entry, "uint16") % T.uint16(2 if medium else 4)) * T.uint16(4 if medium else 3)
+                upper = (T.cast(high[group], "uint16") >> shift) & T.uint16(7)
+                index = T.cast(q[entry], "uint16") | (upper << T.uint16(8))
+                indices[entry, payload] = index * T.uint16(8) + T.cast(payload, "uint16")
+            selected = T.load(grid.values, at=indices, bounds="in_bounds")
+            scaled = T.alloc_local((32, 8), "int32")
+            for entry, payload in T.Parallel(32, 8):
+                e = T.cast(entry, "uint16")
+                group = e // T.uint16(2 if medium else 4)
+                word = T.cast(high[group], "uint16")
+                if medium:
+                    scale_word = sc0 if e < T.uint16(8) else sc1 if e < T.uint16(16) else sc2 if e < T.uint16(24) else sc3
+                    factor = T.cast(((scale_word >> (group % T.uint16(4) * T.uint16(3))) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int16")
+                    delta_bit = (word >> (T.uint16(3) + e % T.uint16(2) * T.uint16(4))) & T.uint16(1)
+                    delta = T.int8(1) - T.cast(delta_bit, "int8") * T.int8(2)
+                else:
+                    factor = T.cast(((word >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int16")
+                    delta = T.cast((T.cast(word, "int16") >> T.int16(15)) | T.int16(1), "int8")
+                code = T.cast(T.cast(selected[entry, payload], "int16") + T.int16(1), "uint2")
+                numerator = (T.cast(code, "int8") - T.int8(1)) * T.int8(8) + delta
+                product = T.cast(activation[e * T.uint16(8) + T.cast(payload, "uint16")], "int16") * T.cast(numerator, "int16")
+                scaled[entry, payload] = T.cast(product * factor, "int32")
+            linear = T.reshape(scaled, (256,))
+            integer = T.alloc_local((), "int32")
+            T.reduce_sum(linear, integer, dim=0)
+            total += (scale_value * ds[()]) * T.cast(integer[()], "float32")
+        result = T.alloc_local((1,), "float32")
+        result[0] = total * 0.125
+        T.copy(result, output[row])
+
+
+@tilelang.jit(target="weft")
+def iq1_scaled(M, K, format="IQ1_M", rows_per_program=None):
+    """Use the IQ1 alphabet {-1,0,1} and one scaled integer sum per record."""
+    assert format in ("IQ1_S", "IQ1_M") and min(M, K) > 0 and K % 256 == 0
+    cohort = M if rows_per_program is None else rows_per_program
+    assert cohort > 0 and M % cohort == 0
+    encoding = getattr(F, format)
+    record_bytes = encoding.schema.storage_bits // 8
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((M, K // 256 * record_bytes), "uint8"),
+        Activation: T.Tensor((K // 256 * 292,), "uint8"),
+        Output: T.Tensor((M,), "float32"),
+        Grid: T.Tensor((16384,), "int8"),
+    ):
+        T.func_attr({"tir.noalias": True})
+        weights = T.view(Weights, shape=(M, K), encoding=encoding, axes=("m", "k"), abi=True)
+        values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
+        output = T.view(Output, shape=(M,), axes=("m",), abi=True)
+        grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
+        with T.Kernel(M // cohort, cpu_num_threads=1) as program:
+            first = program * cohort
+            iq1_scaled_rows(weights[first : first + cohort, :], values,
+                            output[first : first + cohort], grid, cohort, K,
+                            format == "IQ1_M", "m")
+
     return main
 
 
@@ -537,11 +642,19 @@ def vec_dot(M, K, format="IQ1_S", groups_per_step=1, rows_per_program=None):
     return main
 
 
+@T.macro(noinline=True)
+def iq1_scaled_batch(weights, values, output, grid, M, K, medium, axis):
+    iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis)
+
+
 @tilelang.jit(target="weft")
-def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first"):
+def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first",
+               numerical_form="grouped"):
     """Prepare Q8_K once and reuse the record-local indexed partials."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S")
     assert min(M, N, K) > 0 and K % 256 == 0
+    assert numerical_form in ("grouped", "scaled")
+    assert numerical_form != "scaled" or format in ("IQ1_S", "IQ1_M")
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
     entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256, "IQ2_S": 1024}[format]
@@ -571,8 +684,12 @@ def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, prepared, M, K, "Q8_K", 256, extreme_policy, "direct", "rne", 64)
             for row in T.serial(M):
-                indexed_rows(weights, prepared[row, :], output[row, :], grid, signs,
-                             N, K, format, groups_per_step, signed_table, groups, "n")
+                if numerical_form == "scaled":
+                    iq1_scaled_batch(weights, prepared[row, :], output[row, :], grid,
+                                     N, K, format == "IQ1_M", "n")
+                else:
+                    indexed_rows(weights, prepared[row, :], output[row, :], grid, signs,
+                                 N, K, format, groups_per_step, signed_table, groups, "n")
 
     return main
 
@@ -580,13 +697,13 @@ def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first
 @tilelang.jit(target="weft")
 def entry_projection(M, N, K, format="IQ3_S", extreme_policy="first", inverse_policy="reciprocal"):
     """Preserve bounded entry/payload Levels through a complete projection."""
-    assert format in ("IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
+    assert format in ("IQ2_S", "IQ2_XS", "IQ3_S", "IQ3_XXS", "IQ4_XS")
     assert min(M, N, K) > 0 and K % 256 == 0
     encoding = getattr(F, format)
-    payload = 8 if format == "IQ2_S" else 4
-    entries = 2 if format == "IQ2_S" else 8
-    groups = 4 if format == "IQ2_S" else 2
-    table_entries = {"IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 16}[format]
+    payload = 8 if format in ("IQ2_S", "IQ2_XS") else 4
+    entries = 2 if format in ("IQ2_S", "IQ2_XS") else 8
+    groups = 16 if format == "IQ2_XS" else 4 if format == "IQ2_S" else 2
+    table_entries = {"IQ2_S": 1024, "IQ2_XS": 512, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 16}[format]
     table_encoding = F.I8X8 if payload == 8 else F.I8X4
     weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
 

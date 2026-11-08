@@ -96,6 +96,7 @@ def k_layout_projection(M, N, K, format="Q4_K", columns=128):
 
 @tilelang.jit(target="weft")
 def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="matrix"):
+    assert generation in (1, 2)
     if generation == 1:
         weight = L.IMEQ4Affine_I[16] if affine else L.IMEQ4Centered_I[16]
         activation = L.IMEQ8_I[tile_rows]

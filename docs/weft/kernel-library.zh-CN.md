@@ -56,6 +56,7 @@ kernel(a, b, c)
 `attention.rope(head_major=True)` 按 head 遍历连续的 pair 范围；默认先遍历 pair tile，
 再跨 head cohort 复用 staged 系数。两种组织复用同一 rotary 宏。
 `causal_attention` 以 typed View 保存 query stage，以 state 保留 online numerator。
+
 token/head cohort 参数限定每个 grid 实例的串行工作，不改变有效 causal KV 前缀。
 
 格式声明统一位于 `weft_core.formats.ggml`，`ggml_formats` 将其接入 TileLang；
@@ -186,6 +187,12 @@ factory 均公开已有 activation extreme/inverse 策略，复用行程序时�
 affine 或 signed 分组行宏，覆盖五种 K 格式，无需解码面板或持久重排。
 `batch_rows` 与 `staged_columns` 限定作者的复用范围，Q8_K 准备仍保留在完整 projection 内。
 
+Q3_K/Q6_K 还可通过显式 `rows`、`columns` 在 K 遍历中保留二维输出 tile。
+Q6_K 跨 activation 行 cohort 共享解码后的 64 元素窗口；Q3_K 共享 scale 表和
+显式 128 元素 plane/group tile。整数 scale 更新先于 record 浮点更新收口。
+这些是源码复用维度，与后端 SIMD 宽度和
+寄存器布局独立。
+
 `codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
 Level 窗口中以标量复用 IQ4_XS/NVFP4 scale metadata，再索引读取保存的表。
 `ternary_planes` 以独立的 digit/payload 轴复用 TQ1 的 32-byte、16-byte 与四 byte payload，
@@ -306,3 +313,9 @@ lane partial，与目标向量宽度独立。
 IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再以
 `T.reduce_dot` 完成各组有符号 numerator dot。Scale、delta、整数累加及最终
 八分之一系数仍是源码中显式的数值操作。
+
+`indexed_lanes.iq1_scaled` 将 IQ1 codebook 的 `{-1,0,1}` 字母表表达为八分之一
+单位的整数 numerator。有符号 I16 乘积先包含奇数 group scale，再扩宽为 I32，
+最后完成一次 record 求和。`projection` 和 `staged_projection` 通过
+`numerical_form="scaled"` 复用同一 `iq1_scaled_rows` 宏；Q8_K 准备仍计入调用。
+显式带偏置的 unsigned two-bit 表示将 codebook 范围边界传给共同整数分析，而非任意 I8。

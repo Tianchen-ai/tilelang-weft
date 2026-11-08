@@ -271,6 +271,13 @@ five K formats without a decoded panel or persistent repacking. The public
 `batch_rows` and `staged_columns` bound the author's reuse, and Q8_K preparation
 remains inside the complete projection.
 
+For Q3_K/Q6_K, explicit `rows` and `columns` also keep a two-dimensional
+output tile live across K. Q6_K shares decoded 64-term windows across the
+activation-row cohort; Q3_K shares its scale table and explicit 128-term
+plane/group tiles. Integer scale updates close before the record's floating
+update. These are source reuse dimensions,
+independent of the backend's SIMD width and register layout.
+
 Grouped affine short records retain the weight scale/minimum and activation scale/sum as
 two-element metadata tiles. Their conversion and multiplication are expressed
 in one `T.Parallel(2)` operation before the independent product and correction
@@ -388,3 +395,11 @@ IQ1_M's indexed row program reconstructs its F16 scale with ordinary
 `T.reinterpret`, then closes each signed numerator dot with `T.reduce_dot`.
 The scale, delta, integer accumulation and final eighth-unit factor remain
 explicit numerical operations in the source.
+
+`indexed_lanes.iq1_scaled` expresses the IQ1 codebook alphabet `{-1,0,1}` as
+an eighth-unit integer numerator. Its signed I16 product includes the odd
+group scale before widening to I32, followed by one record sum. The same
+`iq1_scaled_rows` macro is available in `projection` and `staged_projection`
+with `numerical_form="scaled"`; Q8_K preparation remains inside the call.
+An explicit biased unsigned two-bit representation preserves a bound on that
+codebook range for shared integer analysis, rather than treating it as arbitrary I8.
