@@ -126,7 +126,10 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                         q, xd, wd = w.q, x.d, w.d
                         if affine:
                             zero = w.zp
-                        integer = T.alloc_local((tile_rows, columns), "int32")
+                        if generation == 2 and affine:
+                            integer = T.alloc_local((tile_rows, columns), "int32")
+                        else:
+                            integer = T.state((tile_rows, columns), "int32", init=0)
                         if generation == 2 and affine:
                             xq = x.q
                             high = T.alloc_local((tile_rows, 32), "int4")
@@ -144,12 +147,15 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                                     high_product[m, n] * 16 + low_product[m, n] + T.cast(negative[m], "int32") * T.cast(zero[n], "int32")
                                 )
                         elif generation == 1:
-                            values = T.alloc_local((columns, 32), "int8")
-                            for n, k in T.Parallel(columns, 32):
-                                values[n, k] = T.cast(q[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
-                            T.gemm(x.q, values, integer, transpose_B=True, clear_accum=True, engine=engine)
+                            xq = x.q
+                            with T.level.subtiles(part, extent=8) as sub:
+                                left = T.load(xq, at=sub)
+                                right = T.load(q, at=sub)
+                                values = T.alloc_local((columns, 8), "int8")
+                                for n, k in T.Parallel(columns, 8):
+                                    values[n, k] = T.cast(right[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
+                                T.gemm(left, values, integer, transpose_B=True, engine=engine)
                         else:
-                            T.fill(integer, 0)
                             xq = x.q
                             with T.level.subtiles(part, extent=16) as sub:
                                 left = T.load(xq, at=sub)
@@ -159,7 +165,7 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                                 for m, n in T.Parallel(tile_rows, columns):
                                     integer[m, n] += partial[m, n]
                         for m, n in T.Parallel(tile_rows, columns):
-                            total[m, n] += (T.cast(integer[m, n], "float32") * T.cast(wd[n], "float32")) * xd[m]
+                            total[m, n] += (xd[m] * T.cast(wd[n], "float32")) * T.cast(integer[m, n], "float32")
                     T.copy(total, yv[row, col])
 
     return main
