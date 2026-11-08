@@ -45,7 +45,9 @@ their original supply relation for the shared physical compiler.
 
 Local Tensor indexing retains Canonical extraction coordinates, including
 Encoding fields. Explicit `T.load(table, at=indices, bounds="in_bounds")` remains
-the indexed-table operation. A state's birth Level determines its lifetime;
+the indexed-table operation. An integer scalar index returns a zero-dimensional
+local Value; an index tile retains its shape and axes. Both use the same
+Canonical lookup and explicit bounds contract. A state's birth Level determines its lifetime;
 its numerical lanes use that Level's coordinate only when their extent matches
 the declared partition. A 16-lane partial born in a one-row Level keeps its own
 numerical axis.

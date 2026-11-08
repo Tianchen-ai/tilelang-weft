@@ -43,6 +43,8 @@ helper，包括其显式 buffer 更新。非局部返回与显式 `noinline` 继
 
 局部 Tensor 索引保留 Canonical extraction 坐标，包括 Encoding 字段。
 显式 `T.load(table, at=indices, bounds="in_bounds")` 继续表示索引表读取。
+整数标量索引返回零维局部 Value；索引 tile 保留原 shape 与 axes。两者生成相同的
+Canonical lookup，并保留显式 bounds 合同。
 state 的诞生 Level 规定生命周期；只有数值长度与该 Level 的分区相同时，才使用其坐标。
 在单行 Level 内建立的 16-lane partial 保留自己的数值轴。
 

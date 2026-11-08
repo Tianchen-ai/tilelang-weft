@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 
-from tvm import tirx
+from tvm import DataType, tirx
 from tvm.script.ir_builder import tirx as I
 from tilelang.language.allocate import alloc_local
 from tilelang.language.utils import _normalize_annotations
@@ -209,11 +209,15 @@ def load(source, *, at=None, axis=-1, bounds=None):
             source_region, scalar = source.var, source.encoding
         else:
             source_region, scalar = to_tile_region(source), _get_buffer(source).dtype
-        indices = _get_buffer(at)
-        if not str(indices.dtype).startswith(("int", "uint")):
-            raise TypeError("indexed loads require an integer index tile")
-        output = alloc_local(retrieve_shape(at), scalar)
-        I.evaluate(intrinsic("load_value", to_tile_region(output), source_region, to_tile_region(at), bounds=bounds))
+        if type(at) is int:
+            at = tirx.IntImm("int64", at)
+        scalar_index = isinstance(at, tirx.PrimExpr) and not isinstance(at, tirx.BufferLoad)
+        indices = at if scalar_index else _get_buffer(at)
+        if not str(indices.dtype).startswith(("int", "uint")) or (scalar_index and DataType(indices.dtype).lanes != 1):
+            raise TypeError("indexed loads require an integer scalar or index tile")
+        output = alloc_local(() if scalar_index else retrieve_shape(at), scalar)
+        index_operand = at if scalar_index else to_tile_region(at)
+        I.evaluate(intrinsic("load_value", to_tile_region(output), source_region, index_operand, bounds=bounds))
         return output
     if bounds is not None:
         raise ValueError("bounds is only valid for indexed loads")

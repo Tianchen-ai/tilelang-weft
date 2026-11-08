@@ -306,8 +306,12 @@ class ModelOperations:
             return True
         if name == "tl.weft.load_value":
             if len(call.args) == 3:
-                indices = self.region(call.args[2])
-                index = self.read_region(indices, self.local_axes_for(indices[0]))
+                index_operand = call.args[2]
+                if isinstance(index_operand, tirx.PrimExpr) and str(index_operand.dtype) != "handle":
+                    index = self.expr(index_operand)
+                else:
+                    indices = self.region(index_operand)
+                    index = self.read_region(indices, self.local_axes_for(indices[0]))
                 bounds = string(call.annotations["bounds"])
                 if bounds != "in_bounds":
                     self.error("indexed loads require the in_bounds contract")
