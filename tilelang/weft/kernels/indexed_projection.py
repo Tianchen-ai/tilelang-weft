@@ -78,13 +78,18 @@ def decode_panel(record, panel, block_scale, correction, columns, format, grid, 
     codes = T.alloc_local((columns, entries, payload), "int8" if format in ("IQ1_S", "IQ1_M") else "int16")
     for c, e, p in T.Parallel(columns, entries, payload):
         if format in ("IQ1_S", "IQ1_M"):
-            code = T.cast(values[c, e, p], "int16")
+            code = T.cast(values[c, e, p], "int8")
         elif format in ("IQ2_XS", "IQ2_XXS", "IQ3_XXS"):
             code = T.cast(values[c, e, p], "int16") * T.cast(selected_signs[c, e, p], "int16")
         else:
             position = T.cast(e, "uint32") * T.uint32(payload) + T.cast(p, "uint32")
             code = T.cast(values[c, e, p], "int16") * (1 - T.cast(weight.signs[c, position], "int16") * 2)
-        codes[c, e, p] = code * factors[c, e]
+        if format in ("IQ1_S", "IQ1_M"):
+            # The panel stores the low eight bits of this product. Keep the
+            # same modular product at its stored width throughout decoding.
+            codes[c, e, p] = code * T.cast(factors[c, e], "int8")
+        else:
+            codes[c, e, p] = code * factors[c, e]
     T.copy(T.reshape(codes, (columns, 256)), panel)
     if format in ("IQ1_S", "IQ1_M"):
         for c, g in T.Parallel(columns, 8 if format == "IQ1_S" else 32):
