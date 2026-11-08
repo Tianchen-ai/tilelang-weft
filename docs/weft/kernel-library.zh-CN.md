@@ -106,12 +106,20 @@ RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
 `scaled_planes` 则在每个半 record 的 128 元素子 Level 中保留 `(4, 2, 16)` payload 组织，显式计算
 plane/group partial 及其整数 scale。两个 factory 表达不同的源码复用范围；
 存储 record 和最终逐 record 浮点更新保持一致。
-`q2_lanes` 和 `scaled_lanes` 在显式 `T.macro(noinline=True)` helper 中完成单行。
-多行遍历和完整 projection 调用相同 helper，每行的数值 lanes 在下一行开始前收口。
+`q2_lanes` 和 `scaled_lanes` 在共同数值 helper 中完成单行。多行遍历和完整 projection
+调用相同 helper，每行的数值 lanes 在下一行开始前收口。
 Q2 在每个 I16 lane 中累加四项精确缩放乘积，再 widen；Q3/Q6 保留 I32
-group-scaled lanes 和逐 record 的 F32 更新。这是作者声明的调用边界，后端不接管整个
-kernel。Q2 的 `scale_projection` 与采用 lanes 组织的 `scaled_projection`
-仍将 activation 量化计入原调用。
+group-scaled lanes 和逐 record 的 F32 更新。这是作者的数值结构。Q2 的
+`scale_projection` 与 `scaled_projection` 仍将 activation 量化计入原调用；完整行遍历
+使用 `T.macro(noinline=True)`，将准备阶段临时值的生命周期在计算批次前收口。
+每个 activation 行调用一次，不为每个输出元素增加一次函数调用。
+`staged_projection` 也可以在已声明的权重列 stage 和 activation 行 stage 中保留相同的
+lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩放 I32 lanes。
+默认的分组 plane 组织继续保留。短 record affine projection 将 minimum 和 product
+支路直接更新到 F32 state，显式形成两处局部 FMA 机会，减少合并 contribution 的临时值。
+`short_projection.staged_projection` 在准备完成后，通过一次不内联的 macro 调用执行整个
+staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结束准备阶段临时量的驻留，
+不为每个输出 tile 或 K record 增加函数调用。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
 索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`

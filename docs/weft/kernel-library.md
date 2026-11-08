@@ -144,14 +144,26 @@ and applies its integer scale before the record's floating-point update.
 inside a 128-element sub-Level for each half-record dot, with independent plane/group partials and their
 integer scales. These factories expose different source reuse scopes; neither
 changes the stored record or the final per-record floating update.
-`q2_lanes` and `scaled_lanes` close one row in an explicit
-`T.macro(noinline=True)` helper. Their row traversal and complete projection
-call that same helper, so a row's numerical lanes finish before the next row
-begins. Q2 retains four exact scaled products per I16 lane before widening;
+`q2_lanes` and `scaled_lanes` close each row in a common numerical helper.
+Their row traversal and complete projection call that same helper, so a row's
+numerical lanes finish before the next row begins. Q2 retains four exact scaled
+products per I16 lane before widening;
 Q3/Q6 retain I32 group-scaled lanes and the per-record F32 update. This is an
-author call boundary, not a target-selected replacement kernel. The Q2
-`scale_projection` and lane-organized `scaled_projection` include activation
-quantization in their original call.
+author numerical structure. The Q2 `scale_projection` and `scaled_projection`
+include activation quantization in their original call. Their complete row
+traversal uses `T.macro(noinline=True)` to close preparation's temporary values
+before the compute batch; there is one call per activation row, rather than one
+call per output element.
+`staged_projection` can retain the same lane organization inside its declared
+weight-column and activation-row stages. Q2 uses 16 exact I16 lanes; Q3/Q6
+choose 16 or 32 scaled I32 lanes. The default grouped-plane organization remains
+available. Short affine projections update their minimum and product branches
+directly into the F32 state, exposing two local FMA opportunities without an
+extra combined contribution temporary.
+`short_projection.staged_projection` puts its entire staged compute traversal
+in one non-inlined macro call after preparation, retaining the same Level tree
+and natural input ABI. The call closes preparation temporaries without adding
+a call at each output tile or K record.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.

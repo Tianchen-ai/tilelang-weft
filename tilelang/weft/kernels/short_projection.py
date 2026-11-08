@@ -6,6 +6,48 @@ from . import ggml_formats as F, layouts
 from .preparation import quantize_rows
 
 
+@T.macro(noinline=True)
+def staged_tiles(weights, prepared, output, table, scale_table, M, N, K,
+                 format, batch_rows, staged_columns, rows, columns, affine, lookup):
+    """Keep the staged compute batch independent of preparation temporaries."""
+    with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
+        weight_stage = T.stage(T.load(weights[nc, :]))
+        with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
+            activation_stage = T.stage(T.load(prepared[mc, :]))
+            with T.level.cols(nc, group=columns) as col:
+                with T.level.rows(mc, group=rows) as row:
+                    total = T.state((rows, columns), "float32", init=0)
+                    with T.level.blocks(K, extent=32) as block:
+                        weight = T.load(weight_stage[col, block])
+                        activation = T.load(activation_stage[row, block])
+                        low, inputs, xd = weight.q, activation.q, activation.d
+                        if format in ("Q5_0", "Q5_1"):
+                            high = weight.qh
+                        if lookup:
+                            codes = T.load(table, at=low, bounds="in_bounds")
+                        else:
+                            codes = T.alloc_local((columns, 32), "int8")
+                            for c, k in T.Parallel(columns, 32):
+                                if format in ("Q5_0", "Q5_1"):
+                                    code = T.cast(low[c, k], "uint8") | (T.cast(high[c, k], "uint8") << T.uint8(4))
+                                    codes[c, k] = T.cast(code, "int8") - T.int8(16 if format == "Q5_0" else 0)
+                                else:
+                                    codes[c, k] = T.cast(low[c, k], "int8") - T.int8(8 if format == "Q4_0" else 0)
+                        products = T.alloc_local((rows, columns), "int32")
+                        T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
+                        if format == "MXFP4":
+                            wd = T.load(scale_table, at=weight.e, bounds="in_bounds")
+                        else:
+                            wd = weight.d
+                        if affine:
+                            minimum, activation_sum = weight.m, activation.s
+                        for r, c in T.Parallel(rows, columns):
+                            if affine:
+                                total[r, c] += T.cast(minimum[c], "float32") * T.cast(activation_sum[r], "float32")
+                            total[r, c] += (T.cast(wd[c], "float32") * T.cast(xd[r], "float32")) * T.cast(products[r, c], "float32")
+                    T.copy(total, output[row, col])
+
+
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="Q4_0", batch_rows=16, staged_columns=32,
                       rows=4, columns=1, extreme_policy="first", inverse_policy="direct"):
@@ -46,43 +88,16 @@ def staged_projection(M, N, K, format="Q4_0", batch_rows=16, staged_columns=32,
                 table = T.stage(T.load(codebook))
             quantize_rows(source, prepared, M, K, "Q8_1" if affine else "Q8_0", 32,
                           extreme_policy, inverse_policy, "dynamic", 32)
-            with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
-                weight_stage = T.stage(T.load(weights[nc, :]))
-                with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
-                    activation_stage = T.stage(T.load(prepared[mc, :]))
-                    with T.level.cols(nc, group=columns) as col:
-                        with T.level.rows(mc, group=rows) as row:
-                            total = T.state((rows, columns), "float32", init=0)
-                            with T.level.blocks(K, extent=32) as block:
-                                weight = T.load(weight_stage[col, block])
-                                activation = T.load(activation_stage[row, block])
-                                low, inputs, xd = weight.q, activation.q, activation.d
-                                if format in ("Q5_0", "Q5_1"):
-                                    high = weight.qh
-                                if lookup:
-                                    codes = T.load(table, at=low, bounds="in_bounds")
-                                else:
-                                    codes = T.alloc_local((columns, 32), "int8")
-                                    for c, k in T.Parallel(columns, 32):
-                                        if format in ("Q5_0", "Q5_1"):
-                                            code = T.cast(low[c, k], "uint8") | (T.cast(high[c, k], "uint8") << T.uint8(4))
-                                            codes[c, k] = T.cast(code, "int8") - T.int8(16 if format == "Q5_0" else 0)
-                                        else:
-                                            codes[c, k] = T.cast(low[c, k], "int8") - T.int8(8 if format == "Q4_0" else 0)
-                                products = T.alloc_local((rows, columns), "int32")
-                                T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
-                                if format == "MXFP4":
-                                    wd = T.load(scale_table, at=weight.e, bounds="in_bounds")
-                                else:
-                                    wd = weight.d
-                                if affine:
-                                    minimum, activation_sum = weight.m, activation.s
-                                for r, c in T.Parallel(rows, columns):
-                                    contribution = (T.cast(xd[r], "float32") * T.cast(wd[c], "float32")) * T.cast(products[r, c], "float32")
-                                    if affine:
-                                        contribution += T.cast(minimum[c], "float32") * T.cast(activation_sum[r], "float32")
-                                    total[r, c] += contribution
-                            T.copy(total, output[row, col])
+            if lookup:
+                if format == "MXFP4":
+                    staged_tiles(weights, prepared, output, table, scale_table, M, N, K,
+                                 format, batch_rows, staged_columns, rows, columns, affine, lookup)
+                else:
+                    staged_tiles(weights, prepared, output, table, Scale, M, N, K,
+                                 format, batch_rows, staged_columns, rows, columns, affine, lookup)
+            else:
+                staged_tiles(weights, prepared, output, Codebook, Scale, M, N, K,
+                             format, batch_rows, staged_columns, rows, columns, affine, lookup)
 
     return main
 

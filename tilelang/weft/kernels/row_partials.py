@@ -467,7 +467,7 @@ def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_pol
             quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
                 if format == "Q2_K":
-                    q2_lanes_rows(weights, values[m, :], output[m, :], N, K, "n")
+                    q2_lanes_batch(weights, values[m, :], output[m, :], N, K, "n")
                 else:
                     affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
 
@@ -593,7 +593,7 @@ def scaled_groups(M, K, format="Q3_K"):
     return main
 
 
-@T.macro(noinline=True)
+@T.macro
 def q2_lanes_value(weights, values, K):
     """Accumulate four exact scaled products per I16 lane before widening."""
     total = T.alloc_var("float32", init=0)
@@ -635,6 +635,11 @@ def q2_lanes_rows(weights, values, output, M, K, axis):
         T.copy(result, output[row])
 
 
+@T.macro(noinline=True)
+def q2_lanes_batch(weights, values, output, M, K, axis):
+    q2_lanes_rows(weights, values, output, M, K, axis)
+
+
 @tilelang.jit(target="weft")
 def q2_lanes(M, K):
     assert M > 0 and K > 0 and K % 256 == 0
@@ -655,9 +660,9 @@ def q2_lanes(M, K):
     return main
 
 
-@T.macro(noinline=True)
+@T.macro
 def scaled_lanes_value(weights, values, K, format, lanes):
-    """Close one encoded row's numerical lanes at an explicit call boundary."""
+    """Close one encoded row's numerical lanes before returning its scalar."""
     total = T.alloc_local((lanes,), "float32")
     T.fill(total, 0)
     with T.level.blocks(K, extent=256) as block:
@@ -729,11 +734,15 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
 
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
-                      extreme_policy="first", inverse_policy="reciprocal"):
+                      extreme_policy="first", inverse_policy="reciprocal",
+                      organization="planes", lanes=32):
     """Reuse natural K-format stages with the existing grouped row programs."""
     assert format in ("Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K")
     assert min(M, N, K, batch_rows, staged_columns) > 0
     assert M % batch_rows == N % staged_columns == K % 256 == 0
+    assert organization in ("planes", "lanes") and lanes in (16, 32)
+    assert organization != "lanes" or format in ("Q2_K", "Q3_K", "Q6_K")
+    assert format != "Q2_K" or organization != "lanes" or lanes == 16
     encoding = getattr(F, format)
     group_size = 16 if format == "Q2_K" else 32
 
@@ -760,13 +769,26 @@ def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
                     with T.level.rows(mc, group=1) as row:
                         values = activation_stage[row, :][0, :]
                         destination = output[row, nc][0, :]
-                        if format in ("Q2_K", "Q4_K", "Q5_K"):
+                        if format == "Q2_K" and organization == "lanes":
+                            q2_lanes_rows(weight_stage, values, destination, nc, K, "n")
+                        elif format in ("Q2_K", "Q4_K", "Q5_K"):
                             affine_group_rows(weight_stage, values, destination, nc, K,
                                               format, group_size, 256 // group_size, "n")
+                        elif organization == "lanes":
+                            scaled_lanes_rows(weight_stage, values, destination, nc, K, format, lanes, "n")
                         else:
                             scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
 
     return main
+
+
+@T.macro(noinline=True)
+def scaled_rows_batch(weights, values, output, M, K, format, organization, lanes, axis):
+    """Keep a complete row traversal separate from activation preparation."""
+    if organization == "planes":
+        scaled_planes_rows(weights, values, output, M, K, format, axis)
+    else:
+        scaled_lanes_rows(weights, values, output, M, K, format, lanes, axis)
 
 
 @tilelang.jit(target="weft")
@@ -796,10 +818,8 @@ def scaled_projection(M, N, K, format="Q6_K", organization="planes", lanes=32,
             quantize_rows(source, prepared, M, K, "Q8_K", 256,
                           extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
-                if organization == "planes":
-                    scaled_planes_rows(weights, prepared[m, :], output[m, :], N, K, format, "n")
-                else:
-                    scaled_lanes_rows(weights, prepared[m, :], output[m, :], N, K, format, lanes, "n")
+                scaled_rows_batch(weights, prepared[m, :], output[m, :], N, K,
+                                  format, organization, lanes, "n")
 
     return main
 
