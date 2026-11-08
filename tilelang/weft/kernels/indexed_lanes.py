@@ -146,13 +146,15 @@ def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=16,
                       groups_per_step=8, extreme_policy="first", inverse_policy="reciprocal",
-                      numerical_form="grouped"):
+                      numerical_form="grouped", rows=1, columns=1):
     """Reuse encoded column and activation-row stages around the existing dots."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
     assert min(M, N, K, batch_rows, staged_columns) > 0
     assert M % batch_rows == N % staged_columns == K % 256 == 0
     assert numerical_form in ("grouped", "scaled")
     assert numerical_form != "scaled" or format in ("IQ1_S", "IQ1_M")
+    assert rows > 0 and columns > 0 and batch_rows % rows == staged_columns % columns == 0
+    assert rows == columns == 1 or (numerical_form == "scaled" and format in ("IQ1_S", "IQ1_M"))
     encoding = getattr(F, format)
     payload = 4 if format in ("IQ3_S", "IQ3_XXS") else 8
     table_entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256,
@@ -192,22 +194,96 @@ def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=1
                 weight_stage = T.stage(T.load(weights[nc, :]))
                 with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
                     activation_stage = T.stage(T.load(prepared[mc, :]))
-                    with T.level.rows(mc, group=1) as row:
-                        values = activation_stage[row, :][0, :]
-                        destination = output[row, nc][0, :]
-                        if numerical_form == "scaled":
-                            iq1_scaled_rows(weight_stage, values, destination, grid,
-                                            nc, K, format == "IQ1_M", "n")
-                        elif format == "IQ3_XXS":
-                            xxs_subgroups_rows(weight_stage, values, destination, grid, signs, nc, K, "n")
-                        elif format in ("IQ3_S", "IQ4_XS"):
-                            scaled_entries_rows(weight_stage, values, destination, grid,
-                                                nc, K, format, 2, 8, 4, "n")
-                        else:
-                            indexed_rows(weight_stage, values, destination, grid, signs,
-                                         nc, K, format, groups_per_step, signed_table, groups, "n")
+                    if rows > 1 or columns > 1:
+                        iq1_scaled_tiles(weight_stage, activation_stage, output, grid,
+                                         mc, nc, K, format == "IQ1_M", rows, columns, groups_per_step)
+                    else:
+                        with T.level.rows(mc, group=1) as row:
+                            values = activation_stage[row, :][0, :]
+                            destination = output[row, nc][0, :]
+                            if numerical_form == "scaled":
+                                iq1_scaled_rows(weight_stage, values, destination, grid,
+                                                nc, K, format == "IQ1_M", "n")
+                            elif format == "IQ3_XXS":
+                                xxs_subgroups_rows(weight_stage, values, destination, grid, signs, nc, K, "n")
+                            elif format in ("IQ3_S", "IQ4_XS"):
+                                scaled_entries_rows(weight_stage, values, destination, grid,
+                                                    nc, K, format, 2, 8, 4, "n")
+                            else:
+                                indexed_rows(weight_stage, values, destination, grid, signs,
+                                             nc, K, format, groups_per_step, signed_table, groups, "n")
 
     return main
+
+
+@T.macro
+def iq1_scaled_tiles(weights, values, output, grid, mc, nc, K, medium, rows, columns, groups_per_step):
+    entries = 2 if medium else 4
+    with T.level.cols(nc, group=columns) as col:
+        with T.level.rows(mc, group=rows) as row:
+            total = T.state((rows, columns), "float32", init=0)
+            with T.level.blocks(K, extent=256) as block:
+                w, x = T.load(weights[col, block]), T.load(values[row, block])
+                q, high, inputs, ds = w.q, w.qh, x.q, x.ds
+                if medium:
+                    scales = w.scales
+                    words = T.alloc_local((columns, 4), "uint16")
+                    block_scales = T.alloc_local((columns,), "float32")
+                    for c, word in T.Parallel(columns, 4):
+                        words[c, word] = T.cast(scales[c, word * 2], "uint16") | (T.cast(scales[c, word * 2 + 1], "uint16") << T.uint16(8))
+                    for c in T.Parallel(columns):
+                        bits = (words[c, 0] >> T.uint16(12)) | ((words[c, 1] >> T.uint16(8)) & T.uint16(240))
+                        bits |= ((words[c, 2] >> T.uint16(4)) & T.uint16(3840)) | (words[c, 3] & T.uint16(61440))
+                        block_scales[c] = T.cast(T.reinterpret(bits, "float16"), "float32")
+                else:
+                    d = w.d
+                integer = T.state((rows, columns), "int32", init=0)
+                group_start = T.alloc_var("uint16", init=0)
+                with T.level.subtiles(block, extent=groups_per_step * entries * 8) as _groups:
+                    indices = T.alloc_local((groups_per_step, columns, entries, 8), "uint16")
+                    for g, c, entry, payload in T.Parallel(groups_per_step, columns, entries, 8):
+                        group = group_start + T.cast(g, "uint16")
+                        word = T.cast(high[c, group], "uint16")
+                        shift = T.cast(entry, "uint16") * T.uint16(4 if medium else 3)
+                        upper = (word >> shift) & T.uint16(7)
+                        index = T.cast(q[c, group * T.uint16(entries) + T.cast(entry, "uint16")], "uint16") | (upper << T.uint16(8))
+                        indices[g, c, entry, payload] = index * T.uint16(8) + T.cast(payload, "uint16")
+                    selected = T.load(grid.values, at=indices, bounds="in_bounds")
+                    codes = T.alloc_local((groups_per_step, columns, entries, 8), "int8")
+                    activation = T.alloc_local((groups_per_step, rows, entries, 8), "int8")
+                    factors = T.alloc_local((groups_per_step, columns), "int32")
+                    for g, c, entry, payload in T.Parallel(groups_per_step, columns, entries, 8):
+                        group = group_start + T.cast(g, "uint16")
+                        word = T.cast(high[c, group], "uint16")
+                        if medium:
+                            shift = T.uint16(3) + T.cast(entry, "uint16") * T.uint16(4)
+                            delta = T.int8(1) - T.cast((word >> shift) & T.uint16(1), "int8") * T.int8(2)
+                        else:
+                            delta = T.cast((T.cast(word, "int16") >> T.int16(15)) | T.int16(1), "int8")
+                        biased = T.cast(T.cast(selected[g, c, entry, payload], "int16") + T.int16(1), "uint2")
+                        codes[g, c, entry, payload] = (T.cast(biased, "int8") - T.int8(1)) * T.int8(8) + delta
+                    for g, r, entry, payload in T.Parallel(groups_per_step, rows, entries, 8):
+                        group = group_start + T.cast(g, "uint16")
+                        activation[g, r, entry, payload] = inputs[r, group * T.uint16(entries * 8) + T.cast(entry * 8 + payload, "uint16")]
+                    for g, c in T.Parallel(groups_per_step, columns):
+                        group = group_start + T.cast(g, "uint16")
+                        word = words[c, group // T.uint16(4)] if medium else T.cast(high[c, group], "uint16")
+                        shift = group % T.uint16(4) * T.uint16(3) if medium else T.uint16(12)
+                        factors[g, c] = T.cast(((word >> shift) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int32")
+                    products = T.alloc_local((groups_per_step, rows, columns), "int32")
+                    scaled = T.alloc_local((groups_per_step, rows, columns), "int32")
+                    subtotal = T.alloc_local((rows, columns), "int32")
+                    T.reduce_dot(activation, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
+                    for g, r, c in T.Parallel(groups_per_step, rows, columns):
+                        scaled[g, r, c] = products[g, r, c] * factors[g, c]
+                    T.reduce_sum(scaled, subtotal, dim=0)
+                    for r, c in T.Parallel(rows, columns):
+                        integer[r, c] += subtotal[r, c]
+                    group_start += T.uint16(groups_per_step)
+                for r, c in T.Parallel(rows, columns):
+                    factor = block_scales[c] if medium else T.cast(d[c], "float32")
+                    total[r, c] += ((factor * ds[r]) * 0.125) * T.cast(integer[r, c], "float32")
+            T.copy(total, output[row, col])
 
 
 @T.macro

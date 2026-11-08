@@ -188,9 +188,8 @@ affine 或 signed 分组行宏，覆盖五种 K 格式，无需解码面板或�
 `batch_rows` 与 `staged_columns` 限定作者的复用范围，Q8_K 准备仍保留在完整 projection 内。
 
 Q3_K/Q6_K 还可通过显式 `rows`、`columns` 在 K 遍历中保留二维输出 tile。
-Q6_K 跨 activation 行 cohort 共享解码后的 64 元素窗口；Q3_K 共享 scale 表和
-显式 128 元素 plane/group tile。整数 scale 更新先于 record 浮点更新收口。
-这些是源码复用维度，与后端 SIMD 宽度和
+解码后的 64 元素权重窗口服务 activation 行 cohort 的各次 16 元素 contraction；
+整数 scale 更新先于 record 浮点更新收口。这些是源码复用维度，与后端 SIMD 宽度和
 寄存器布局独立。
 
 `codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
@@ -319,3 +318,8 @@ IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再�
 最后完成一次 record 求和。`projection` 和 `staged_projection` 通过
 `numerical_form="scaled"` 复用同一 `iq1_scaled_rows` 宏；Q8_K 准备仍计入调用。
 显式带偏置的 unsigned two-bit 表示将 codebook 范围边界传给共同整数分析，而非任意 I8。
+
+分阶段 IQ1 程序还接受 `rows`、`columns` 输出分块。`groups_per_step` 限定每个 record
+子 Level 内同时计算的 group 数，精确 I32 小计跨窗口携带，之后仍在原 record 边界执行
+F32 scale 更新。权重和 activation stage 保留声明的外层复用范围；局部 contraction
+保留共享 group 与彼此独立的行、列轴。

@@ -803,48 +803,28 @@ def scaled_matrix_tiles(weights, values, output, mc, nc, K, format, rows, column
                 else:
                     scales = w.scales
                 integer = T.state((rows, columns), "int32", init=0)
-                if format == "Q3_K":
-                    decoded_scales = T.alloc_local((columns, 16), "int8")
-                    for c, g in T.Parallel(columns, 16):
-                        decoded_scales[c, g] = T.cast(T.cast(scale_low[c, g], "uint8") | (T.cast(scale_high[c, g], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                    half_index = T.alloc_var("uint8", init=0)
-                    with T.level.subtiles(block, extent=128) as _half:
-                        codes = T.alloc_local((4, 2, columns, 16), "int8")
-                        activation = T.alloc_local((4, 2, rows, 16), "int8")
-                        for c, plane, group, k in T.Parallel(columns, 4, 2, 16):
-                            coordinate = half_index * T.uint8(128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
-                            codes[plane, group, c, k] = T.cast(T.cast(low[c, coordinate], "uint8") | (T.cast(high[c, coordinate], "uint8") << T.uint8(2)), "int8") - T.int8(4)
-                        for r, plane, group, k in T.Parallel(rows, 4, 2, 16):
-                            coordinate = half_index * T.uint8(128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
-                            activation[plane, group, r, k] = inputs[r, coordinate]
-                        products = T.alloc_local((4, 2, rows, columns), "int32")
-                        terms = T.alloc_local((4, 2, rows, columns), "int32")
-                        plane_sums = T.alloc_local((4, rows, columns), "int32")
-                        half_sums = T.alloc_local((rows, columns), "int32")
-                        T.reduce_dot(activation, codes, products, over="k", acc_dtype="int32", engine="vector")
-                        for r, c, plane, group in T.Parallel(rows, columns, 4, 2):
-                            coordinate = half_index * T.uint8(8) + T.cast(plane, "uint8") * T.uint8(2) + T.cast(group, "uint8")
-                            terms[plane, group, r, c] = products[plane, group, r, c] * T.cast(decoded_scales[c, coordinate], "int32")
-                        T.reduce_sum(terms, plane_sums, dim=1)
-                        T.reduce_sum(plane_sums, half_sums, dim=0)
-                        for r, c in T.Parallel(rows, columns):
-                            integer[r, c] += half_sums[r, c]
-                        half_index += T.uint8(1)
-                else:
-                    with T.level.subtiles(block, extent=64) as pair:
-                        lower, upper = T.load(low, at=pair), T.load(high, at=pair)
-                        codes = T.alloc_local((columns, 64), "int8")
-                        for c, k in T.Parallel(columns, 64):
-                            code = T.cast(lower[c, k], "uint8") | (T.cast(upper[c, k], "uint8") << T.uint8(4))
-                            codes[c, k] = T.cast(code, "int8") - T.int8(32)
-                        with T.level.subtiles(pair, extent=16) as group:
-                            activation = T.load(inputs, at=group)
-                            selected = T.load(codes, at=group)
-                            products = T.alloc_local((rows, columns), "int32")
-                            T.reduce_dot(activation, selected, products, over="k", acc_dtype="int32", engine="vector")
+                with T.level.subtiles(block, extent=64) as pair:
+                    lower, upper = T.load(low, at=pair), T.load(high, at=pair)
+                    codes = T.alloc_local((columns, 64), "int8")
+                    for c, k in T.Parallel(columns, 64):
+                        code = T.cast(lower[c, k], "uint8") | (T.cast(upper[c, k], "uint8") << T.uint8(2 if format == "Q3_K" else 4))
+                        codes[c, k] = T.cast(code, "int8") - T.int8(4 if format == "Q3_K" else 32)
+                    with T.level.subtiles(pair, extent=16) as group:
+                        activation = T.load(inputs, at=group)
+                        selected = T.load(codes, at=group)
+                        products = T.alloc_local((rows, columns), "int32")
+                        T.reduce_dot(activation, selected, products, over="k", acc_dtype="int32", engine="vector")
+                        if format == "Q3_K":
+                            lower_scale = T.load(scale_low, at=group)
+                            upper_scale = T.load(scale_high, at=group)
+                        else:
                             factor = T.load(scales, at=group)
-                            for r, c in T.Parallel(rows, columns):
-                                integer[r, c] += products[r, c] * T.cast(factor[c], "int32")
+                        for r, c in T.Parallel(rows, columns):
+                            if format == "Q3_K":
+                                scale = T.cast(T.cast(lower_scale[c], "uint8") | (T.cast(upper_scale[c], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                            else:
+                                scale = factor[c]
+                            integer[r, c] += products[r, c] * T.cast(scale, "int32")
                 for r, c in T.Parallel(rows, columns):
                     total[r, c] += (ds[r] * T.cast(d[c], "float32")) * T.cast(integer[r, c], "float32")
             T.copy(total, output[row, col])

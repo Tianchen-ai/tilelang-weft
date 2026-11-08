@@ -272,10 +272,9 @@ five K formats without a decoded panel or persistent repacking. The public
 remains inside the complete projection.
 
 For Q3_K/Q6_K, explicit `rows` and `columns` also keep a two-dimensional
-output tile live across K. Q6_K shares decoded 64-term windows across the
-activation-row cohort; Q3_K shares its scale table and explicit 128-term
-plane/group tiles. Integer scale updates close before the record's floating
-update. These are source reuse dimensions,
+output tile live across K. A decoded 64-term weight window serves each
+16-term contraction with the activation-row cohort; integer scale updates
+close before the record's floating update. These are source reuse dimensions,
 independent of the backend's SIMD width and register layout.
 
 Grouped affine short records retain the weight scale/minimum and activation scale/sum as
@@ -403,3 +402,10 @@ group scale before widening to I32, followed by one record sum. The same
 with `numerical_form="scaled"`; Q8_K preparation remains inside the call.
 An explicit biased unsigned two-bit representation preserves a bound on that
 codebook range for shared integer analysis, rather than treating it as arbitrary I8.
+
+The staged IQ1 program also accepts `rows` and `columns` output tiles.
+Its `groups_per_step` bounds the groups computed inside each record sub-Level;
+the exact I32 subtotal carries across these windows before the record's F32
+scale update. Weight and activation stages retain their declared outer reuse
+scopes, while each local contraction preserves shared group and independent
+row/column axes.
