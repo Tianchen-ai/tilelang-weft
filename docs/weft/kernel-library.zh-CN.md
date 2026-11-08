@@ -207,6 +207,9 @@ payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权�
 量化 activation、计算所需整数 block sum，再跨全部 K record 保留输出 tile 的 state。
 `rows`、`columns` 表达作者复用结构，`engine="vector"` 约束局部 dot。它与普通 Tensor
 程序使用同一个编译核心。
+`indexed_projection.projection` 与行程序一样公开 `extreme_policy` 和
+`inverse_policy`。调用内整数 panel 保留 workload 的 activation 量化合同；panel
+构造和 workspace 的读写继续计入完整调用。
 查表格式显式读取一次 codebook，以带偏置的无符号 dot 和精确 activation sum 修正保留
 有符号值。MXFP4 还消费传入的指数表；这些表均不内嵌到后端。
 `projection.row_projection` 使用原 F32 activation 与 F16 权重，跨 K 保留 F32 lane 累加，

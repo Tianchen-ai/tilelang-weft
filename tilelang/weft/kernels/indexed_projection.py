@@ -107,7 +107,8 @@ def decode_panel(record, panel, block_scale, correction, columns, format, grid, 
 
 
 @tilelang.jit(target="weft")
-def projection(M, N, K, format="IQ2_XS", rows=16, columns=16, engine="auto", decode_columns=1):
+def projection(M, N, K, format="IQ2_XS", rows=16, columns=16, engine="auto", decode_columns=1,
+               extreme_policy="first", inverse_policy="direct"):
     assert format in ("IQ1_S", "IQ1_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ3_S", "IQ3_XXS")
     assert M > 0 and N > 0 and K > 0 and K % 256 == 0 and M % rows == N % columns == 0
     assert decode_columns > 0 and columns % decode_columns == 0
@@ -150,7 +151,8 @@ def projection(M, N, K, format="IQ2_XS", rows=16, columns=16, engine="auto", dec
         signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "payload"), abi=True) if format in ("IQ2_XS", "IQ2_XXS", "IQ3_XXS") else 0
         half_bits = T.view(HalfBits, shape=(65536,), axes=("half_bits",), abi=True) if format == "IQ1_M" else 0
         with T.Kernel(1, cpu_num_threads=1):
-            quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 256)
+            quantize_rows(source, prepared, M, K, "Q8_K", 256,
+                          extreme_policy, inverse_policy, "rne", 256)
             first = T.alloc_local((1,), "bool")
             first[0] = True
             with T.level.blocks(K, extent=256) as block:

@@ -194,6 +194,10 @@ of the matrix tile. Loads after these writes capture the populated panels;
 across output-column tiles. Their preparation remains inside the projection.
 Factories specialize optional workspaces to zero elements when unused, and
 native metadata retains those source Tensor extents.
+`indexed_projection.projection` exposes the same `extreme_policy` and
+`inverse_policy` source parameters as its row-program counterparts. Selecting
+in-call integer panels retains the workload's activation quantization contract;
+panel construction and its workspaces remain part of the complete invocation.
 
 `subblock_partials.block32(partials=1)` expresses a scalar dot and scale update
 for each record. `partials=8` retains eight grouped products across records.
