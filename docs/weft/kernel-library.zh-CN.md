@@ -140,6 +140,13 @@ Panel workspace 属于单次调用的存储。`panel_dense.projection` 在调用
 源码的读取边界。这些是作者明确选择的数值组织，目标 passes
 负责实现所选组织的物理计算。
 
+Q4/Q5/Q8、IQ4_NL 和 MXFP4 短 record 的 `block32` 与完整
+`subblock_partials.projection` 共用 `block32_rows` 宏。Projection 在调用内完成
+activation 量化，再执行同一行程序。两个 factory 中的 `records` 与 `partials`
+保留相同的源码分组；`extreme_policy` 与 `inverse_policy` 保留准备阶段的数值合同。
+IQ4_XS 的 dot 与 projection 同样共用 `iq4_group_rows`，在两个入口中保留显式
+分组 partial 与 codebook 读取快照。
+
 `subblock_partials.window_dot` 在各编码 record 内闭合整数 dot。Q1_0 先保留四个
 Q8_0 子 record 的 scale，再应用权重 scale；NVFP4 共享 staged codebook，分别闭合
 各 16 元素缩放乘积；TQ2_0 闭合一个 256 元素有符号 dot。`rows_per_program` 表达
@@ -167,6 +174,9 @@ FMA，并减少宽位域运算，保持解码范围和输出布局。
 Affine 短 record 将权重 scale/minimum 和 activation scale/sum 分别保留为双元素
 metadata tile，以一个 `T.Parallel(2)` 表达转换和乘法，再分别更新 payload 乘积与
 校正累加器。作者的 metadata 分组与整数 payload 分组一起通过共同前端保留。
+标量 record 程序则在每条 record 内合并乘积与校正，再更新浮点和，保留该作者程序的
+累加顺序。Q4_1 与 Q8_0 无需数值解码时直接消费保存的 payload 字段，让 contraction
+继续保留 Encoding 的位宽信息。
 
 `indexed_projection.packed_words` 在调用内生成 byte panel，跨 activation 行复用。
 分组 factor、带偏置的乘积与精确 activation sum 校正保持独立的整数表达式。
@@ -235,7 +245,7 @@ Q2_K/Q3_K/Q6_K 的窗口程序先转换标量 group scale，再乘 payload。作
 共同解码宏保留显式的 `code_dtype` 源码参数，普通整 record 程序仍使用 I32。
 
 `indexed_lanes.vec_dot` 与 `indexed_lanes.projection` 复用普通 `indexed_rows`
-宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的 I16 pair partial、
+宏，覆盖 IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S。作者保留 16 lane 的整数 partial、
 I32 group 累加、显式 codebook 输入和逐 record 浮点 scale。`groups_per_step`
 约束源码展开范围，不指定硬件向量宽度；有 16 组的格式还可使用 `groups_per_step=16`。
 projection 在调用内只准备一次调用方的 Q8_K
@@ -245,3 +255,14 @@ projection 在调用内只准备一次调用方的 Q8_K
 entry、payload 轴，先完成整数 scale group，再应用 record 的浮点缩放。IQ4_XS
 使用 staged 的 16 项码本与 32 元素子块，显式更新逐组缩放结果。字段投影直接消费
 已有 Level point，让共享编译器同时看见 record 读取与码本快照的作用域。
+
+有界的 `scaled_entries_rows` 与 `xxs_subgroups_rows` 宏也同时服务各自的 dot
+factory 和 `indexed_lanes.entry_projection`。相同的 entry/payload Level、码本快照
+与整数 scale group 在 projection 中保留，activation 量化仍位于调用内部。
+`row_partials.scaled_projection` 为 Q3_K/Q6_K 复用 `scaled_planes_rows` 或
+`scaled_lanes_rows`；`organization` 在作者程序中选择逐 block 的整数和或延迟归约的
+lane partial，与目标向量宽度独立。
+
+IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再以
+`T.reduce_dot` 完成各组有符号 numerator dot。Scale、delta、整数累加及最终
+八分之一系数仍是源码中显式的数值操作。

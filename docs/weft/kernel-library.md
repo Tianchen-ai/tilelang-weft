@@ -192,6 +192,14 @@ the selected fields directly. Both keep the source read boundary explicit.
 These are explicit numerical organizations; target passes select the physical
 implementation of the requested organization.
 
+The same `block32_rows` macro is used by `block32` and the complete
+`subblock_partials.projection` for Q4/Q5/Q8, IQ4_NL and MXFP4 short records.
+Projection quantizes its activation inside the call before invoking that row
+program. `records` and `partials` retain the same source grouping in both
+factories; `extreme_policy` and `inverse_policy` preserve the preparation contract.
+IQ4_XS likewise shares `iq4_group_rows` between its dot and projection, retaining
+the explicit grouped partials and codebook snapshot through both entry points.
+
 `subblock_partials.window_dot` uses closed integer dots within each encoded
 record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
 NVFP4 shares the staged codebook while closing each 16-element scaled product;
@@ -208,11 +216,15 @@ Both scale and indexed projection factories expose the existing activation
 extreme and inverse policies, so a workload keeps its required quantization
 contract while reusing a row program.
 
-Affine short records retain the weight scale/minimum and activation scale/sum as
+Grouped affine short records retain the weight scale/minimum and activation scale/sum as
 two-element metadata tiles. Their conversion and multiplication are expressed
 in one `T.Parallel(2)` operation before the independent product and correction
 updates. This keeps the author's metadata work grouped through the common
 frontend, alongside the explicitly grouped integer payload products.
+The scalar-record program instead adds its product and correction within each
+record before updating its floating sum, matching that source accumulation order.
+Q4_1 and Q8_0 consume the saved payload field directly when no numerical decode
+is needed, retaining its Encoding width through contraction.
 
 `indexed_projection.packed_words` builds byte panels during the call and reuses
 them across activation rows. Group factors, biased products and the exact
@@ -302,9 +314,22 @@ the shared compiler.
 
 `indexed_lanes.vec_dot` and `indexed_lanes.projection` share the ordinary
 `indexed_rows` macro for IQ1_S/IQ1_M/IQ2_XS/IQ2_XXS/IQ2_S. The author retains
-sixteen-lane I16 pair partials, I32 group accumulation, explicit codebook inputs
+sixteen-lane integer partials, I32 group accumulation, explicit codebook inputs
 and per-record floating scales. `groups_per_step` bounds source unrolling
 without specifying a hardware vector width; sixteen-group formats also accept
 `groups_per_step=16`. Projection prepares its caller's
 Q8_K buffer once inside the invocation; `extreme_policy` preserves the selected
 quantization tie rule before the same indexed row program consumes that buffer.
+
+The bounded `scaled_entries_rows` and `xxs_subgroups_rows` macros likewise serve
+their dot factories and `indexed_lanes.entry_projection`. The same entry/payload
+Levels, codebook snapshots and integer scale groups survive in the projection;
+activation quantization remains inside its invocation. `row_partials.scaled_projection`
+reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
+parameter selects block integer sums or deferred lane partials in the author
+program, independently of target vector width.
+
+IQ1_M's indexed row program reconstructs its F16 scale with ordinary
+`T.reinterpret`, then closes each signed numerator dot with `T.reduce_dot`.
+The scale, delta, integer accumulation and final eighth-unit factor remain
+explicit numerical operations in the source.

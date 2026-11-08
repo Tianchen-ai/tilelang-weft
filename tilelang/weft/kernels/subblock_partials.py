@@ -72,6 +72,60 @@ def q6_pairs(M, K, lanes=16, records=2):
     return main
 
 
+@T.macro
+def iq4_group_rows(weights, values, output, Codebook, M, K, partials, records, axis):
+    """Retain scale groups and lane sums in the same dot/projection program."""
+    codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+    table = T.load(codebook)
+    positive = T.alloc_local((16,), "uint8")
+    for i in T.Parallel(16):
+        positive[i] = T.cast(table[i], "uint8") + T.uint8(128)
+    with T.level.rows(M, group=1, axis=axis) as row:
+        first = T.alloc_local((partials,), "float32")
+        second = T.alloc_local((partials,), "float32")
+        T.fill(first, 0)
+        T.fill(second, 0)
+        with T.level.blocks(K, extent=256 * records) as block:
+            for part in T.unroll(records):
+                w = T.load(weights[row, block][0, part * 256 : (part + 1) * 256])
+                x = T.load(values[block][part * 256 : (part + 1) * 256])
+                q, low, high, d = w.q, w.scales_l, w.scales_h, w.d
+                activation, sums, ds = x.q, x.bsum, x.ds
+                codes = T.alloc_local((256,), "uint8")
+                products = T.alloc_local((64,), "int32")
+                scales = T.alloc_local((8,), "int32")
+                groups = T.alloc_local((64 // partials, partials), "int32")
+                integer = T.alloc_local((partials,), "int32")
+                correction = T.alloc_local((16 // partials, partials), "int32")
+                reduced = T.alloc_local((partials,), "int32")
+                for i in T.Parallel(256):
+                    codes[i] = positive[T.cast(q[i], "uint8")]
+                T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
+                for g in T.Parallel(8):
+                    lower = (low[T.cast(g, "uint16") // T.uint16(2)] >> T.cast(g % 2 * 4, "uint8")) & T.uint8(15)
+                    upper = T.cast((high[()] >> T.cast(g * 2, "uint16")) & T.uint16(3), "uint8")
+                    scales[g] = T.cast(T.cast(lower | (upper << T.uint8(4)), "int8") - T.int8(32), "int32")
+                for segment, lane in T.Parallel(64 // partials, partials):
+                    position = T.cast(segment, "uint16") * T.uint16(partials) + T.cast(lane, "uint16")
+                    groups[segment, lane] = products[position] * scales[position // T.uint16(8)]
+                T.reduce_sum(groups, integer, dim=0)
+                for segment, lane in T.Parallel(16 // partials, partials):
+                    position = T.cast(segment, "uint16") * T.uint16(partials) + T.cast(lane, "uint16")
+                    correction[segment, lane] = T.cast(sums[position], "int32") * scales[position // T.uint16(2)] * 128
+                T.reduce_sum(correction, reduced, dim=0)
+                for lane in T.Parallel(partials):
+                    contribution = T.cast(integer[lane] - reduced[lane], "float32") * (T.cast(d[()], "float32") * ds[()])
+                    if part == 0:
+                        first[lane] += contribution
+                    else:
+                        second[lane] += contribution
+        for lane in T.Parallel(partials):
+            first[lane] += second[lane]
+        result = T.alloc_local((1,), "float32")
+        T.reduce_sum(first, result, dim=0)
+        T.copy(result, output[row])
+
+
 @tilelang.jit(target="weft")
 def iq4_groups(M, K, partials=16, records=2):
     """Keep nonlinear integer groups and independent record sums explicit."""
@@ -90,57 +144,120 @@ def iq4_groups(M, K, partials=16, records=2):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
-            table = T.load(codebook)
-            positive = T.alloc_local((16,), "uint8")
-            for i in T.Parallel(16):
-                positive[i] = T.cast(table[i], "uint8") + T.uint8(128)
-            with T.level.rows(M, group=1) as row:
-                first = T.alloc_local((partials,), "float32")
-                second = T.alloc_local((partials,), "float32")
-                T.fill(first, 0)
-                T.fill(second, 0)
-                with T.level.blocks(K, extent=256 * records) as block:
-                    for part in T.unroll(records):
-                        w = T.load(weights[row, block][0, part * 256 : (part + 1) * 256])
-                        x = T.load(values[block][part * 256 : (part + 1) * 256])
-                        q, low, high, d = w.q, w.scales_l, w.scales_h, w.d
-                        activation, sums, ds = x.q, x.bsum, x.ds
-                        codes = T.alloc_local((256,), "uint8")
-                        products = T.alloc_local((64,), "int32")
-                        scales = T.alloc_local((8,), "int32")
-                        groups = T.alloc_local((64 // partials, partials), "int32")
-                        integer = T.alloc_local((partials,), "int32")
-                        correction = T.alloc_local((16 // partials, partials), "int32")
-                        reduced = T.alloc_local((partials,), "int32")
-                        for i in T.Parallel(256):
-                            codes[i] = positive[T.cast(q[i], "uint8")]
-                        T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
-                        for g in T.Parallel(8):
-                            lower = (low[T.cast(g, "uint16") // T.uint16(2)] >> T.cast(g % 2 * 4, "uint8")) & T.uint8(15)
-                            upper = T.cast((high[()] >> T.cast(g * 2, "uint16")) & T.uint16(3), "uint8")
-                            scales[g] = T.cast(T.cast(lower | (upper << T.uint8(4)), "int8") - T.int8(32), "int32")
-                        for segment, lane in T.Parallel(64 // partials, partials):
-                            position = T.cast(segment, "uint16") * T.uint16(partials) + T.cast(lane, "uint16")
-                            groups[segment, lane] = products[position] * scales[position // T.uint16(8)]
-                        T.reduce_sum(groups, integer, dim=0)
-                        for segment, lane in T.Parallel(16 // partials, partials):
-                            position = T.cast(segment, "uint16") * T.uint16(partials) + T.cast(lane, "uint16")
-                            correction[segment, lane] = T.cast(sums[position], "int32") * scales[position // T.uint16(2)] * 128
-                        T.reduce_sum(correction, reduced, dim=0)
-                        for lane in T.Parallel(partials):
-                            contribution = T.cast(integer[lane] - reduced[lane], "float32") * (T.cast(d[()], "float32") * ds[()])
-                            if part == 0:
-                                first[lane] += contribution
-                            else:
-                                second[lane] += contribution
-                for lane in T.Parallel(partials):
-                    first[lane] += second[lane]
-                result = T.alloc_local((1,), "float32")
-                T.reduce_sum(first, result, dim=0)
-                T.copy(result, output[row])
+            iq4_group_rows(weights, values, output, Codebook, M, K, partials, records, "m")
 
     return main
+
+
+@T.macro
+def block32_rows(weights, values, output, Codebook, Scale, M, K, format, records, partials, affine, lookup):
+    """Share the same record program between packed dots and full projections."""
+    if lookup:
+        codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        table = T.load(codebook)
+    for row in T.serial(M):
+        if partials == 1:
+            first_scalar = T.alloc_var("float32", init=0)
+        else:
+            first = T.alloc_local((partials,), "float32")
+            T.fill(first, 0)
+        if records == 2:
+            if partials == 1:
+                second_scalar = T.alloc_var("float32", init=0)
+            else:
+                second = T.alloc_local((partials,), "float32")
+                T.fill(second, 0)
+        if affine and partials != 1:
+            correction = T.alloc_var("float32", init=0)
+        result = T.alloc_local((1,), "float32")
+        with T.level.blocks(K, extent=32 * records) as block:
+            for part in T.unroll(records):
+                w = weights[row, block][part * 32 : (part + 1) * 32]
+                x = values[block][part * 32 : (part + 1) * 32]
+                if partials == 1:
+                    q, activation, xd = T.load(w.q), T.load(x.q), T.load(x.d)
+                    if format == "MXFP4":
+                        exponent = T.load(w.e)
+                    else:
+                        d = T.load(w.d)
+                    if format in ("Q5_0", "Q5_1"):
+                        high = T.load(w.qh)
+                    if affine:
+                        minimum, activation_sum = T.load(w.m), T.load(x.s)
+                else:
+                    weight_record, input_record = T.load(w), T.load(x)
+                    q, activation, xd = weight_record.q, input_record.q, input_record.d
+                    if format == "MXFP4":
+                        exponent = weight_record.e
+                    else:
+                        d = weight_record.d
+                    if format in ("Q5_0", "Q5_1"):
+                        high = weight_record.qh
+                    if affine:
+                        minimum, activation_sum = weight_record.m, input_record.s
+                if lookup:
+                    codes = T.load(table, at=q, bounds="in_bounds")
+                elif format in ("Q4_1", "Q8_0"):
+                    codes = q
+                else:
+                    codes = T.alloc_local((32,), "int8" if format in ("Q4_0", "Q5_0") else "uint8")
+                products = T.alloc_local((partials,), "int32")
+                if not lookup and format not in ("Q4_1", "Q8_0"):
+                    for k in T.Parallel(32):
+                        if format in ("Q5_0", "Q5_1"):
+                            code = T.cast(q[k], "uint8") | (T.cast(high[k], "uint8") << T.uint8(4))
+                            codes[k] = T.cast(code, "int8") - T.int8(16) if format == "Q5_0" else code
+                        else:
+                            codes[k] = T.cast(q[k], "int8") - T.int8(8)
+                if affine and partials != 1:
+                    weight_meta = T.alloc_local((2,), "float16")
+                    activation_meta = T.alloc_local((2,), "float16")
+                    metadata = T.alloc_local((2,), "float32")
+                    weight_meta[0], weight_meta[1] = d[()], minimum[()]
+                    activation_meta[0], activation_meta[1] = xd[()], activation_sum[()]
+                    for i in T.Parallel(2):
+                        metadata[i] = T.cast(weight_meta[i], "float32") * T.cast(activation_meta[i], "float32")
+                    scale, offset = metadata[0], metadata[1]
+                elif format == "MXFP4":
+                    scale = Scale[T.cast(exponent[()], "uint8")] * T.cast(xd[()], "float32")
+                else:
+                    scale = T.cast(d[()], "float32") * T.cast(xd[()], "float32")
+                    if affine:
+                        offset = T.cast(minimum[()], "float32") * T.cast(activation_sum[()], "float32")
+                if partials == 1:
+                    T.reduce_dot(codes, activation, products, over="k", acc_dtype="int32", engine="vector")
+                else:
+                    T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
+                if partials == 1:
+                    contribution = scale * T.cast(products[0], "float32")
+                    if affine:
+                        contribution += offset
+                    if records == 1 or part == 0:
+                        first_scalar += contribution
+                    else:
+                        second_scalar += contribution
+                else:
+                    for p in T.Parallel(partials):
+                        if records == 1:
+                            first[p] += scale * T.cast(products[p], "float32")
+                        else:
+                            if part == 0:
+                                first[p] += scale * T.cast(products[p], "float32")
+                            else:
+                                second[p] += scale * T.cast(products[p], "float32")
+                if affine and partials != 1:
+                    correction += offset
+        if partials == 1:
+            result[0] = first_scalar + second_scalar if records == 2 else first_scalar
+        else:
+            if records == 2:
+                for p in T.Parallel(partials):
+                    first[p] += second[p]
+            T.reduce_sum(first, result, dim=0)
+        if affine and partials != 1:
+            result[0] += correction
+        T.copy(result, output[row])
+
 
 @tilelang.jit(target="weft")
 def block32(M, K, format="Q5_0", records=2, partials=8):
@@ -168,107 +285,8 @@ def block32(M, K, format="Q5_0", records=2, partials=8):
         values = T.view(Activation, shape=(K,), encoding=partner, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            if lookup:
-                codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
-                table = T.load(codebook)
-            for row in T.serial(M):
-                if partials == 1:
-                    first_scalar = T.alloc_var("float32", init=0)
-                else:
-                    first = T.alloc_local((partials,), "float32")
-                    T.fill(first, 0)
-                if records == 2:
-                    if partials == 1:
-                        second_scalar = T.alloc_var("float32", init=0)
-                    else:
-                        second = T.alloc_local((partials,), "float32")
-                        T.fill(second, 0)
-                if affine:
-                    correction = T.alloc_var("float32", init=0)
-                result = T.alloc_local((1,), "float32")
-                with T.level.blocks(K, extent=32 * records) as block:
-                    for part in T.unroll(records):
-                        w = weights[row, block][part * 32 : (part + 1) * 32]
-                        x = values[block][part * 32 : (part + 1) * 32]
-                        if partials == 1:
-                            q, activation, xd = T.load(w.q), T.load(x.q), T.load(x.d)
-                            if format == "MXFP4":
-                                exponent = T.load(w.e)
-                            else:
-                                d = T.load(w.d)
-                            if format in ("Q5_0", "Q5_1"):
-                                high = T.load(w.qh)
-                            if affine:
-                                minimum, activation_sum = T.load(w.m), T.load(x.s)
-                        else:
-                            weight_record, input_record = T.load(w), T.load(x)
-                            q, activation, xd = weight_record.q, input_record.q, input_record.d
-                            if format == "MXFP4":
-                                exponent = weight_record.e
-                            else:
-                                d = weight_record.d
-                            if format in ("Q5_0", "Q5_1"):
-                                high = weight_record.qh
-                            if affine:
-                                minimum, activation_sum = weight_record.m, input_record.s
-                        if lookup:
-                            codes = T.load(table, at=q, bounds="in_bounds")
-                        else:
-                            codes = T.alloc_local((32,), "int8" if format in ("Q4_0", "Q5_0", "Q8_0") else "uint8")
-                        products = T.alloc_local((partials,), "int32")
-                        if not lookup:
-                            for k in T.Parallel(32):
-                                if format in ("Q5_0", "Q5_1"):
-                                    code = T.cast(q[k], "uint8") | (T.cast(high[k], "uint8") << T.uint8(4))
-                                    codes[k] = T.cast(code, "int8") - T.int8(16) if format == "Q5_0" else code
-                                else:
-                                    if format == "Q8_0":
-                                        codes[k] = q[k]
-                                    else:
-                                        codes[k] = T.cast(q[k], "int8") - T.int8(8) if format == "Q4_0" else T.cast(q[k], "uint8")
-                        if affine:
-                            weight_meta = T.alloc_local((2,), "float16")
-                            activation_meta = T.alloc_local((2,), "float16")
-                            metadata = T.alloc_local((2,), "float32")
-                            weight_meta[0], weight_meta[1] = d[()], minimum[()]
-                            activation_meta[0], activation_meta[1] = xd[()], activation_sum[()]
-                            for i in T.Parallel(2):
-                                metadata[i] = T.cast(weight_meta[i], "float32") * T.cast(activation_meta[i], "float32")
-                            scale, offset = metadata[0], metadata[1]
-                        elif format == "MXFP4":
-                            scale = Scale[T.cast(exponent[()], "uint8")] * T.cast(xd[()], "float32")
-                        else:
-                            scale = T.cast(d[()], "float32") * T.cast(xd[()], "float32")
-                        if partials == 1:
-                            T.reduce_dot(codes, activation, products, over="k", acc_dtype="int32", engine="vector")
-                        else:
-                            T.mac_groups(codes, activation, products, n=4, into="int32", over="k")
-                        if partials == 1:
-                            if records == 1 or part == 0:
-                                first_scalar += scale * T.cast(products[0], "float32")
-                            else:
-                                second_scalar += scale * T.cast(products[0], "float32")
-                        else:
-                            for p in T.Parallel(partials):
-                                if records == 1:
-                                    first[p] += scale * T.cast(products[p], "float32")
-                                else:
-                                    if part == 0:
-                                        first[p] += scale * T.cast(products[p], "float32")
-                                    else:
-                                        second[p] += scale * T.cast(products[p], "float32")
-                        if affine:
-                            correction += offset
-                if partials == 1:
-                    result[0] = first_scalar + second_scalar if records == 2 else first_scalar
-                else:
-                    if records == 2:
-                        for p in T.Parallel(partials):
-                            first[p] += second[p]
-                    T.reduce_sum(first, result, dim=0)
-                if affine:
-                    result[0] += correction
-                T.copy(result, output[row])
+            block32_rows(weights, values, output, Codebook, Scale,
+                         M, K, format, records, partials, affine, lookup)
 
     return main
 
@@ -686,15 +704,23 @@ def ternary(M, K, format="TQ1_0", rows=1, records=2):
 
 
 @tilelang.jit(target="weft")
-def projection(M, N, K, format="Q1_0", columns=1, records=1):
+def projection(M, N, K, format="Q1_0", columns=1, records=1, partials=1,
+               extreme_policy="first", inverse_policy="direct"):
     """Retain the normal packed dot's lane sums through a complete projection."""
-    assert format in ("Q1_0", "NVFP4", "TQ1_0", "TQ2_0")
+    record32 = format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "MXFP4")
+    assert record32 or format in ("Q1_0", "NVFP4", "TQ1_0", "TQ2_0", "IQ4_XS")
     assert M > 0 and N > 0 and N % columns == 0
+    assert (partials in (8, 16) if format == "IQ4_XS" else
+            partials in (1, 8) and (partials == 1 or record32))
+    assert not (record32 or format == "IQ4_XS") or (columns == 1 and records in (1, 2))
     encoding = getattr(F, format)
     elements = encoding.schema.elements
     assert K > 0 and K % (elements * records) == 0
-    short = format in ("Q1_0", "NVFP4")
-    partner = F.Q8_0 if short else F.Q8_K
+    short = record32 or format in ("Q1_0", "NVFP4")
+    affine = format in ("Q4_1", "Q5_1")
+    lookup = format in ("IQ4_NL", "MXFP4", "NVFP4", "IQ4_XS")
+    activation = "Q8_1" if affine else "Q8_0" if short else "Q8_K"
+    partner = getattr(F, activation)
     weight_bytes = K // elements * (encoding.schema.storage_bits // 8)
     activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
 
@@ -704,8 +730,8 @@ def projection(M, N, K, format="Q1_0", columns=1, records=1):
         Activation: T.Tensor((M, K), "float32"),
         Quantized: T.Tensor((M, activation_bytes), "uint8"),
         Output: T.Tensor((M, N), "float32"),
-        Codebook: T.Tensor((16 if format == "NVFP4" else 0,), "int8"),
-        Scale: T.Tensor((256 if format == "NVFP4" else 0,), "float32"),
+        Codebook: T.Tensor((16 if lookup else 0,), "int8"),
+        Scale: T.Tensor((256 if format in ("NVFP4", "MXFP4") else 0,), "float32"),
         Powers: T.Tensor((5 if format == "TQ1_0" else 0,), "uint32"),
     ):
         T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
@@ -716,10 +742,16 @@ def projection(M, N, K, format="Q1_0", columns=1, records=1):
         prepared = T.view(Quantized, shape=(M, K), encoding=partner, axes=("m", "k"), abi=True)
         output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            quantize_rows(source, prepared, M, K, "Q8_0" if short else "Q8_K",
-                          partner.schema.elements, "first", "direct", "dynamic" if short else "rne", 64)
+            quantize_rows(source, prepared, M, K, activation, partner.schema.elements,
+                          extreme_policy, inverse_policy, "dynamic" if short else "rne", 64)
             for m in T.serial(M):
-                if short:
+                if record32:
+                    block32_rows(weights, prepared[m, :], output[m, :], Codebook, Scale,
+                                 N, K, format, records, partials, affine, lookup)
+                elif format == "IQ4_XS":
+                    iq4_group_rows(weights, prepared[m, :], output[m, :], Codebook,
+                                   N, K, partials, records, "n")
+                elif short:
                     subblocks_rows(weights, prepared[m, :], output[m, :], Codebook, Scale,
                                    N, K, format, columns, elements, format == "NVFP4", 8, "n")
                 else:
