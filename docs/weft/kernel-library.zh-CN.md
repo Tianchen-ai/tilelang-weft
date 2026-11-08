@@ -104,6 +104,8 @@ RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
 的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
 和 Q6_K 使用 16 项子块。每组从原 record 快照读取 payload 与标量 metadata，
 完成 I32 partial 和整数 scale 更新，再执行 record 的浮点累加。
+仿射 `scale_projection` 可通过 `organization="groups"` 为 Q2_K 复用逐组闭合的
+整数 dot，Q8_K 准备仍在调用内完成；默认 `"lanes"` 保留另一种有界 I16 lane 累加。
 `scaled_planes` 则在每个半 record 的 128 元素子 Level 中保留 `(4, 2, 16)` payload 组织，显式计算
 plane/group partial 及其整数 scale。两个 factory 表达不同的源码复用范围；
 存储 record 和最终逐 record 浮点更新保持一致。
@@ -323,3 +325,8 @@ IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再�
 子 Level 内同时计算的 group 数，精确 I32 小计跨窗口携带，之后仍在原 record 边界执行
 F32 scale 更新。权重和 activation stage 保留声明的外层复用范围；局部 contraction
 保留共享 group 与彼此独立的行、列轴。
+
+单行、单列输出 issue 可在分阶段 IQ1 factory 中选用 `numerical_form="planes"`，
+复用 `iq1_plane_rows` 的 entry/payload 整数 dot，并将 delta 修正保持为独立支路。
+分阶段 factory 使用 `T.reinterpret` 重建 F16 block scale；独立 factory 继续保留
+显式 scale-table 输入合同。

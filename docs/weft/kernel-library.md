@@ -140,6 +140,9 @@ as Level subtiles, keeping the minimum correction in a separate integer branch.
 `scaled_groups` uses 16-term subtiles for Q3_K and Q6_K. Each group reads payload
 and scalar metadata from the original record snapshot, performs its I32 partial,
 and applies its integer scale before the record's floating-point update.
+The affine `scale_projection` accepts `organization="groups"` for Q2_K to
+reuse those explicitly closed group dots after in-call Q8_K preparation.
+Its default `"lanes"` keeps the alternative bounded I16 lane accumulation.
 `scaled_planes` instead retains the explicit `(4, 2, 16)` payload organization
 inside a 128-element sub-Level for each half-record dot, with independent plane/group partials and their
 integer scales. These factories expose different source reuse scopes; neither
@@ -409,3 +412,9 @@ the exact I32 subtotal carries across these windows before the record's F32
 scale update. Weight and activation stages retain their declared outer reuse
 scopes, while each local contraction preserves shared group and independent
 row/column axes.
+
+For single-row/single-column output issues, `numerical_form="planes"` in the
+staged IQ1 factory reuses `iq1_plane_rows`: entry/payload integer dots and the
+delta correction remain separate. The staged factory reconstructs the F16
+block scale with `T.reinterpret`; the standalone factory retains its explicit
+scale-table input contract.

@@ -442,9 +442,11 @@ def affine_group_rows(weights, values, output, M, K, format, group_size, groups,
 
 
 @tilelang.jit(target="weft")
-def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_policy="reciprocal"):
+def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_policy="reciprocal",
+                     organization="lanes"):
     """Quantize in-call and close each affine scale group's integer dot."""
     assert format in ("Q2_K", "Q4_K", "Q5_K") and min(M, N, K) > 0 and K % 256 == 0
+    assert organization in ("lanes", "groups")
     encoding = getattr(F, format)
     group_size = 16 if format == "Q2_K" else 32
     groups = 256 // group_size
@@ -466,7 +468,7 @@ def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_pol
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
-                if format == "Q2_K":
+                if format == "Q2_K" and organization == "lanes":
                     q2_lanes_batch(weights, values[m, :], output[m, :], N, K, "n")
                 else:
                     affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")

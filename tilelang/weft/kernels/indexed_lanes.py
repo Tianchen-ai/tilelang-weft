@@ -151,8 +151,8 @@ def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=1
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
     assert min(M, N, K, batch_rows, staged_columns) > 0
     assert M % batch_rows == N % staged_columns == K % 256 == 0
-    assert numerical_form in ("grouped", "scaled")
-    assert numerical_form != "scaled" or format in ("IQ1_S", "IQ1_M")
+    assert numerical_form in ("grouped", "scaled", "planes")
+    assert numerical_form == "grouped" or format in ("IQ1_S", "IQ1_M")
     assert rows > 0 and columns > 0 and batch_rows % rows == staged_columns % columns == 0
     assert rows == columns == 1 or (numerical_form == "scaled" and format in ("IQ1_S", "IQ1_M"))
     encoding = getattr(F, format)
@@ -201,7 +201,12 @@ def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=1
                         with T.level.rows(mc, group=1) as row:
                             values = activation_stage[row, :][0, :]
                             destination = output[row, nc][0, :]
-                            if numerical_form == "scaled":
+                            if numerical_form == "planes":
+                                iq1_plane_rows(weight_stage, values, destination, grid, 0,
+                                               nc, K, groups_per_step, format == "IQ1_M",
+                                               groups, 2 if format == "IQ1_M" else 4,
+                                               False, "n")
+                            elif numerical_form == "scaled":
                                 iq1_scaled_rows(weight_stage, values, destination, grid,
                                                 nc, K, format == "IQ1_M", "n")
                             elif format == "IQ3_XXS":
@@ -489,8 +494,9 @@ def iq1_scaled(M, K, format="IQ1_M", rows_per_program=None):
 
 
 @T.macro
-def iq1_plane_rows(weights, values, output, grid, HalfBits, M, K, groups_per_step, medium, groups, entries):
-    with T.level.rows(M, group=1) as row:
+def iq1_plane_rows(weights, values, output, grid, HalfBits, M, K, groups_per_step, medium, groups, entries,
+                   scale_table=True, axis="m"):
+    with T.level.rows(M, group=1, axis=axis) as row:
         total = T.alloc_var("float32", init=0)
         with T.level.blocks(K, extent=256) as block:
             w, x = T.load(weights[row, block][0, :]), T.load(values[block])
@@ -503,7 +509,10 @@ def iq1_plane_rows(weights, values, output, grid, HalfBits, M, K, groups_per_ste
                 sc3 = T.cast(scales[6], "uint16") | T.cast(scales[7], "uint16") << T.uint16(8)
                 bits = sc0 >> T.uint16(12) | sc1 >> T.uint16(8) & T.uint16(240)
                 bits |= sc2 >> T.uint16(4) & T.uint16(3840) | sc3 & T.uint16(61440)
-                block_scale = HalfBits[bits] * ds[()]
+                if scale_table:
+                    block_scale = HalfBits[bits] * ds[()]
+                else:
+                    block_scale = T.cast(T.reinterpret(bits, "float16"), "float32") * ds[()]
             else:
                 block_scale = T.cast(w.d[()], "float32") * ds[()]
             main, correction = T.alloc_var("int32", init=0), T.alloc_var("int32", init=0)
