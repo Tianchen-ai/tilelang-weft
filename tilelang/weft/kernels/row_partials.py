@@ -466,7 +466,10 @@ def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_pol
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
-                affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
+                if format == "Q2_K":
+                    q2_lanes_rows(weights, values[m, :], output[m, :], N, K, "n")
+                else:
+                    affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
 
     return main
 
@@ -590,9 +593,50 @@ def scaled_groups(M, K, format="Q3_K"):
     return main
 
 
+@T.macro(noinline=True)
+def q2_lanes_value(weights, values, K):
+    """Accumulate four exact scaled products per I16 lane before widening."""
+    total = T.alloc_var("float32", init=0)
+    with T.level.blocks(K, extent=256) as block:
+        w, x = T.load(weights[block]), T.load(values[block])
+        q, scales, d, dmin = w.q, w.scales, w.d, w.dmin
+        activation, sums, ds = x.q, x.bsum, x.ds
+        integer = T.alloc_var("int32", init=0)
+        for half in T.unroll(4):
+            partial = T.alloc_local((16,), "int16")
+            T.fill(partial, 0)
+            for part in T.unroll(4):
+                group = half * 4 + part
+                scale = T.cast(scales[group] & T.uint8(15), "int8")
+                for k in T.Parallel(16):
+                    coordinate = T.uint16(half * 64 + part * 16) + T.cast(k, "uint16")
+                    scaled = T.cast(q[coordinate], "int8") * scale
+                    partial[k] += T.cast(scaled, "int16") * T.cast(activation[coordinate], "int16")
+            reduced = T.alloc_local((1,), "int32")
+            widened = T.alloc_local((16,), "int32")
+            for k in T.Parallel(16):
+                widened[k] = T.cast(partial[k], "int32")
+            T.reduce_sum(widened, reduced, dim=0)
+            integer += reduced[0]
+        minima = T.alloc_local((16,), "int16")
+        correction = T.alloc_local((1,), "int32")
+        for g in T.Parallel(16):
+            minima[g] = T.cast(scales[g] >> T.uint8(4), "int16")
+        T.reduce_dot(sums, minima, correction, over="k", acc_dtype="int32", engine="vector")
+        total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32") - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))
+    return total
+
+
+@T.macro
+def q2_lanes_rows(weights, values, output, M, K, axis):
+    with T.level.rows(M, group=1, axis=axis) as row:
+        result = T.alloc_local((1,), "float32")
+        result[0] = q2_lanes_value(weights[row, :][0, :], values, K)
+        T.copy(result, output[row])
+
+
 @tilelang.jit(target="weft")
 def q2_lanes(M, K):
-    """Accumulate four exact scaled products per I16 lane before widening."""
     assert M > 0 and K > 0 and K % 256 == 0
 
     @T.prim_func
@@ -606,79 +650,56 @@ def q2_lanes(M, K):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            with T.level.rows(M, group=1) as row:
-                total = T.alloc_var("float32", init=0)
-                with T.level.blocks(K, extent=256) as block:
-                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
-                    q, scales, d, dmin = w.q, w.scales, w.d, w.dmin
-                    activation, sums, ds = x.q, x.bsum, x.ds
-                    integer = T.alloc_var("int32", init=0)
-                    for half in T.serial(4):
-                        partial = T.alloc_local((16,), "int16")
-                        T.fill(partial, 0)
-                        for part in T.unroll(4):
-                            group = half * 4 + part
-                            scale = T.cast(scales[group] & T.uint8(15), "int8")
-                            for k in T.Parallel(16):
-                                coordinate = T.cast(half, "uint16") * T.uint16(64) + T.uint16(part * 16) + T.cast(k, "uint16")
-                                scaled = T.cast(q[coordinate], "int8") * scale
-                                partial[k] += T.cast(scaled, "int16") * T.cast(activation[coordinate], "int16")
-                        reduced = T.alloc_local((1,), "int32")
-                        widened = T.alloc_local((16,), "int32")
-                        for k in T.Parallel(16):
-                            widened[k] = T.cast(partial[k], "int32")
-                        T.reduce_sum(widened, reduced, dim=0)
-                        integer += reduced[0]
-                    minima = T.alloc_local((16,), "int16")
-                    correction = T.alloc_local((1,), "int32")
-                    for g in T.Parallel(16):
-                        minima[g] = T.cast(scales[g] >> T.uint8(4), "int16")
-                    T.reduce_dot(sums, minima, correction, over="k", acc_dtype="int32", engine="vector")
-                    total += ds[()] * (T.cast(d[()], "float32") * T.cast(integer, "float32") - T.cast(dmin[()], "float32") * T.cast(correction[0], "float32"))
-                result = T.alloc_local((1,), "float32")
-                result[0] = total
-                T.copy(result, output[row])
+            q2_lanes_rows(weights, values, output, M, K, "m")
 
     return main
+
+
+@T.macro(noinline=True)
+def scaled_lanes_value(weights, values, K, format, lanes):
+    """Close one encoded row's numerical lanes at an explicit call boundary."""
+    total = T.alloc_local((lanes,), "float32")
+    T.fill(total, 0)
+    with T.level.blocks(K, extent=256) as block:
+        w, x = T.load(weights[block]), T.load(values[block])
+        ds, d = x.ds, w.d
+        low = w.q if format == "Q3_K" else w.ql
+        high, activation = w.hmask if format == "Q3_K" else w.qh, x.q
+        if format == "Q3_K":
+            scale_low, scale_high = w.scale_low, w.scale_high
+        else:
+            scales = w.scales
+        block_scale = T.cast(d[()], "float32") * ds[()]
+        integer = T.alloc_local((lanes,), "int32")
+        T.fill(integer, 0)
+        for group in T.unroll(256 // lanes):
+            left = group * (lanes // 16)
+            for k in T.Parallel(lanes):
+                coordinate = T.uint32(group * lanes) + T.cast(k, "uint32")
+                code = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
+                product = T.cast(code, "int16") * T.cast(activation[coordinate], "int16")
+                if format == "Q3_K":
+                    a = T.cast(T.cast(scale_low[left], "uint8") | (T.cast(scale_high[left], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                    if lanes == 32:
+                        b = T.cast(T.cast(scale_low[left + 1], "uint8") | (T.cast(scale_high[left + 1], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                else:
+                    a = scales[left]
+                    if lanes == 32:
+                        b = scales[left + 1]
+                scale = a if lanes == 16 else T.if_then_else(T.cast(k, "uint32") < T.uint32(16), a, b)
+                integer[k] += T.cast(product, "int32") * T.cast(scale, "int32")
+        for k in T.Parallel(lanes):
+            total[k] += T.cast(integer[k], "float32") * block_scale
+    result = T.alloc_local((1,), "float32")
+    T.reduce_sum(total, result, dim=0)
+    return result[0]
 
 
 @T.macro
 def scaled_lanes_rows(weights, values, output, M, K, format, lanes, axis):
     with T.level.rows(M, group=1, axis=axis) as row:
-        total = T.state((lanes,), "float32", init=0)
-        with T.level.blocks(K, extent=256) as block:
-            w = T.load(weights[row, block][0, :])
-            x = T.load(values[block])
-            ds, d = x.ds, w.d
-            low = w.q if format == "Q3_K" else w.ql
-            high, activation = w.hmask if format == "Q3_K" else w.qh, x.q
-            if format == "Q3_K":
-                scale_low, scale_high = w.scale_low, w.scale_high
-            else:
-                scales = w.scales
-            block_scale = T.cast(d[()], "float32") * ds[()]
-            integer = T.alloc_local((lanes,), "int32")
-            T.fill(integer, 0)
-            for group in T.unroll(256 // lanes):
-                left = group * (lanes // 16)
-                for k in T.Parallel(lanes):
-                    coordinate = T.uint32(group * lanes) + T.cast(k, "uint32")
-                    code = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
-                    product = T.cast(code, "int16") * T.cast(activation[coordinate], "int16")
-                    if format == "Q3_K":
-                        a = T.cast(T.cast(scale_low[left], "uint8") | (T.cast(scale_high[left], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                        if lanes == 32:
-                            b = T.cast(T.cast(scale_low[left + 1], "uint8") | (T.cast(scale_high[left + 1], "uint8") << T.uint8(4)), "int8") - T.int8(32)
-                    else:
-                        a = scales[left]
-                        if lanes == 32:
-                            b = scales[left + 1]
-                    scale = a if lanes == 16 else T.if_then_else(T.cast(k, "uint32") < T.uint32(16), a, b)
-                    integer[k] += T.cast(product, "int32") * T.cast(scale, "int32")
-            for k in T.Parallel(lanes):
-                total[k] += T.cast(integer[k], "float32") * block_scale
         result = T.alloc_local((1,), "float32")
-        T.reduce_sum(total, result, dim=0)
+        result[0] = scaled_lanes_value(weights[row, :][0, :], values, K, format, lanes)
         T.copy(result, output[row])
 
 

@@ -144,6 +144,14 @@ and applies its integer scale before the record's floating-point update.
 inside a 128-element sub-Level for each half-record dot, with independent plane/group partials and their
 integer scales. These factories expose different source reuse scopes; neither
 changes the stored record or the final per-record floating update.
+`q2_lanes` and `scaled_lanes` close one row in an explicit
+`T.macro(noinline=True)` helper. Their row traversal and complete projection
+call that same helper, so a row's numerical lanes finish before the next row
+begins. Q2 retains four exact scaled products per I16 lane before widening;
+Q3/Q6 retain I32 group-scaled lanes and the per-record F32 update. This is an
+author call boundary, not a target-selected replacement kernel. The Q2
+`scale_projection` and lane-organized `scaled_projection` include activation
+quantization in their original call.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.
