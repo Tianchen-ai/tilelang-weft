@@ -211,6 +211,13 @@ staged bytes without persistent repacking. Activation quantization stays inside
 the call; the same View, Level and contraction path supports the target's chosen
 physical vector layout.
 
+`indexed_lanes.staged_projection` applies the same outer column and activation-row
+stages to indexed records. It calls the existing IQ1/IQ2/IQ3/IQ4 row macros,
+retaining their group partials, explicit codebook/sign inputs and record scaling.
+`batch_rows`, `staged_columns` and `groups_per_step` describe source reuse and
+grouping; Q8_K quantization remains inside the invocation. The stages retain
+natural encoded storage rather than requiring persistent weight preparation.
+
 `subblock_partials.window_dot` uses closed integer dots within each encoded
 record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
 NVFP4 shares the staged codebook while closing each 16-element scaled product;

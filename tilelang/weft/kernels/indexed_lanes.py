@@ -123,6 +123,67 @@ def scaled_entries(M, K, format="IQ3_S"):
     return main
 
 
+@tilelang.jit(target="weft")
+def staged_projection(M, N, K, format="IQ2_XXS", batch_rows=16, staged_columns=16,
+                      groups_per_step=8, extreme_policy="first", inverse_policy="reciprocal"):
+    """Reuse encoded column and activation-row stages around the existing dots."""
+    assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S", "IQ3_S", "IQ3_XXS", "IQ4_XS")
+    assert min(M, N, K, batch_rows, staged_columns) > 0
+    assert M % batch_rows == N % staged_columns == K % 256 == 0
+    encoding = getattr(F, format)
+    payload = 4 if format in ("IQ3_S", "IQ3_XXS") else 8
+    table_entries = {"IQ1_S": 2048, "IQ1_M": 2048, "IQ2_XS": 512, "IQ2_XXS": 256,
+                     "IQ2_S": 1024, "IQ3_S": 512, "IQ3_XXS": 256, "IQ4_XS": 16}[format]
+    signed_table = format in ("IQ2_XS", "IQ2_XXS", "IQ3_XXS")
+    groups = 8 if format in ("IQ1_S", "IQ2_XXS") else 16
+    assert groups_per_step in (1, 2, 4, 8, 16) and groups % groups_per_step == 0
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, K // 256 * (encoding.schema.storage_bits // 8)), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Grid: T.Tensor((table_entries if format == "IQ4_XS" else table_entries * payload,), "int8"),
+        Signs: T.Tensor((1024 if signed_table else 0,), "int8"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Grid": "input", "Signs": "input", "Quantized": "quantized", "Output": "output"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        if format == "IQ4_XS":
+            grid = T.view(Grid, shape=(16,), axes=("code",), abi=True)
+        else:
+            grid = T.view(Grid, shape=(table_entries, payload), encoding=F.I8X4 if payload == 4 else F.I8X8,
+                          axes=("entry", "payload"), abi=True)
+        if signed_table:
+            signs = T.view(Signs, shape=(128, 8), encoding=F.I8X8, axes=("sign", "sign_payload"), abi=True)
+        else:
+            signs = grid
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, "Q8_K", 256,
+                          extreme_policy, inverse_policy, "rne", 256)
+            with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
+                weight_stage = T.stage(T.load(weights[nc, :]))
+                with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
+                    activation_stage = T.stage(T.load(prepared[mc, :]))
+                    with T.level.rows(mc, group=1) as row:
+                        values = activation_stage[row, :][0, :]
+                        destination = output[row, nc][0, :]
+                        if format == "IQ3_XXS":
+                            xxs_subgroups_rows(weight_stage, values, destination, grid, signs, nc, K, "n")
+                        elif format in ("IQ3_S", "IQ4_XS"):
+                            scaled_entries_rows(weight_stage, values, destination, grid,
+                                                nc, K, format, 2, 8, 4, "n")
+                        else:
+                            indexed_rows(weight_stage, values, destination, grid, signs,
+                                         nc, K, format, groups_per_step, signed_table, groups, "n")
+
+    return main
+
+
 @T.macro
 def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
     with T.level.rows(M, group=1, axis=axis) as row:
