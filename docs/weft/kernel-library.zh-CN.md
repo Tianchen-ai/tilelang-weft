@@ -157,6 +157,11 @@ activation 量化到调用者提供的 `Quantized` buffer，再复用同一宏�
 输出布局均保持显式。
 `rows_per_program` 也可以让一个实例保留多行完整计算。
 
+`short_projection.staged_projection` 消费原始编码权重布局。作者分别指定外层权重列
+stage、activation 行 stage，以及在整个 K 上保留 state 的较小行列输出 tile。
+它复用 staged bytes，activation 量化仍计入调用，不要求持久 repack；相同 View、
+Level 和 contraction 主链交由目标编译器选择物理向量布局。
+
 `row_partials.scale_projection` 为 Q2_K/Q4_K/Q5_K 复用 `affine_group_rows`，
 分别保留带 scale 的整数和及 minimum 校正和。Q2_K 以 I16 表示 minimum
 系数，与 Q8_K 的分组和显式 contraction。scale 与 indexed projection

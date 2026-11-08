@@ -204,6 +204,13 @@ factories; `extreme_policy` and `inverse_policy` preserve the preparation contra
 IQ4_XS likewise shares `iq4_group_rows` between its dot and projection, retaining
 the explicit grouped partials and codebook snapshot through both entry points.
 
+`short_projection.staged_projection` consumes the original encoded weight layout.
+The author selects an outer weight-column stage, an activation-row stage, and a
+smaller row/column output tile whose state remains live over K. This reuses the
+staged bytes without persistent repacking. Activation quantization stays inside
+the call; the same View, Level and contraction path supports the target's chosen
+physical vector layout.
+
 `subblock_partials.window_dot` uses closed integer dots within each encoded
 record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
 NVFP4 shares the staged codebook while closing each 16-element scaled product;
