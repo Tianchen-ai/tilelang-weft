@@ -71,14 +71,18 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                         inputs[g, e, p] = activation[coordinate]
                     products = T.alloc_local((groups,), "int32")
                     T.reduce_dot(inputs, codes, products, over=("entry", "payload"), acc_dtype="int32", engine="vector")
-                    for g in T.unroll(groups):
-                        group = window_index * T.uint16(groups) + T.uint16(g)
+                    scaled = T.alloc_local((groups,), "int32")
+                    for g in T.Parallel(groups):
+                        group = window_index * T.uint16(groups) + T.cast(g, "uint16")
                         if format == "IQ2_S":
                             coefficient = (scale_word >> T.cast(g * 4, "uint16")) & T.uint16(15)
                         else:
                             coefficient = T.cast(scales[group], "uint16")
                         factor = T.cast(coefficient * T.uint16(2) + T.uint16(1), "int32")
-                        integer += products[g] * factor
+                        scaled[g] = products[g] * factor
+                    partial = T.alloc_local((), "int32")
+                    T.reduce_sum(scaled, partial, dim=0)
+                    integer += partial[()]
                     window_index += T.uint16(1)
                 total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
         result = T.alloc_local((1,), "float32")
@@ -148,11 +152,15 @@ def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
                     coordinate = group_index * T.uint16(64) + T.cast(half * 32 + pair_entry * 8 + pair * 4 + payload, "uint16")
                     inputs[half, pair_entry, pair, payload] = activation[coordinate]
                 products = T.alloc_local((2,), "int32")
+                weighted = T.alloc_local((2,), "int32")
+                subtotal = T.alloc_local((), "int32")
                 T.reduce_dot(inputs, codes, products, over=("pair_entry", "pair", "payload"), acc_dtype="int32", engine="vector")
-                for half in T.unroll(2):
-                    word = metadata[group_index * T.uint16(2) + T.uint16(half)]
+                for half in T.Parallel(2):
+                    word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
                     scale = T.cast((word >> T.uint32(28)) * T.uint32(2) + T.uint32(1), "int32")
-                    block_sum += products[half] * scale
+                    weighted[half] = products[half] * scale
+                T.reduce_sum(weighted, subtotal, dim=0)
+                block_sum += subtotal[()]
                 group_index += T.uint16(1)
             total += (T.cast(d[()], "float32") * ds[()]) * T.cast(block_sum, "float32")
         result = T.alloc_local((1,), "float32")
