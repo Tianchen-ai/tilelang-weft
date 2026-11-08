@@ -735,7 +735,7 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
                       extreme_policy="first", inverse_policy="reciprocal",
-                      organization="planes", lanes=32):
+                      organization="planes", lanes=32, rows=1, columns=1):
     """Reuse natural K-format stages with the existing grouped row programs."""
     assert format in ("Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K")
     assert min(M, N, K, batch_rows, staged_columns) > 0
@@ -743,6 +743,8 @@ def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
     assert organization in ("planes", "lanes") and lanes in (16, 32)
     assert organization != "lanes" or format in ("Q2_K", "Q3_K", "Q6_K")
     assert format != "Q2_K" or organization != "lanes" or lanes == 16
+    assert rows > 0 and columns > 0 and batch_rows % rows == staged_columns % columns == 0
+    assert (rows == columns == 1) or (format in ("Q3_K", "Q6_K") and organization == "planes")
     encoding = getattr(F, format)
     group_size = 16 if format == "Q2_K" else 32
 
@@ -766,20 +768,66 @@ def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
                 weight_stage = T.stage(T.load(weights[nc, :]))
                 with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
                     activation_stage = T.stage(T.load(prepared[mc, :]))
-                    with T.level.rows(mc, group=1) as row:
-                        values = activation_stage[row, :][0, :]
-                        destination = output[row, nc][0, :]
-                        if format == "Q2_K" and organization == "lanes":
-                            q2_lanes_rows(weight_stage, values, destination, nc, K, "n")
-                        elif format in ("Q2_K", "Q4_K", "Q5_K"):
-                            affine_group_rows(weight_stage, values, destination, nc, K,
-                                              format, group_size, 256 // group_size, "n")
-                        elif organization == "lanes":
-                            scaled_lanes_rows(weight_stage, values, destination, nc, K, format, lanes, "n")
-                        else:
-                            scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
+                    if rows > 1 or columns > 1:
+                        scaled_matrix_tiles(weight_stage, activation_stage, output,
+                                            mc, nc, K, format, rows, columns)
+                    else:
+                        with T.level.rows(mc, group=1) as row:
+                            values = activation_stage[row, :][0, :]
+                            destination = output[row, nc][0, :]
+                            if format == "Q2_K" and organization == "lanes":
+                                q2_lanes_rows(weight_stage, values, destination, nc, K, "n")
+                            elif format in ("Q2_K", "Q4_K", "Q5_K"):
+                                affine_group_rows(weight_stage, values, destination, nc, K,
+                                                  format, group_size, 256 // group_size, "n")
+                            elif organization == "lanes":
+                                scaled_lanes_rows(weight_stage, values, destination, nc, K, format, lanes, "n")
+                            else:
+                                scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
 
     return main
+
+
+@T.macro
+def scaled_matrix_tiles(weights, values, output, mc, nc, K, format, rows, columns):
+    with T.level.cols(nc, group=columns) as col:
+        with T.level.rows(mc, group=rows) as row:
+            total = T.state((rows, columns), "float32", init=0)
+            with T.level.blocks(K, extent=256) as block:
+                w, x = T.load(weights[col, block]), T.load(values[row, block])
+                low = w.q if format == "Q3_K" else w.ql
+                high = w.hmask if format == "Q3_K" else w.qh
+                inputs, ds, d = x.q, x.ds, w.d
+                if format == "Q3_K":
+                    scale_low, scale_high = w.scale_low, w.scale_high
+                else:
+                    scales = w.scales
+                integer = T.state((rows, columns), "int32", init=0)
+                with T.level.subtiles(block, extent=64) as pair:
+                    lower, upper = T.load(low, at=pair), T.load(high, at=pair)
+                    codes = T.alloc_local((columns, 64), "int8")
+                    for c, k in T.Parallel(columns, 64):
+                        code = T.cast(lower[c, k], "uint8") | (T.cast(upper[c, k], "uint8") << T.uint8(2 if format == "Q3_K" else 4))
+                        codes[c, k] = T.cast(code, "int8") - T.int8(4 if format == "Q3_K" else 32)
+                    with T.level.subtiles(pair, extent=16) as group:
+                        activation = T.load(inputs, at=group)
+                        selected = T.load(codes, at=group)
+                        products = T.alloc_local((rows, columns), "int32")
+                        T.reduce_dot(activation, selected, products, over="k", acc_dtype="int32", engine="vector")
+                        if format == "Q3_K":
+                            lower_scale = T.load(scale_low, at=group)
+                            upper_scale = T.load(scale_high, at=group)
+                        else:
+                            factor = T.load(scales, at=group)
+                        for r, c in T.Parallel(rows, columns):
+                            if format == "Q3_K":
+                                scale = T.cast(T.cast(lower_scale[c], "uint8") | (T.cast(upper_scale[c], "uint8") << T.uint8(4)), "int8") - T.int8(32)
+                            else:
+                                scale = factor[c]
+                            integer[r, c] += products[r, c] * T.cast(scale, "int32")
+                for r, c in T.Parallel(rows, columns):
+                    total[r, c] += (ds[r] * T.cast(d[c], "float32")) * T.cast(integer[r, c], "float32")
+            T.copy(total, output[row, col])
 
 
 @T.macro(noinline=True)
