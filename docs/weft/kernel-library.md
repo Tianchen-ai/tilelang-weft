@@ -153,10 +153,10 @@ numerical lanes finish before the next row begins. Q2 retains four exact scaled
 products per I16 lane before widening;
 Q3/Q6 retain I32 group-scaled lanes and the per-record F32 update. This is an
 author numerical structure. The Q2 `scale_projection` and `scaled_projection`
-include activation quantization in their original call. Their complete row
-traversal uses `T.macro(noinline=True)` to close preparation's temporary values
-before the compute batch; there is one call per activation row, rather than one
-call per output element.
+include activation quantization in their original call. Q2's projection closes
+each output row in `T.macro(noinline=True)`, keeping its complete numerical
+lanes within that call. Q3/Q6 close the activation-row batch in their existing
+non-inlined helper.
 `staged_projection` can retain the same lane organization inside its declared
 weight-column and activation-row stages. Q2 uses 16 exact I16 lanes; Q3/Q6
 choose 16 or 32 scaled I32 lanes. The default grouped-plane organization remains
@@ -167,6 +167,11 @@ extra combined contribution temporary.
 in one non-inlined macro call after preparation, retaining the same Level tree
 and natural input ABI. The call closes preparation temporaries without adding
 a call at each output tile or K record.
+`subblock_projection.projection` uses the same explicit `batch_rows`,
+`staged_columns`, `rows` and `columns` reuse scopes for Q1/NVFP4. The output
+tile is state across all K records and is stored once. NVFP4 retains separate
+16-element codebook dots and subblock scales; Q1 retains its centered I8 codes.
+Activation quantization and local encoded stages remain inside the invocation.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.

@@ -226,7 +226,7 @@ class ModelOperations:
                             continue
                         coordinate = self.iota(extent, axis)
                         start = self.cast(self.expr(offset), element_type(coordinate.type).dtype)
-                        coordinates.append(self.binary("add", coordinate, start))
+                        coordinates.append(self.local_index(self.binary("add", coordinate, start)))
                         selectors.append("gather")
                     return self.op(
                         "extract", (base, *coordinates), LocalValueType(element_type(base.type), tuple(shape), axes_of(base.type)),

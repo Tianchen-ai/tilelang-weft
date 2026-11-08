@@ -113,9 +113,9 @@ plane/group partial 及其整数 scale。两个 factory 表达不同的源码复
 调用相同 helper，每行的数值 lanes 在下一行开始前收口。
 Q2 在每个 I16 lane 中累加四项精确缩放乘积，再 widen；Q3/Q6 保留 I32
 group-scaled lanes 和逐 record 的 F32 更新。这是作者的数值结构。Q2 的
-`scale_projection` 与 `scaled_projection` 仍将 activation 量化计入原调用；完整行遍历
-使用 `T.macro(noinline=True)`，将准备阶段临时值的生命周期在计算批次前收口。
-每个 activation 行调用一次，不为每个输出元素增加一次函数调用。
+`scale_projection` 与 `scaled_projection` 仍将 activation 量化计入原调用。
+Q2 projection 通过 `T.macro(noinline=True)` 在一次调用中闭合每个输出行的完整数值
+lanes；Q3/Q6 则在已有的不内联 helper 中闭合一个 activation 行的计算批次。
 `staged_projection` 也可以在已声明的权重列 stage 和 activation 行 stage 中保留相同的
 lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩放 I32 lanes。
 默认的分组 plane 组织继续保留。短 record affine projection 将 minimum 和 product
@@ -123,6 +123,10 @@ lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩�
 `short_projection.staged_projection` 在准备完成后，通过一次不内联的 macro 调用执行整个
 staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结束准备阶段临时量的驻留，
 不为每个输出 tile 或 K record 增加函数调用。
+`subblock_projection.projection` 为 Q1/NVFP4 提供相同的显式 `batch_rows`、
+`staged_columns`、`rows` 和 `columns` 复用作用域。输出 tile 的 state 跨全部 K record
+保留，只在完成后写出。NVFP4 保留独立的 16 元素码本 dot 与子块 scale，Q1 保留
+中心化 I8 code；activation 量化和局部 encoded stage 都在本次调用内完成。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
 索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`

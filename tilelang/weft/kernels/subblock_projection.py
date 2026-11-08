@@ -6,14 +6,58 @@ from . import ggml_formats as F
 from .preparation import quantize_rows
 
 
+@T.macro(noinline=True)
+def staged_tiles(weights, prepared, output, table, scales, M, N, K, format,
+                 batch_rows, staged_columns, rows, columns, elements):
+    """Retain each output tile across K within explicit encoded reuse scopes."""
+    with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
+        weight_stage = T.stage(T.load(weights[nc, :]))
+        with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
+            activation_stage = T.stage(T.load(prepared[mc, :]))
+            with T.level.cols(nc, group=columns) as col:
+                with T.level.rows(mc, group=rows) as row:
+                    total = T.state((rows, columns), "float32", init=0)
+                    with T.level.blocks(K, extent=elements) as block:
+                        weight = weight_stage[col, block]
+                        with T.level.subtiles(block, extent=32) as activation_block:
+                            activation = activation_stage[row, activation_block]
+                            xd = T.load(activation.d)
+                            if format == "NVFP4":
+                                with T.level.subtiles(activation_block, extent=16) as sub:
+                                    codes = T.load(table, at=T.load(weight.q, at=sub, axis=1), bounds="in_bounds")
+                                    factors = T.load(scales, at=T.load(weight.d, at=sub, axis=1), bounds="in_bounds")
+                                    factors = T.reshape(factors, (columns,))
+                                    products = T.alloc_local((rows, columns), "int32")
+                                    T.reduce_dot(T.load(activation.q, at=sub, axis=1), codes, products,
+                                                 over="k", acc_dtype="int32", engine="vector")
+                                    for r, c in T.Parallel(rows, columns):
+                                        total[r, c] += (T.cast(xd[r], "float32") * factors[c]) * T.cast(products[r, c], "float32")
+                            else:
+                                bits = T.load(weight.q, at=activation_block, axis=1)
+                                wd = T.load(weight.d)
+                                codes = T.alloc_local((columns, 32), "int8")
+                                for c, k in T.Parallel(columns, 32):
+                                    codes[c, k] = T.cast(bits[c, k], "int8") * T.int8(2) - T.int8(1)
+                                products = T.alloc_local((rows, columns), "int32")
+                                T.reduce_dot(T.load(activation.q), codes, products,
+                                             over="k", acc_dtype="int32", engine="vector")
+                                for r, c in T.Parallel(rows, columns):
+                                    total[r, c] += (T.cast(wd[c], "float32") * T.cast(xd[r], "float32")) * T.cast(products[r, c], "float32")
+                    T.copy(total, output[row, col])
+
+
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="NVFP4", columns=8,
-               extreme_policy="first", inverse_policy="direct"):
+               extreme_policy="first", inverse_policy="direct", rows=1,
+               batch_rows=None, staged_columns=None):
     assert format in ("Q1_0", "NVFP4")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
-    width = 32 if format == "Q1_0" else 16
-    assert M > 0 and N > 0 and columns > 0 and N % columns == 0
+    batch_rows = M if batch_rows is None else batch_rows
+    staged_columns = columns if staged_columns is None else staged_columns
+    assert min(M, N, columns, rows, batch_rows, staged_columns) > 0
+    assert M % batch_rows == N % staged_columns == 0
+    assert batch_rows % rows == staged_columns % columns == 0
     assert K > 0 and K % elements == 0
     weight_bytes = K // elements * (encoding.schema.storage_bits // 8)
 
@@ -36,49 +80,15 @@ def projection(M, N, K, format="NVFP4", columns=8,
             codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
             scales = T.view(Scale, shape=(256,), axes=("scale",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
+            if format == "NVFP4":
+                table = T.stage(T.load(codebook))
             quantize_rows(source, prepared, M, K, "Q8_0", 32,
                           extreme_policy, inverse_policy, "dynamic", 32)
             if format == "NVFP4":
-                table = T.stage(T.load(codebook))
-            with T.level.cols(N, group=columns) as col:
-                if M == 1:
-                    accumulated = T.state((columns,), "float32", init=0)
-                else:
-                    for m in T.serial(M):
-                        zero = T.state((columns,), "float32", init=0)
-                        T.copy(zero, output[m, col])
-                with T.level.blocks(K, extent=elements) as block:
-                    weight = T.load(weights[col, block])
-                    q, d = weight.q, weight.d
-                    for part in T.unroll(elements // width):
-                        if format == "NVFP4":
-                            codes = T.load(table, at=q[:, part * width : (part + 1) * width], bounds="in_bounds")
-                            selected = T.load(scales, at=d[:, part], bounds="in_bounds")
-                            factors = T.reshape(selected, (columns,))
-                        else:
-                            codes = q[:, part * width : (part + 1) * width]
-                            factors = d
-                        for m in T.serial(M):
-                            activation = T.load(prepared[m, block][part * width // 32 * 32 : part * width // 32 * 32 + 32])
-                            values = activation.q[part * width % 32 : part * width % 32 + width]
-                            products = T.alloc_local((columns,), "int32")
-                            T.reduce_dot(codes, values, products, over="k", acc_dtype="int32", engine="vector")
-                            if format == "Q1_0":
-                                wide = T.alloc_local((width,), "int32")
-                                total = T.alloc_local((1,), "int32")
-                                for k in T.Parallel(width):
-                                    wide[k] = T.cast(activation.q[part * width % 32 + k], "int32")
-                                T.reduce_sum(wide, total, dim=0)
-                            prior = accumulated if M == 1 else T.load(output[m, col])
-                            result = T.alloc_local((columns,), "float32")
-                            for c in T.Parallel(columns):
-                                integer = products[c] * 2 - total[0] if format == "Q1_0" else products[c]
-                                result[c] = prior[c] + (T.cast(factors[c], "float32") * T.cast(activation.d[()], "float32")) * T.cast(integer, "float32")
-                            if M == 1:
-                                T.copy(result, accumulated)
-                            else:
-                                T.copy(result, output[m, col])
-                if M == 1:
-                    T.copy(accumulated, output[0, col])
+                staged_tiles(weights, prepared, output, table, scales, M, N, K, format,
+                             batch_rows, staged_columns, rows, columns, elements)
+            else:
+                staged_tiles(weights, prepared, output, Codebook, Scale, M, N, K, format,
+                             batch_rows, staged_columns, rows, columns, elements)
 
     return main

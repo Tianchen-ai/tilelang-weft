@@ -469,7 +469,10 @@ def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_pol
             quantize_rows(source, values, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 256)
             for m in T.serial(M):
                 if format == "Q2_K" and organization == "lanes":
-                    q2_lanes_batch(weights, values[m, :], output[m, :], N, K, "n")
+                    for n in T.serial(N):
+                        result = T.alloc_local((), "float32")
+                        result[()] = q2_lanes_row(weights[n, :], values[m, :], K)
+                        T.copy(result, output[m, n])
                 else:
                     affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
 
@@ -638,8 +641,9 @@ def q2_lanes_rows(weights, values, output, M, K, axis):
 
 
 @T.macro(noinline=True)
-def q2_lanes_batch(weights, values, output, M, K, axis):
-    q2_lanes_rows(weights, values, output, M, K, axis)
+def q2_lanes_row(weights, values, K):
+    """Close the integer partials and floating result of one encoded row."""
+    return q2_lanes_value(weights, values, K)
 
 
 @tilelang.jit(target="weft")
