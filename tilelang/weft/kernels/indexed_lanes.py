@@ -467,8 +467,8 @@ def iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis):
 
 
 @T.macro(noinline=True)
-def iq1_scaled_row(weights, values, output, grid, K, medium):
-    iq1_scaled_rows(weights, values, output, grid, 1, K, medium, "m")
+def iq1_scaled_row(weights, values, output, grid, K, medium, axis="m"):
+    iq1_scaled_rows(weights, values, output, grid, 1, K, medium, axis)
 
 
 @tilelang.jit(target="weft")
@@ -747,9 +747,16 @@ def iq1_scaled_batch(weights, values, output, grid, M, K, medium, axis):
     iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis)
 
 
+@T.macro(noinline=True)
+def indexed_row(weights, values, output, grid, signs, K, format, groups_per_step,
+                signed_table, groups, axis):
+    indexed_rows(weights, values, output, grid, signs, 1, K, format,
+                 groups_per_step, signed_table, groups, axis)
+
+
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first",
-               numerical_form="grouped"):
+               numerical_form="grouped", row_calls=False):
     """Prepare Q8_K once and reuse the record-local indexed partials."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S")
     assert min(M, N, K) > 0 and K % 256 == 0
@@ -784,7 +791,17 @@ def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, prepared, M, K, "Q8_K", 256, extreme_policy, "direct", "rne", 64)
             for row in T.serial(M):
-                if numerical_form == "scaled":
+                if row_calls:
+                    for column in T.serial(N):
+                        if numerical_form == "scaled":
+                            iq1_scaled_row(weights[column : column + 1, :], prepared[row, :],
+                                           output[row, column : column + 1], grid,
+                                           K, format == "IQ1_M", "n")
+                        else:
+                            indexed_row(weights[column : column + 1, :], prepared[row, :],
+                                        output[row, column : column + 1], grid, signs,
+                                        K, format, groups_per_step, signed_table, groups, "n")
+                elif numerical_form == "scaled":
                     iq1_scaled_batch(weights, prepared[row, :], output[row, :], grid,
                                      N, K, format == "IQ1_M", "n")
                 else:
