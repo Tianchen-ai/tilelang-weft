@@ -265,7 +265,7 @@ def iq1_scaled_tiles(weights, values, output, grid, mc, nc, K, medium, rows, col
                             delta = T.int8(1) - T.cast((word >> shift) & T.uint16(1), "int8") * T.int8(2)
                         else:
                             delta = T.cast((T.cast(word, "int16") >> T.int16(15)) | T.int16(1), "int8")
-                        biased = T.cast(T.cast(selected[g, c, entry, payload], "int16") + T.int16(1), "uint2")
+                        biased = T.cast(selected[g, c, entry, payload] + T.int8(1), "uint2")
                         codes[g, c, entry, payload] = (T.cast(biased, "int8") - T.int8(1)) * T.int8(8) + delta
                     for g, r, entry, payload in T.Parallel(groups_per_step, rows, entries, 8):
                         group = group_start + T.cast(g, "uint16")
@@ -444,16 +444,18 @@ def iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis):
                 word = T.cast(high[group], "uint16")
                 if medium:
                     scale_word = sc0 if e < T.uint16(8) else sc1 if e < T.uint16(16) else sc2 if e < T.uint16(24) else sc3
-                    factor = T.cast(((scale_word >> (group % T.uint16(4) * T.uint16(3))) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int16")
+                    coefficient = T.cast((scale_word >> (group % T.uint16(4) * T.uint16(3))) & T.uint16(7), "uint8")
+                    factor = T.cast(coefficient * T.uint8(2) + T.uint8(1), "int8")
                     delta_bit = (word >> (T.uint16(3) + e % T.uint16(2) * T.uint16(4))) & T.uint16(1)
                     delta = T.int8(1) - T.cast(delta_bit, "int8") * T.int8(2)
                 else:
-                    factor = T.cast(((word >> T.uint16(12)) & T.uint16(7)) * T.uint16(2) + T.uint16(1), "int16")
+                    coefficient = T.cast((word >> T.uint16(12)) & T.uint16(7), "uint8")
+                    factor = T.cast(coefficient * T.uint8(2) + T.uint8(1), "int8")
                     delta = T.cast((T.cast(word, "int16") >> T.int16(15)) | T.int16(1), "int8")
-                code = T.cast(T.cast(selected[entry, payload], "int16") + T.int16(1), "uint2")
+                code = T.cast(selected[entry, payload] + T.int8(1), "uint2")
                 numerator = (T.cast(code, "int8") - T.int8(1)) * T.int8(8) + delta
                 product = T.cast(activation[e * T.uint16(8) + T.cast(payload, "uint16")], "int16") * T.cast(numerator, "int16")
-                scaled[entry, payload] = T.cast(product * factor, "int32")
+                scaled[entry, payload] = T.cast(product * T.cast(factor, "int16"), "int32")
             linear = T.reshape(scaled, (256,))
             integer = T.alloc_local((), "int32")
             T.reduce_sum(linear, integer, dim=0)

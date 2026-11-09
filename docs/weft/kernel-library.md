@@ -413,6 +413,8 @@ activation quantization remains inside its invocation. `row_partials.scaled_proj
 reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
 parameter selects block integer sums or deferred lane partials in the author
 program, independently of target vector width.
+The lane row helper has an explicit native call boundary; projection reuses
+that same complete K reduction after its in-call activation preparation.
 
 IQ1_M's indexed row program reconstructs its F16 scale with ordinary
 `T.reinterpret`, then closes each signed numerator dot with `T.reduce_dot`.
@@ -426,6 +428,9 @@ group scale before widening to I32, followed by one record sum. The same
 with `numerical_form="scaled"`; Q8_K preparation remains inside the call.
 An explicit biased unsigned two-bit representation preserves a bound on that
 codebook range for shared integer analysis, rather than treating it as arbitrary I8.
+The bias uses byte arithmetic before the two-bit conversion, whose low bits
+are unchanged by byte wraparound. Odd group factors stay in I8 until their
+explicit conversion at the I16 product.
 
 The staged IQ1 program also accepts `rows` and `columns` output tiles.
 Its `groups_per_step` bounds the groups computed inside each record sub-Level;
