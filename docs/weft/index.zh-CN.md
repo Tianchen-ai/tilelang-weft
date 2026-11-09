@@ -49,6 +49,8 @@ NO_VERSION_LABEL=1 CMAKE_ARGS='-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DUSE_LLVM=OFF' \
 入口为 `from tilelang.weft import language as T` 和 `@tilelang.jit(target="weft")`。
 Tensor、StridedTensor、Parallel、serial、copy、fill、gemm、reduce 和标量表达式沿用
 TileLang。`T.Kernel` 声明独立的 CPU tile 实例，`cpu_num_threads` 指定原生启动线程数。
+源程序中能证明 extent 为一的 grid 轴，在 Canonical IR 中形成常量坐标。
+动态和多实例轴继续使用原生 launcher 传入的坐标。
 
 `T.reshape(buffer, shape)` 在同一份连续存储上建立相同元素类型的新形状。
 两种形状的读写共享同一个数值，包括 serial 循环和 helper 中的更新；重塑保持原

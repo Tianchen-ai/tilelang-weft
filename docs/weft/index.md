@@ -68,6 +68,8 @@ Use `from tilelang.weft import language as T` with `@tilelang.jit(target="weft")
 Standard Tensor, StridedTensor, Parallel, serial, copy, fill, gemm, reduce and
 scalar expressions retain TileLang's source construction. `T.Kernel` declares
 independent CPU tile instances, and `cpu_num_threads` controls their native launch.
+A source grid axis whose extent is proved to be one becomes a constant coordinate
+in Canonical IR. Dynamic and multi-instance axes retain their launcher arguments.
 
 `T.reshape(buffer, shape)` creates a same-type, contiguous view of the same
 storage. Reads and writes through either shape share one numerical value,

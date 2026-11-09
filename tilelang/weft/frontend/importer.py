@@ -700,7 +700,12 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                 if axis != len(self.grid):
                     self.error("Kernel grid must be a contiguous outer grid nest")
                 self.grid.append(node.extent)
-                self.env[node.loop_var] = self.cast(self.launch[axis], dtype(node.loop_var.dtype))
+                instance = (
+                    self.expr(node.min)
+                    if self.analyzer.can_prove_equal(node.extent, 1)
+                    else self.launch[axis]
+                )
+                self.env[node.loop_var] = self.cast(instance, dtype(node.loop_var.dtype))
                 self.stmt(node.body)
                 return
             if node.kind in (tirx.ForKind.PARALLEL, tirx.ForKind.VECTORIZED):
