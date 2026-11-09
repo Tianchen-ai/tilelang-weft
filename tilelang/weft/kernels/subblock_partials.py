@@ -581,6 +581,64 @@ def ternary_lanes(M, K):
     return main
 
 
+@T.macro
+def ternary_plane_rows(weights, values, output, powers, M, K, axis):
+    table = T.stage(T.load(powers))
+    indices = T.alloc_local((4,), "uint32")
+    for digit in T.Parallel(4):
+        indices[digit] = T.cast(digit, "uint32")
+    four_powers = T.load(table, at=indices, bounds="in_bounds")
+    with T.level.rows(M, group=1, axis=axis) as row:
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=256) as block:
+            w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+            q, high, activation, d, ds = w.q, w.qh, x.q, w.d, x.ds
+            block_scale = T.cast(d[()], "float32") * ds[()]
+            first = T.alloc_local((4, 32), "int8")
+            first_inputs = T.alloc_local((4, 32), "int8")
+            for digit, k in T.Parallel(4, 32):
+                wrapped = T.cast(four_powers[digit], "uint8") * T.cast(q[T.cast(k, "uint16")], "uint8")
+                first[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
+                first_inputs[digit, k] = activation[T.cast(digit, "uint16") * T.uint16(32) + T.cast(k, "uint16")]
+            p0 = T.alloc_local((4,), "int32")
+            s0 = T.alloc_local((1,), "int32")
+            T.reduce_dot(first_inputs, first, p0, over="k", acc_dtype="int32", engine="vector")
+            T.reduce_sum(p0, s0, dim=0)
+            tail = T.alloc_local((32,), "int8")
+            tail_inputs = T.alloc_local((32,), "int8")
+            for k in T.Parallel(32):
+                wrapped = T.cast(q[T.cast(k, "uint16")], "uint8") * T.cast(table[4], "uint8")
+                tail[k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
+                tail_inputs[k] = activation[T.uint16(128) + T.cast(k, "uint16")]
+            st = T.alloc_local((1,), "int32")
+            T.reduce_dot(tail_inputs, tail, st, over="k", acc_dtype="int32", engine="vector")
+            second = T.alloc_local((5, 16), "int8")
+            second_inputs = T.alloc_local((5, 16), "int8")
+            for digit, k in T.Parallel(5, 16):
+                wrapped = T.cast(table[digit], "uint8") * T.cast(q[T.uint16(32) + T.cast(k, "uint16")], "uint8")
+                second[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
+                second_inputs[digit, k] = activation[T.uint16(160) + T.cast(digit, "uint16") * T.uint16(16) + T.cast(k, "uint16")]
+            p1 = T.alloc_local((5,), "int32")
+            s1 = T.alloc_local((1,), "int32")
+            T.reduce_dot(second_inputs, second, p1, over="k", acc_dtype="int32", engine="vector")
+            T.reduce_sum(p1, s1, dim=0)
+            high_codes = T.alloc_local((4, 4), "int8")
+            high_inputs = T.alloc_local((4, 4), "int8")
+            for digit, k in T.Parallel(4, 4):
+                wrapped = T.cast(four_powers[digit], "uint8") * T.cast(high[T.cast(k, "uint16")], "uint8")
+                high_codes[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
+                high_inputs[digit, k] = activation[T.uint16(240) + T.cast(digit, "uint16") * T.uint16(4) + T.cast(k, "uint16")]
+            p2 = T.alloc_local((4,), "int32")
+            s2 = T.alloc_local((1,), "int32")
+            T.reduce_dot(high_inputs, high_codes, p2, over="k", acc_dtype="int32", engine="vector")
+            T.reduce_sum(p2, s2, dim=0)
+            integer = s0[0] + s1[0] + s2[0] + st[0]
+            total += T.cast(integer, "float32") * block_scale
+        result = T.alloc_local((1,), "float32")
+        result[0] = total
+        T.copy(result, output[row])
+
+
 @tilelang.jit(target="weft")
 def ternary_planes(M, K):
     """Expose radix digit and payload axes as separate exact dot dimensions."""
@@ -599,60 +657,7 @@ def ternary_planes(M, K):
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         powers = T.view(Powers, shape=(5,), axes=("power",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            table = T.stage(T.load(powers))
-            indices = T.alloc_local((4,), "uint32")
-            for digit in T.Parallel(4):
-                indices[digit] = T.cast(digit, "uint32")
-            four_powers = T.load(table, at=indices, bounds="in_bounds")
-            with T.level.rows(M, group=1) as row:
-                total = T.alloc_var("float32", init=0)
-                with T.level.blocks(K, extent=256) as block:
-                    w, x = T.load(weights[row, block][0, :]), T.load(values[block])
-                    q, high, activation, d, ds = w.q, w.qh, x.q, w.d, x.ds
-                    block_scale = T.cast(d[()], "float32") * ds[()]
-                    first = T.alloc_local((4, 32), "int8")
-                    first_inputs = T.alloc_local((4, 32), "int8")
-                    for digit, k in T.Parallel(4, 32):
-                        wrapped = T.cast(four_powers[digit], "uint8") * T.cast(q[T.cast(k, "uint16")], "uint8")
-                        first[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
-                        first_inputs[digit, k] = activation[T.cast(digit, "uint16") * T.uint16(32) + T.cast(k, "uint16")]
-                    p0 = T.alloc_local((4,), "int32")
-                    s0 = T.alloc_local((1,), "int32")
-                    T.reduce_dot(first_inputs, first, p0, over="k", acc_dtype="int32", engine="vector")
-                    T.reduce_sum(p0, s0, dim=0)
-                    tail = T.alloc_local((32,), "int8")
-                    tail_inputs = T.alloc_local((32,), "int8")
-                    for k in T.Parallel(32):
-                        wrapped = T.cast(q[T.cast(k, "uint16")], "uint8") * T.cast(table[4], "uint8")
-                        tail[k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
-                        tail_inputs[k] = activation[T.uint16(128) + T.cast(k, "uint16")]
-                    st = T.alloc_local((1,), "int32")
-                    T.reduce_dot(tail_inputs, tail, st, over="k", acc_dtype="int32", engine="vector")
-                    second = T.alloc_local((5, 16), "int8")
-                    second_inputs = T.alloc_local((5, 16), "int8")
-                    for digit, k in T.Parallel(5, 16):
-                        wrapped = T.cast(table[digit], "uint8") * T.cast(q[T.uint16(32) + T.cast(k, "uint16")], "uint8")
-                        second[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
-                        second_inputs[digit, k] = activation[T.uint16(160) + T.cast(digit, "uint16") * T.uint16(16) + T.cast(k, "uint16")]
-                    p1 = T.alloc_local((5,), "int32")
-                    s1 = T.alloc_local((1,), "int32")
-                    T.reduce_dot(second_inputs, second, p1, over="k", acc_dtype="int32", engine="vector")
-                    T.reduce_sum(p1, s1, dim=0)
-                    high_codes = T.alloc_local((4, 4), "int8")
-                    high_inputs = T.alloc_local((4, 4), "int8")
-                    for digit, k in T.Parallel(4, 4):
-                        wrapped = T.cast(four_powers[digit], "uint8") * T.cast(high[T.cast(k, "uint16")], "uint8")
-                        high_codes[digit, k] = T.cast((T.cast(wrapped, "uint16") * T.uint16(3)) >> T.uint16(8), "int8") - T.int8(1)
-                        high_inputs[digit, k] = activation[T.uint16(240) + T.cast(digit, "uint16") * T.uint16(4) + T.cast(k, "uint16")]
-                    p2 = T.alloc_local((4,), "int32")
-                    s2 = T.alloc_local((1,), "int32")
-                    T.reduce_dot(high_inputs, high_codes, p2, over="k", acc_dtype="int32", engine="vector")
-                    T.reduce_sum(p2, s2, dim=0)
-                    integer = s0[0] + s1[0] + s2[0] + st[0]
-                    total += T.cast(integer, "float32") * block_scale
-                result = T.alloc_local((1,), "float32")
-                result[0] = total
-                T.copy(result, output[row])
+            ternary_plane_rows(weights, values, output, powers, M, K, "m")
 
     return main
 
@@ -707,9 +712,16 @@ def ternary_window_row(weights, values, powers, K):
     return total
 
 
+@T.macro(noinline=True)
+def ternary_plane_batch(weights, values, output, powers, M, K, axis):
+    ternary_plane_rows(weights, values, output, powers, M, K, axis)
+
+
 @tilelang.jit(target="weft")
-def ternary_window_projection(M, N, K, extreme_policy="first", inverse_policy="direct"):
-    """Complete TQ1 projection using bounded radix partials in each native row."""
+def ternary_window_projection(M, N, K, extreme_policy="first", inverse_policy="direct",
+                              organization="windows"):
+    """Select explicit radix windows or digit planes after in-call preparation."""
+    assert organization in ("windows", "planes")
     assert M > 0 and N > 0 and K > 0 and K % 256 == 0
 
     @T.prim_func
@@ -731,11 +743,14 @@ def ternary_window_projection(M, N, K, extreme_policy="first", inverse_policy="d
             quantize_rows(source, prepared, M, K, "Q8_K", 256,
                           extreme_policy, inverse_policy, "rne", 64)
             for m in T.serial(M):
-                for n in T.serial(N):
-                    value = ternary_window_row(weights[n, :], prepared[m, :], powers, K)
-                    result = T.alloc_local((1,), "float32")
-                    result[0] = value
-                    T.copy(result, output[m, n : n + 1])
+                if organization == "planes":
+                    ternary_plane_batch(weights, prepared[m, :], output[m, :], powers, N, K, "n")
+                else:
+                    for n in T.serial(N):
+                        value = ternary_window_row(weights[n, :], prepared[m, :], powers, K)
+                        result = T.alloc_local((1,), "float32")
+                        result[0] = value
+                        T.copy(result, output[m, n : n + 1])
 
     return main
 
