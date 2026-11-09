@@ -116,6 +116,9 @@ State 初始化值可以是标量或 Tensor 区域，包括已保存的 `T.load(
 `T.load(table, at=indices, bounds="in_bounds")` 使用整数索引 tile 读取 dense 数值
 View 或数值字段。索引对应表的 row-major 逻辑序号，结果保留索引 tile 的数值域。
 字段投影保留 Encoding 的分组关系，例如 Q8_K 每 16 个元素对应一个分组和。
+数值字段经过 `T.load` 和 `T.stage` 后仍保留逻辑轴以及完整的 record/field 分组关系，
+后续 `T.load(saved, at=point)` 可以从同一快照选出声明的 scale group。
+只截取部分 payload 的位置切片不继承完整字段的分组关系。
 
 `T.gemm(a, b, c, engine="auto")` 优先使用合法矩阵实现，否则向量；
 `matrix` 要求矩阵硬件，`vector` 排除矩阵指令。约束作用于每个 contraction，

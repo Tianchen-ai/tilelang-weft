@@ -165,7 +165,8 @@ class RecordValue:
         ] + str(scalar.bits)
         shape = self.shape[:-1] + tuple(field.shape)
         output = alloc_local(shape, spelling)
-        output.__tilelang_field_record_elements__ = self.encoding.schema.elements
+        if field.shape:
+            output.__tilelang_field_record_elements__ = self.encoding.schema.elements
         I.evaluate(intrinsic("field", to_tile_region(output), self.var, name))
         return output
 
@@ -188,6 +189,22 @@ def reshape(source, shape, *, axes=None):
         raise ValueError("encoded reshape must preserve complete records and the logical element count")
     variable = bind(intrinsic("reshape", source.var, *shape, axes=list(axes)))
     return RecordValue(variable, shape, axes, source.encoding, source.__tilelang_immutable_value__)
+
+
+def _field_record_extent(value):
+    from tvm import arith
+    from tilelang.utils.language import _get_buffer
+
+    buffer = _get_buffer(value)
+    record = getattr(buffer, "__tilelang_field_record_elements__", None)
+    if record is None:
+        return None
+    region = to_tile_region(value)
+    analyzer = arith.Analyzer()
+    if (analyzer.can_prove_equal(region.args[0].indices[-1], 0)
+            and analyzer.can_prove_equal(region.args[-1], buffer.shape[-1])):
+        return record
+    return None
 
 
 def load(source, *, at=None, axis=-1, bounds=None):
@@ -239,16 +256,20 @@ def load(source, *, at=None, axis=-1, bounds=None):
         I.evaluate(intrinsic("load_value", to_tile_region(output), to_tile_region(source), at.var, axis))
         return output
     if not isinstance(source, LogicalView):
-        from tilelang.language.copy_op import copy
         from tilelang.utils.language import retrieve_shape, _get_buffer
 
         output = alloc_local(retrieve_shape(source), _get_buffer(source).dtype)
-        I.evaluate(copy(source, output))
+        record_elements = _field_record_extent(source)
+        if record_elements is not None:
+            output.__tilelang_field_record_elements__ = record_elements
+        I.evaluate(intrinsic("load_value", to_tile_region(output), to_tile_region(source)))
         return output
     if isinstance(source.encoding, (EncodingDefinition, DerivedEncodingInstance)):
         variable = bind(intrinsic("load_record", source.var))
         return RecordValue(variable, source.shape, source.axes, source.encoding)
     output = alloc_local(source.shape, source.encoding)
+    if source.field_record_elements is not None:
+        output.__tilelang_field_record_elements__ = source.field_record_elements
     I.evaluate(intrinsic("load_value", to_tile_region(output), source.var))
     return output
 
@@ -259,6 +280,9 @@ def stage(value):
     from tilelang.utils.language import retrieve_shape, _get_buffer
 
     snapshot = alloc_local(retrieve_shape(value), _get_buffer(value).dtype)
+    record_elements = _field_record_extent(value)
+    if record_elements is not None:
+        snapshot.__tilelang_field_record_elements__ = record_elements
     I.evaluate(intrinsic("stage", to_tile_region(snapshot), to_tile_region(value)))
     snapshot.__tilelang_immutable_value__ = True
     return snapshot

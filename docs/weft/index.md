@@ -220,6 +220,10 @@ Field Views such as `output[part].q` support typed writes, including packed Q8 p
 numeric field with an integer index tile. Indices address its row-major logical
 table; the result retains the index tile's domain. Field projections retain
 Encoding group relationships, including one sum per 16-element Q8_K group.
+Loading and staging a numeric field preserve its logical axes and complete
+record-to-field group relation. A later `T.load(saved, at=point)` can select the
+declared scale group from that snapshot. A positional slice of the field's
+payload does not inherit the complete-field relation.
 
 The same indexed load accepts a saved numeric tile, for example
 `T.load(table, at=codes, bounds="in_bounds")` after `table = T.stage(T.load(view))`.

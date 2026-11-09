@@ -113,7 +113,12 @@ class ModelOperations:
             )
             scalar = getattr(dt, field.dtype)
             encoding = EncodingType(scalar.name, "dense", "dense." + scalar.name)
-            return self.op("field", (owner,), SliceType(encoding, shape, axes), {"name": json.dumps(field_name)})
+            result = self.op("field", (owner,), SliceType(encoding, shape, axes), {"name": json.dumps(field_name)})
+            if field.shape:
+                if not hasattr(self, "field_view_records"):
+                    self.field_view_records = {}
+                self.field_view_records[result.id] = schema.elements
+            return result
         if name == "tl.weft.extent":
             view = self.expr(call.args[0])
             bound = self.op("extent", (view,), ScalarType(dt.index), {"axis": str(self.static(call.args[1]))})
@@ -382,14 +387,29 @@ class ModelOperations:
                 destination = self.region(call.args[0])[0]
                 self.locals[destination], self.local_axes[destination] = result, tuple(axes)
                 return True
-            view = self.expr(call.args[1])
-            from .importer import dtype
+            if isinstance(call.args[1], tirx.Var):
+                view = self.expr(call.args[1])
+                from .importer import dtype
 
-            typ = value_type(ScalarType(dtype(view.type.encoding.family)), shape_of(view.type), axes_of(view.type))
-            value = self.op("admit", (view,), typ)
+                typ = value_type(ScalarType(dtype(view.type.encoding.family)), shape_of(view.type), axes_of(view.type))
+                value = self.op("admit", (view,), typ)
+                record = getattr(self, "field_view_records", {}).get(view.id)
+            else:
+                saved = self.region(call.args[1])
+                value = self.read_region(saved, self.local_axes_for(saved[0]))
+                record = getattr(self, "field_record_extents", {}).get(saved[0])
+                if record is not None and (
+                    saved[2][-1] != self.static(saved[0].shape[-1])
+                    or not self.analyzer.can_prove_equal(saved[1][-1], 0)
+                ):
+                    record = None
             destination = self.region(call.args[0])[0]
             self.locals[destination] = value
             self.local_axes[destination] = axes_of(value.type)
+            if record is not None:
+                if not hasattr(self, "field_record_extents"):
+                    self.field_record_extents = {}
+                self.field_record_extents[destination] = record
             return True
         if name == "tl.weft.field":
             owner = self.expr(call.args[1])
@@ -406,9 +426,10 @@ class ModelOperations:
             destination = self.region(call.args[0])[0]
             self.locals[destination] = value
             self.local_axes[destination] = axes
-            if not hasattr(self, "field_record_extents"):
-                self.field_record_extents = {}
-            self.field_record_extents[destination] = schema.elements
+            if field.shape:
+                if not hasattr(self, "field_record_extents"):
+                    self.field_record_extents = {}
+                self.field_record_extents[destination] = schema.elements
             return True
         if name == "tl.weft.sum_pairs":
             source = self.region(call.args[1])
@@ -453,6 +474,10 @@ class ModelOperations:
             self.locals[destination] = result
             self.local_axes[destination] = axes_of(result.type)
             self.readonly.add(destination)
+            record = getattr(self, "field_record_extents", {}).get(source[0])
+            if (record is not None and source[2][-1] == self.static(source[0].shape[-1])
+                    and self.analyzer.can_prove_equal(source[1][-1], 0)):
+                self.field_record_extents[destination] = record
             if self.birth_phase == "staged":
                 self.birth_outputs.append(("staged_buffer", destination, result))
             return True
