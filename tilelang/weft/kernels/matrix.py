@@ -95,8 +95,10 @@ def k_layout_projection(M, N, K, format="Q4_K", columns=128):
 
 
 @tilelang.jit(target="weft")
-def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="matrix"):
+def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="matrix", dot_width=None):
     assert generation in (1, 2)
+    assert dot_width is None or (generation == 1 and dot_width in (8, 16, 32))
+    dot_width = 8 if dot_width is None else dot_width
     if generation == 1:
         weight = L.IMEQ4Affine_I[16] if affine else L.IMEQ4Centered_I[16]
         activation = L.IMEQ8_I[tile_rows]
@@ -126,7 +128,7 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                         q = w.q
                         if affine:
                             zero = w.zp
-                        if generation == 2 and affine:
+                        if (generation == 2 and affine) or (generation == 1 and dot_width == 32):
                             integer = T.alloc_local((tile_rows, columns), "int32")
                         else:
                             integer = T.state((tile_rows, columns), "int32", init=0)
@@ -147,14 +149,20 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                                     high_product[m, n] * 16 + low_product[m, n] + T.cast(negative[m], "int32") * T.cast(zero[n], "int32")
                                 )
                         elif generation == 1:
-                            xq = x.q
-                            with T.level.subtiles(part, extent=8) as sub:
-                                left = T.load(xq, at=sub)
-                                right = T.load(q, at=sub)
-                                values = T.alloc_local((columns, 8), "int8")
-                                for n, k in T.Parallel(columns, 8):
-                                    values[n, k] = T.cast(right[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
-                                T.gemm(left, values, integer, transpose_B=True, engine=engine)
+                            if dot_width == 32:
+                                values = T.alloc_local((columns, 32), "int8")
+                                for n, k in T.Parallel(columns, 32):
+                                    values[n, k] = T.cast(q[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
+                                T.gemm(x.q, values, integer, transpose_B=True, clear_accum=True, engine=engine)
+                            else:
+                                xq = x.q
+                                with T.level.subtiles(part, extent=dot_width) as sub:
+                                    left = T.load(xq, at=sub)
+                                    right = T.load(q, at=sub)
+                                    values = T.alloc_local((columns, dot_width), "int8")
+                                    for n, k in T.Parallel(columns, dot_width):
+                                        values[n, k] = T.cast(right[n, k], "int8") - T.cast(zero[n] if affine else 8, "int8")
+                                    T.gemm(left, values, integer, transpose_B=True, engine=engine)
                         else:
                             xq = x.q
                             with T.level.subtiles(part, extent=16) as sub:

@@ -139,7 +139,7 @@ history and pinned TVM dependencies. Extensions live under `tilelang/weft` and
 [here](docs/weft/upstream.md).
 
 Shared core source has one owner:
-[triton-weft/third_party/weft](https://github.com/Tianchen-ai/triton-weft/tree/codex/tilelang-weft-core/third_party/weft).
+[triton-weft/third_party/weft](https://github.com/Tianchen-ai/triton-weft/tree/main/third_party/weft).
 Each frontend owns its parser, JIT, cache and tuner, and calls the opaque shared
 compiler ABI. Native applications need only the runtime and compiled artifact.
 

@@ -118,5 +118,5 @@ GitHub 的分支和 tag 会在 push、发布 Release 后自动同步到
 本仓库保留 [tile-ai/tilelang](https://github.com/tile-ai/tilelang) 的历史；新增内容集中在
 `tilelang/weft` 与 `src/weft`。共同前端、backend manifest、JIT/cache 和 profiler 的接缝
 见[维护者说明](docs/weft/upstream.md)。共享 compiler/runtime 的唯一源码位于
-[Triton–Weft](https://github.com/Tianchen-ai/triton-weft/tree/codex/tilelang-weft-core/third_party/weft)。
+[Triton–Weft](https://github.com/Tianchen-ai/triton-weft/tree/main/third_party/weft)。
 TileLang 保留 MIT 许可；共享 Weft core 使用 Apache-2.0，第三方声明随发行包提供。

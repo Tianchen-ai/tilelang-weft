@@ -40,6 +40,15 @@ Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
 I8 精确保留整个整数值，并能作为有符号矩阵操作数。`engine` 约束该面板 contraction，
 I16 activation block-sum 校正明确采用向量路线。activation 量化、面板准备和校正均计入调用。
 
+Q1/NVFP4 的 `subblock_projection.projection(organization="records")`
+每次解码一个有界权重窗口，在推进 K 前供串行 activation 行共享。decode 保留输出
+累加器，prefill 更新显式输出存储；默认 `"staged"` 则在编码复用作用域内，跨 K
+保留输出 tile。两者是作者选择的不同遍历与驻留方式，均计入相同的 activation
+准备与数值工作。
+第一代布局的 `matrix.ime` 暴露 `dot_width=8/16/32`。32 元素分组直接完成一次
+record contraction，更小的分组保留显式子 Level 和跨贡献的整数 state。
+`engine` 继续约束具体 contraction，同一格式可以用适合 SIMD 或 IME 的作者分组。
+
 例如：
 
 ```python

@@ -194,6 +194,17 @@ a call at each output tile or K record.
 tile is state across all K records and is stored once. NVFP4 retains separate
 16-element codebook dots and subblock scales; Q1 retains its centered I8 codes.
 Activation quantization and local encoded stages remain inside the invocation.
+For Q1/NVFP4, `organization="records"` instead decodes one bounded weight
+window and shares it across serial activation rows before advancing K. Decode
+retains its output accumulator; prefill updates explicit output storage. The
+default `"staged"` retains output tiles across K inside encoded reuse scopes.
+These are different author traversal and residence choices; both include the
+same activation preparation and numerical workload.
+The packed `matrix.ime` factory exposes `dot_width=8/16/32` for its first-generation
+layout. Width 32 closes one complete record contraction; smaller widths retain
+an explicit sub-Level and integer state across its contributions. The `engine`
+constraint remains local to each contraction, so the same format can use a SIMD
+author program or an IME program with the appropriate source grouping.
 The TQ2_0 variant closes one 256-term unsigned-code dot per weight record and
 subtracts the Q8_K activation sum in I32. This is the exact integer identity
 `sum((q - 1) * x) = sum(q * x) - sum(x)`; the stored Q8_K group sums serve every

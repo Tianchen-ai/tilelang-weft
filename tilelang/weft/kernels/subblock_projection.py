@@ -6,6 +6,52 @@ from . import ggml_formats as F
 from .preparation import quantize_rows
 
 
+@T.macro
+def record_panels(weights, prepared, output, table, scales, M, N, K, format, columns, elements):
+    """Share one decoded record window across serial activation rows."""
+    width = 32 if format == "Q1_0" else 16
+    with T.level.cols(N, group=columns) as col:
+        if M == 1:
+            accumulated = T.state((columns,), "float32", init=0)
+        else:
+            for m in T.serial(M):
+                zero = T.state((columns,), "float32", init=0)
+                T.copy(zero, output[m, col])
+        with T.level.blocks(K, extent=elements) as block:
+            weight = T.load(weights[col, block])
+            q, d = weight.q, weight.d
+            for part in T.unroll(elements // width):
+                if format == "NVFP4":
+                    codes = T.load(table, at=q[:, part * width : (part + 1) * width], bounds="in_bounds")
+                    selected = T.load(scales, at=d[:, part], bounds="in_bounds")
+                    factors = T.reshape(selected, (columns,))
+                else:
+                    codes = q[:, part * width : (part + 1) * width]
+                    factors = d
+                for m in T.serial(M):
+                    activation = T.load(prepared[m, block][part * width // 32 * 32 : part * width // 32 * 32 + 32])
+                    values = activation.q[part * width % 32 : part * width % 32 + width]
+                    products = T.alloc_local((columns,), "int32")
+                    T.reduce_dot(codes, values, products, over="k", acc_dtype="int32", engine="vector")
+                    if format == "Q1_0":
+                        wide = T.alloc_local((width,), "int32")
+                        total = T.alloc_local((1,), "int32")
+                        for k in T.Parallel(width):
+                            wide[k] = T.cast(activation.q[part * width % 32 + k], "int32")
+                        T.reduce_sum(wide, total, dim=0)
+                    prior = accumulated if M == 1 else T.load(output[m, col])
+                    result = T.alloc_local((columns,), "float32")
+                    for c in T.Parallel(columns):
+                        integer = products[c] * 2 - total[0] if format == "Q1_0" else products[c]
+                        result[c] = prior[c] + (T.cast(factors[c], "float32") * T.cast(activation.d[()], "float32")) * T.cast(integer, "float32")
+                    if M == 1:
+                        T.copy(result, accumulated)
+                    else:
+                        T.copy(result, output[m, col])
+        if M == 1:
+            T.copy(accumulated, output[0, col])
+
+
 @T.macro(noinline=True)
 def staged_tiles(weights, prepared, output, table, scales, M, N, K, format,
                  batch_rows, staged_columns, rows, columns, elements):
@@ -83,13 +129,16 @@ def record_tiles(weight, activation_stage, table, scales, row, block, total, row
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="NVFP4", columns=8,
                extreme_policy="first", inverse_policy="direct", rows=1,
-               batch_rows=None, staged_columns=None):
+               batch_rows=None, staged_columns=None, organization="staged"):
     assert format in ("Q1_0", "NVFP4", "TQ2_0", "IQ4_XS")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
     batch_rows = M if batch_rows is None else batch_rows
     staged_columns = columns if staged_columns is None else staged_columns
     assert min(M, N, columns, rows, batch_rows, staged_columns) > 0
+    assert organization in ("staged", "records")
+    assert organization != "records" or format in ("Q1_0", "NVFP4")
+    assert organization != "records" or (rows == 1 and batch_rows == M and staged_columns == columns)
     assert M % batch_rows == N % staged_columns == 0
     assert batch_rows % rows == staged_columns % columns == 0
     assert K > 0 and K % elements == 0
@@ -120,11 +169,17 @@ def projection(M, N, K, format="NVFP4", columns=8,
         if format == "NVFP4":
             scales = T.view(Scale, shape=(256,), axes=("scale",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            if lookup:
+            if lookup and organization == "staged":
                 table = T.stage(T.load(codebook))
             quantize_rows(source, prepared, M, K, "Q8_K" if superblock else "Q8_0", activation_elements,
                           extreme_policy, inverse_policy, "rne" if superblock else "dynamic", 32)
-            if format == "NVFP4":
+            if organization == "records":
+                if format == "NVFP4":
+                    table = T.stage(T.load(codebook))
+                    record_panels(weights, prepared, output, table, scales, M, N, K, format, columns, elements)
+                else:
+                    record_panels(weights, prepared, output, Codebook, Scale, M, N, K, format, columns, elements)
+            elif format == "NVFP4":
                 staged_tiles(weights, prepared, output, table, scales, M, N, K, format,
                              batch_rows, staged_columns, rows, columns, elements)
             elif lookup:
