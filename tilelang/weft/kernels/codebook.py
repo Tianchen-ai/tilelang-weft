@@ -169,8 +169,7 @@ def iq2_windows(M, K, format="IQ2_XS", product_dtype="int16"):
                         base = group_index * T.int64(4)
                         metadata = T.cast(record.q[base + T.int64(2)], "uint32") | (T.cast(record.q[base + T.int64(3)], "uint32") << T.uint32(16))
                         factor = block_scale * (0.5 + T.cast(metadata >> T.uint32(28), "float32")) * 0.25
-                    entry = T.alloc_var("int64", init=0)
-                    with T.level.subtiles(group, extent=8) as payload:
+                    for entry in T.serial(4):
                         if format == "IQ2_XS":
                             word = T.cast(record.q[group_index * T.int64(4) + entry], "uint16")
                             index, sign = word & T.uint16(511), word >> T.uint16(9)
@@ -179,8 +178,8 @@ def iq2_windows(M, K, format="IQ2_XS", product_dtype="int16"):
                             word = T.cast(record.q[base + entry // T.int64(2)], "uint16")
                             index = word >> (T.cast(entry % T.int64(2), "uint16") * T.uint16(8)) & T.uint16(255)
                             sign = metadata >> (T.cast(entry, "uint32") * T.uint32(7)) & T.uint32(127)
-                        iq2_payload(grid, signs, index, sign, factor, output[payload], product_dtype)
-                        entry += T.int64(1)
+                        iq2_payload(grid, signs, index, sign, factor,
+                                    output[group][entry * 8 : (entry + 1) * 8], product_dtype)
                     group_index += T.int64(1)
 
     return main
