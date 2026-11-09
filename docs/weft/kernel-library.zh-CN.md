@@ -122,8 +122,8 @@ Q2 projection 通过 `T.macro(noinline=True)` 在一次调用中闭合每个输�
 lanes；Q3/Q6 则在已有的不内联 helper 中闭合一个 activation 行的计算批次。
 `staged_projection` 也可以在已声明的权重列 stage 和 activation 行 stage 中保留相同的
 lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩放 I32 lanes。
-默认的分组 plane 组织继续保留。短 record affine projection 先合并 minimum 和 product
-支路，再更新一次 F32 state；两条支路在 record 最后的加法前可独立于该 state 执行。
+默认的分组 plane 组织继续保留。短 record affine projection 将 minimum 和 product
+支路直接更新到 F32 state，显式形成两处局部 FMA 机会，减少合并 contribution 的临时值。
 多输出 affine tile 为各输出保留跨 record 内 16/32 元素分组的 I32 总和；保存的
 coefficient 字段保留 Encoding 分组投影，minimum 修正仍与 Q8_K 分组和执行独立 dot。
 `short_projection.staged_projection` 在准备完成后，通过一次不内联的 macro 调用执行整个

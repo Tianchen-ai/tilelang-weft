@@ -42,10 +42,9 @@ def staged_tiles(weights, prepared, output, table, scale_table, M, N, K,
                         if affine:
                             minimum, activation_sum = weight.m, activation.s
                         for r, c in T.Parallel(rows, columns):
-                            contribution = (T.cast(wd[c], "float32") * T.cast(xd[r], "float32")) * T.cast(products[r, c], "float32")
                             if affine:
-                                contribution += T.cast(minimum[c], "float32") * T.cast(activation_sum[r], "float32")
-                            total[r, c] += contribution
+                                total[r, c] += T.cast(minimum[c], "float32") * T.cast(activation_sum[r], "float32")
+                            total[r, c] += (T.cast(wd[c], "float32") * T.cast(xd[r], "float32")) * T.cast(products[r, c], "float32")
                     T.copy(total, output[row, col])
 
 

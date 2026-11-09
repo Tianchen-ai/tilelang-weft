@@ -165,9 +165,9 @@ non-inlined helper.
 `staged_projection` can retain the same lane organization inside its declared
 weight-column and activation-row stages. Q2 uses 16 exact I16 lanes; Q3/Q6
 choose 16 or 32 scaled I32 lanes. The default grouped-plane organization remains
-available. Short affine projections combine the minimum and product branches
-into one record contribution before updating the F32 state. The two branches
-can execute independently of that state until the record's final addition.
+available. Short affine projections update their minimum and product branches
+directly into the F32 state, exposing two local FMA opportunities without an
+extra combined contribution temporary.
 Its multi-output affine tiles retain one I32 sum per output across the record's
 16/32-element groups. A saved coefficient field preserves its Encoding group
 projection; the minimum correction remains a separate dot against Q8_K sums.
