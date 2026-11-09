@@ -16,7 +16,7 @@ invokes its ordinary TileLang JIT factory; target passes never dispatch on these
 | GEMM and batched projection | `linear` | Author blocks, transpose, bias/SiLU epilogue and local engine requirement |
 | Dense CPU panels | `panel_dense` | In-call panel transposes, optional F16 activation rounding and an explicit outer-product loop |
 | Batched packed and codebook projections | `panel_projection`, `indexed_projection` | Decode a weight record once, reuse across activation rows, and close integer scale/correction groups |
-| Packed subblock projection | `subblock_projection` | Keep a Q1/NVFP4 weight cohort across activation rows, with explicit subblock scales and in-call quantization |
+| Packed subblock projection | `subblock_projection` | Keep a Q1/NVFP4/TQ2/IQ4_XS weight cohort across activation rows, with explicit subblock scales and in-call quantization |
 | Short-record interleaved projections | `short_projection`, `layouts` | Author-declared persistent row cohorts, in-call Q8 activation preparation and state retained across K records |
 | Q4_K/Q6_K × Q8_K | `quantized` | Shared Encoding fields, typed grouped partials, scale/correction branches |
 | Integer-field dequantization | `quantized.dequantize` | Q1, Q4/Q5/Q8, K formats and TQ2 fields; explicit numerical decoding |
@@ -127,6 +127,11 @@ the author's simultaneously exposed scale groups; it does not select an ISA.
 `q6_planes` also accepts multiple output rows. Its serial row loop retains the
 same plane/lane partials and per-record scaling for each row, without exposing
 all rows as simultaneously resident values.
+The shared `q6_plane_value` macro accepts `accumulation="block"` to finish the
+exact I32 record sum before its F32 update, or `"lanes"` to retain F32 lane
+sums until the row ends. `scaled_projection(organization="block_planes")`
+uses that same block-scaled macro in a non-inlined row call after in-call
+activation preparation. `lanes` and `planes` remain explicit author dimensions.
 Its `rows_per_program` optionally partitions those rows into independent CPU
 programs. Each retains the same plane/lane calculation, with the full native
 grid covering every row. The default keeps all rows in one program.
@@ -163,6 +168,9 @@ choose 16 or 32 scaled I32 lanes. The default grouped-plane organization remains
 available. Short affine projections update their minimum and product branches
 directly into the F32 state, exposing two local FMA opportunities without an
 extra combined contribution temporary.
+Its multi-output affine tiles retain one I32 sum per output across the record's
+16/32-element groups. A saved coefficient field preserves its Encoding group
+projection; the minimum correction remains a separate dot against Q8_K sums.
 `short_projection.staged_projection` puts its entire staged compute traversal
 in one non-inlined macro call after preparation, retaining the same Level tree
 and natural input ABI. The call closes preparation temporaries without adding
@@ -172,6 +180,12 @@ a call at each output tile or K record.
 tile is state across all K records and is stored once. NVFP4 retains separate
 16-element codebook dots and subblock scales; Q1 retains its centered I8 codes.
 Activation quantization and local encoded stages remain inside the invocation.
+The TQ2_0 variant closes one signed 256-term dot per weight record, sharing the
+same output state and encoded reuse scopes. Its Q8_K preparation and workspace
+remain explicit inside the projection.
+IQ4_XS uses the same stages with 32-element codebook dots, explicit low/high
+scale fields and a signed I32 group factor. Its Q8_K preparation is also counted
+inside the invocation.
 The indexed x86 variant consumes the fixed GGML codebooks and prepared Q8_K
 activations in [-127, 127], allowing exact sign transfer before I16 pair products.
 The indexed program reconstructs the stored even-parity signs from seven bits.
@@ -259,6 +273,8 @@ natural encoded storage rather than requiring persistent weight preparation.
 
 `subblock_partials.window_dot` uses closed integer dots within each encoded
 record. Q1_0 retains four Q8_0 subrecord scales before applying its weight scale;
+the grouped `subblocks` variant also leaves activation in I8 and supplies
+explicit signed weight codes to widening grouped MAC, preserving the -128 case.
 NVFP4 shares the staged codebook while closing each 16-element scaled product;
 TQ2_0 closes one 256-element signed dot. `rows_per_program` selects the author's
 row cohort, and the native grid covers all cohorts.

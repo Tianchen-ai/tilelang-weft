@@ -22,7 +22,7 @@ Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
 | GEMM、批量投影 | `linear` | 作者分块、转置、bias/SiLU 后处理及局部 engine 约束 |
 | CPU dense panel | `panel_dense` | 调用内转置 panel、可选 F16 activation 舍入及显式 outer-product 循环 |
 | 批量 packed 与 codebook 投影 | `panel_projection`、`indexed_projection` | 每个权重 record 解码一次，跨 activation 行复用，闭合整数 scale/correction 分组 |
-| Packed 子块投影 | `subblock_projection` | 跨 activation 行保留 Q1/NVFP4 权重 cohort，显式子块缩放和调用内量化 |
+| Packed 子块投影 | `subblock_projection` | 跨 activation 行保留 Q1/NVFP4/TQ2/IQ4_XS 权重 cohort，显式子块缩放和调用内量化 |
 | 短 record 交错投影 | `short_projection`、`layouts` | 作者声明持久行 cohort，调用内准备 Q8 activation，state 跨 K record 保留 |
 | Q4_K/Q6_K × Q8_K | `quantized` | 共同 Encoding 字段、有限位宽 partial、scale 与校正支路 |
 | 整数字段解码 | `quantized.dequantize` | Q1、Q4/Q5/Q8、K 格式和 TQ2 的显式数值解码 |
@@ -99,6 +99,10 @@ scale/correction 支路。`composition.packed_projection` 的显式解码到 wor
 `scale_groups` 限定作者同时暴露的 scale group 数量，不选择 ISA。
 `q6_planes` 也接受多行输出。显式串行行循环为每行保留相同的 plane/lane partial
 及逐 record 缩放，不把所有输出行同时暴露为驻留值。
+共同的 `q6_plane_value` 宏通过 `accumulation="block"` 在每个 record 的 F32 更新前
+闭合精确 I32 总和，或通过 `"lanes"` 将 F32 lane partial 保留到行末。
+`scaled_projection(organization="block_planes")` 在调用内准备 activation 后，
+以非内联逐行调用复用同一 block-scaled 宏；`lanes`、`planes` 仍为显式作者维度。
 
 RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
 的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
@@ -120,6 +124,8 @@ lanes；Q3/Q6 则在已有的不内联 helper 中闭合一个 activation 行的�
 lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩放 I32 lanes。
 默认的分组 plane 组织继续保留。短 record affine projection 将 minimum 和 product
 支路直接更新到 F32 state，显式形成两处局部 FMA 机会，减少合并 contribution 的临时值。
+多输出 affine tile 为各输出保留跨 record 内 16/32 元素分组的 I32 总和；保存的
+coefficient 字段保留 Encoding 分组投影，minimum 修正仍与 Q8_K 分组和执行独立 dot。
 `short_projection.staged_projection` 在准备完成后，通过一次不内联的 macro 调用执行整个
 staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结束准备阶段临时量的驻留，
 不为每个输出 tile 或 K record 增加函数调用。
@@ -127,6 +133,10 @@ staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结�
 `staged_columns`、`rows` 和 `columns` 复用作用域。输出 tile 的 state 跨全部 K record
 保留，只在完成后写出。NVFP4 保留独立的 16 元素码本 dot 与子块 scale，Q1 保留
 中心化 I8 code；activation 量化和局部 encoded stage 都在本次调用内完成。
+TQ2_0 变体为每个权重 record 闭合一个 256 项有符号 dot，复用相同的输出 state 与
+编码作用域；Q8_K 准备及 workspace 仍显式保留在 projection 调用内。
+IQ4_XS 在相同 stage 中保留 32 元素码本 dot、显式低/高 scale 字段与有符号 I32
+group factor；Q8_K 准备也计入本次调用。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
 activation，将符号精确转移到 activation，再显式进行 I16 成对乘积。
 索引程序由已存储的七位重建偶校验符号。`preparation.quantize(chunk=...)`
@@ -176,6 +186,8 @@ Q8_0 子 record 的 scale，再应用权重 scale；NVFP4 共享 staged codebook
 作者的行 cohort，native grid 覆盖全部 cohort。`window_projection` 在调用内将
 activation 量化到调用者提供的 `Quantized` buffer，再复用同一宏，准备成本与
 输出布局均保持显式。
+分组 `subblocks` 变体也保留原 I8 activation，以显式有符号权重码执行 widening
+grouped MAC，完整保留 -128 的计算。
 `rows_per_program` 也可以让一个实例保留多行完整计算。
 
 `short_projection.staged_projection` 消费原始编码权重布局。作者分别指定外层权重列
