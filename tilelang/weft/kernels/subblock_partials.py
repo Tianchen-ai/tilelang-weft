@@ -317,7 +317,7 @@ def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows,
             for part in T.unroll(elements // 32):
                 x = T.load(values[block][part * 32 : (part + 1) * 32])
                 activation, ds = x.q, x.d
-                codes = T.alloc_local((rows, 32), "uint8" if lookup else "uint4")
+                codes = T.alloc_local((rows, 32), "uint8" if lookup else "int8")
                 inputs = T.alloc_local((rows, 32), "int8")
                 products = T.alloc_local((rows, lanes), "int32")
                 if lookup:
@@ -331,8 +331,8 @@ def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows,
                         inputs[r, k] = activation[k]
                     else:
                         positive = q[r, T.uint8(part * 32) + T.cast(k, "uint8")]
-                        codes[r, k] = T.cast(1, "uint4")
-                        inputs[r, k] = T.if_then_else(positive != 0, activation[k], -activation[k])
+                        codes[r, k] = T.cast(positive, "int8") * T.int8(2) - T.int8(1)
+                        inputs[r, k] = activation[k]
                 T.mac_groups(codes, inputs, products, n=4, into="int32", over="k")
                 for r in T.unroll(rows):
                     if lookup:
