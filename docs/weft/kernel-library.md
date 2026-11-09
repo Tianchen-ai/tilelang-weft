@@ -405,6 +405,8 @@ without specifying a hardware vector width; sixteen-group formats also accept
 `groups_per_step=16`. Projection prepares its caller's
 Q8_K buffer once inside the invocation; `extreme_policy` preserves the selected
 quantization tie rule before the same indexed row program consumes that buffer.
+`inverse_policy` selects the existing direct or reciprocal scale calculation
+for that preparation, as in the other projection factories.
 
 The bounded `scaled_entries_rows` and `xxs_subgroups_rows` macros likewise serve
 their dot factories and `indexed_lanes.entry_projection`. The same entry/payload
