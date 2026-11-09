@@ -337,8 +337,7 @@ IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再�
 `numerical_form="scaled"` 复用同一 `iq1_scaled_rows` 宏；Q8_K 准备仍计入调用。
 显式带偏置的 unsigned two-bit 表示将 codebook 范围边界传给共同整数分析，而非任意 I8。
 偏置先使用字节算术，字节回绕不改变后续 two-bit 转换的低位。奇数 group factor
-保持 I8，直到 I16 乘积处再显式扩宽。lane row helper 使用显式原生调用边界，
-projection 在调用内准备 activation 后复用同一完整 K 归约。
+保持 I8，直到 I16 乘积处再显式扩宽。
 
 分阶段 IQ1 程序还接受 `rows`、`columns` 输出分块。`groups_per_step` 限定每个 record
 子 Level 内同时计算的 group 数，精确 I32 小计跨窗口携带，之后仍在原 record 边界执行

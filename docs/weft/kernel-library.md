@@ -413,8 +413,6 @@ activation quantization remains inside its invocation. `row_partials.scaled_proj
 reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
 parameter selects block integer sums or deferred lane partials in the author
 program, independently of target vector width.
-The lane row helper has an explicit native call boundary; projection reuses
-that same complete K reduction after its in-call activation preparation.
 
 IQ1_M's indexed row program reconstructs its F16 scale with ordinary
 `T.reinterpret`, then closes each signed numerator dot with `T.reduce_dot`.

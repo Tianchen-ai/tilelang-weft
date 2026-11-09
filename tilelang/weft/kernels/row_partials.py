@@ -666,7 +666,7 @@ def q2_lanes(M, K):
     return main
 
 
-@T.macro(noinline=True)
+@T.macro
 def scaled_lanes_value(weights, values, K, format, lanes):
     """Close one encoded row's numerical lanes before returning its scalar."""
     total = T.alloc_local((lanes,), "float32")
