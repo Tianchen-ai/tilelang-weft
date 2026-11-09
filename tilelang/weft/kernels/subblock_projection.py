@@ -28,17 +28,14 @@ def staged_tiles(weights, prepared, output, table, scales, M, N, K, format,
 def record_tiles(weight, activation_stage, table, scales, row, block, total, rows, columns, format):
     if format == "TQ2_0":
         w, x = T.load(weight), T.load(activation_stage[row, block])
-        codes = w.q
+        payload = w.q
+        codes = T.alloc_local((columns, 256), "int8")
+        for c, k in T.Parallel(columns, 256):
+            codes[c, k] = T.cast(payload[c, k], "int8") - T.int8(1)
         products = T.alloc_local((rows, columns), "int32")
         T.reduce_dot(x.q, codes, products, over="k", acc_dtype="int32", engine="vector")
-        group_sums = T.alloc_local((rows, 16), "int32")
-        sums = T.alloc_local((rows,), "int32")
-        for r, group in T.Parallel(rows, 16):
-            group_sums[r, group] = T.cast(x.bsum[r, group], "int32")
-        T.reduce_sum(group_sums, sums, dim=1)
         for r, c in T.Parallel(rows, columns):
-            centered = products[r, c] - sums[r]
-            total[r, c] += (T.cast(w.d[c], "float32") * x.ds[r]) * T.cast(centered, "float32")
+            total[r, c] += (T.cast(w.d[c], "float32") * x.ds[r]) * T.cast(products[r, c], "float32")
     elif format == "IQ4_XS":
         w, x = T.load(weight), T.load(activation_stage[row, block])
         low, high, wd, xd = w.scales_l, w.scales_h, w.d, x.ds
