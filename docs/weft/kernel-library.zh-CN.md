@@ -326,6 +326,8 @@ factory 和 `indexed_lanes.entry_projection`。相同的 entry/payload Level、�
 `row_partials.scaled_projection` 为 Q3_K/Q6_K 复用 `scaled_planes_rows` 或
 `scaled_lanes_rows`；`organization` 在作者程序中选择逐 block 的整数和或延迟归约的
 lane partial，与目标向量宽度独立。
+`xxs_subgroups` 的 `index_dtype="uint16"/"uint32"` 指定作者的字节偏移算术，
+与目标 gather 指令的索引选择分开。
 
 IQ1_M 的 indexed row 程序通过普通 `T.reinterpret` 重建 F16 scale，再以
 `T.reduce_dot` 完成各组有符号 numerator dot。Scale、delta、整数累加及最终

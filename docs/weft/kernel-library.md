@@ -413,6 +413,8 @@ activation quantization remains inside its invocation. `row_partials.scaled_proj
 reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
 parameter selects block integer sums or deferred lane partials in the author
 program, independently of target vector width.
+The `xxs_subgroups` factory exposes `index_dtype="uint16"/"uint32"` for the
+author's byte-offset arithmetic, separately from the target's gather instruction.
 
 IQ1_M's indexed row program reconstructs its F16 scale with ordinary
 `T.reinterpret`, then closes each signed numerator dot with `T.reduce_dot`.

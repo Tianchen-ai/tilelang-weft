@@ -292,7 +292,7 @@ def iq1_scaled_tiles(weights, values, output, grid, mc, nc, K, medium, rows, col
 
 
 @T.macro
-def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
+def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis, index_dtype="uint16"):
     with T.level.rows(M, group=1, axis=axis) as row:
         total = T.alloc_var("float32", init=0)
         with T.level.blocks(K, extent=256) as block:
@@ -301,15 +301,15 @@ def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
             block_sum = T.alloc_var("int32", init=0)
             group_index = T.alloc_var("uint16", init=0)
             with T.level.subtiles(block, extent=64) as _window:
-                indices = T.alloc_local((2, 4, 2, 4), "uint16")
-                sign_indices = T.alloc_local((2, 4, 8), "uint16")
+                indices = T.alloc_local((2, 4, 2, 4), index_dtype)
+                sign_indices = T.alloc_local((2, 4, 8), index_dtype)
                 for half, pair_entry, pair, payload in T.Parallel(2, 4, 2, 4):
                     coordinate = group_index * T.uint16(16) + T.cast(half * 8 + pair_entry * 2 + pair, "uint16")
-                    indices[half, pair_entry, pair, payload] = T.cast(q[coordinate], "uint16") * T.uint16(4) + T.cast(payload, "uint16")
+                    indices[half, pair_entry, pair, payload] = T.cast(q[coordinate], index_dtype) * T.cast(4, index_dtype) + T.cast(payload, index_dtype)
                 for half, pair_entry, sign_payload in T.Parallel(2, 4, 8):
                     word = metadata[group_index * T.uint16(2) + T.cast(half, "uint16")]
-                    index = T.cast(word >> T.cast(pair_entry * 7, "uint32"), "uint16") & T.uint16(127)
-                    sign_indices[half, pair_entry, sign_payload] = index * T.uint16(8) + T.cast(sign_payload, "uint16")
+                    index = T.cast(word >> T.cast(pair_entry * 7, "uint32"), index_dtype) & T.cast(127, index_dtype)
+                    sign_indices[half, pair_entry, sign_payload] = index * T.cast(8, index_dtype) + T.cast(sign_payload, index_dtype)
                 selected = T.load(grid.values, at=indices, bounds="in_bounds")
                 sign_rows = T.load(signs.values, at=sign_indices, bounds="in_bounds")
                 sign_lanes = T.reshape(sign_rows, (2, 4, 2, 4))
@@ -337,7 +337,8 @@ def xxs_subgroups_rows(weights, values, output, grid, signs, M, K, axis):
 
 
 @tilelang.jit(target="weft")
-def xxs_subgroups(M, K, rows_per_program=None):
+def xxs_subgroups(M, K, rows_per_program=None, index_dtype="uint16"):
+    assert index_dtype in ("uint16", "uint32")
     """Keep two scale groups and their codebook/sign rows in each 64-term Level."""
     assert M > 0 and K > 0 and K % 256 == 0
     cohort = M if rows_per_program is None else rows_per_program
@@ -360,7 +361,7 @@ def xxs_subgroups(M, K, rows_per_program=None):
         with T.Kernel(M // cohort, cpu_num_threads=1) as program:
             first = program * cohort
             xxs_subgroups_rows(weights[first : first + cohort, :], values,
-                               output[first : first + cohort], grid, signs, cohort, K, "m")
+                               output[first : first + cohort], grid, signs, cohort, K, "m", index_dtype)
 
     return main
 
