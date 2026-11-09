@@ -83,8 +83,8 @@ def quantize_rows(xv, yv, M, K, format, elements, extreme_policy, inverse_policy
                     inverse = 127.0 / maximum[0] if inverse_policy == "direct" else 1.0 / d[0]
                 for i in T.Parallel(elements):
                     q[i] = T.narrow(value[i] * inverse, "int8", rounding=rounding, saturation=False)
-                T.copy(q, yv[row, part].q)
                 T.copy(d, yv[row, part].d)
+                T.copy(q, yv[row, part].q)
                 if format == "Q8_1":
                     wide = T.alloc_local((elements,), "int16")
                     total = T.alloc_local((1,), "int16")
