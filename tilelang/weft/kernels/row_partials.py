@@ -805,8 +805,8 @@ def affine_matrix_tiles(weights, values, output, mc, nc, K, format, rows, column
         with T.level.rows(mc, group=rows) as row:
             total = T.state((rows, columns), "float32", init=0)
             with T.level.blocks(K, extent=256) as block:
-                coefficients = T.stage(T.load(weights[col, block].scales if format == "Q2_K" else weights[col, block].sc))
                 w, x = T.load(weights[col, block]), T.load(values[row, block])
+                coefficients = w.scales if format == "Q2_K" else w.sc
                 integer = T.state((rows, columns), "int32", init=0)
                 with T.level.subtiles(block, extent=width) as group:
                     payload = T.load(w.q, at=group, axis=1)

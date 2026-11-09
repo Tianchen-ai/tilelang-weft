@@ -125,7 +125,8 @@ lanes 组织。Q2 使用 16 个精确 I16 lanes；Q3/Q6 选择 16 或 32 个缩�
 默认的分组 plane 组织继续保留。短 record affine projection 将 minimum 和 product
 支路直接更新到 F32 state，显式形成两处局部 FMA 机会，减少合并 contribution 的临时值。
 多输出 affine tile 为各输出保留跨 record 内 16/32 元素分组的 I32 总和；保存的
-coefficient 字段保留 Encoding 分组投影，minimum 修正仍与 Q8_K 分组和执行独立 dot。
+coefficient 字段从与 payload 相同的权重 record 快照投影，保留 Encoding 分组关系，
+不再单独读取或建立 coefficient stage。minimum 修正仍与 Q8_K 分组和执行独立 dot。
 `short_projection.staged_projection` 在准备完成后，通过一次不内联的 macro 调用执行整个
 staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结束准备阶段临时量的驻留，
 不为每个输出 tile 或 K record 增加函数调用。

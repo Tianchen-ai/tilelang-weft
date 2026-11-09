@@ -174,8 +174,10 @@ available. Short affine projections update their minimum and product branches
 directly into the F32 state, exposing two local FMA opportunities without an
 extra combined contribution temporary.
 Its multi-output affine tiles retain one I32 sum per output across the record's
-16/32-element groups. A saved coefficient field preserves its Encoding group
-projection; the minimum correction remains a separate dot against Q8_K sums.
+16/32-element groups. Coefficients are projected from the same saved weight
+record as its payload, preserving their Encoding group relation without a
+second coefficient read or a separate coefficient stage. The minimum correction
+remains a separate dot against Q8_K sums.
 `short_projection.staged_projection` puts its entire staged compute traversal
 in one non-inlined macro call after preparation, retaining the same Level tree
 and natural input ABI. The call closes preparation temporaries without adding
