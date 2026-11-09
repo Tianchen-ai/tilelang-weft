@@ -139,6 +139,11 @@ grid covering every row. The default keeps all rows in one program.
 `xxs_subgroups` factories expose the same row-cohort choice. The explicit grid
 changes the program's traversal boundary, while each factory reuses its existing
 row macro and preserves input preparation and numerical grouping.
+`block32(row_calls=True)` and `iq1_scaled(row_calls=True)` instead close each
+row in a native, non-inlined helper. The program's ordinary serial row loop
+calls that same numerical row macro through the helper, retaining its input
+layout and record partials. This author choice bounds each row's live values
+without adding Python calls or changing the complete grid measurement.
 
 For RISC-V, `row_partials.affine_groups` expresses Q2_K/Q4_K/Q5_K scale groups
 as Level subtiles, keeping the minimum correction in a separate integer branch.

@@ -262,6 +262,10 @@ program，每个 program 保留相同的 plane/lane 数值组织，完整 native
 `subblock_partials.block32` 以及 indexed `vec_dot`、`scaled_entries`、
 `xxs_subgroups` 提供相同的行 cohort 选择。显式 grid 改变 program 的遍历边界，
 每个 factory 仍复用原行宏，保留输入准备和数值分组。
+`block32(row_calls=True)` 和 `iq1_scaled(row_calls=True)` 则把每行收口到一个
+原生非内联 helper。program 的普通串行行循环经 helper 调用相同的数值宏，
+保留输入布局与 record partial。这项作者选择限定每行的活跃值范围，不增加
+Python 调用，也不改变完整 grid 的计时范围。
 
 短 record 量化器支持 `records=1/2/4/8`。一个 cohort 显式区分 record 与 payload
 轴，每条 record 的极值和编码 scale 只计算一次，其量化 lanes 共享 inverse。

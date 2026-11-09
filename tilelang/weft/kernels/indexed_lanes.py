@@ -466,8 +466,13 @@ def iq1_scaled_rows(weights, values, output, grid, M, K, medium, axis):
         T.copy(result, output[row])
 
 
+@T.macro(noinline=True)
+def iq1_scaled_row(weights, values, output, grid, K, medium):
+    iq1_scaled_rows(weights, values, output, grid, 1, K, medium, "m")
+
+
 @tilelang.jit(target="weft")
-def iq1_scaled(M, K, format="IQ1_M", rows_per_program=None):
+def iq1_scaled(M, K, format="IQ1_M", rows_per_program=None, row_calls=False):
     """Use the IQ1 alphabet {-1,0,1} and one scaled integer sum per record."""
     assert format in ("IQ1_S", "IQ1_M") and min(M, K) > 0 and K % 256 == 0
     cohort = M if rows_per_program is None else rows_per_program
@@ -489,9 +494,16 @@ def iq1_scaled(M, K, format="IQ1_M", rows_per_program=None):
         grid = T.view(Grid, shape=(2048, 8), encoding=F.I8X8, axes=("entry", "payload"), abi=True)
         with T.Kernel(M // cohort, cpu_num_threads=1) as program:
             first = program * cohort
-            iq1_scaled_rows(weights[first : first + cohort, :], values,
-                            output[first : first + cohort], grid, cohort, K,
-                            format == "IQ1_M", "m")
+            if row_calls:
+                for row in T.serial(cohort):
+                    start = first + row
+                    iq1_scaled_row(weights[start : start + 1, :], values,
+                                   output[start : start + 1], grid, K,
+                                   format == "IQ1_M")
+            else:
+                iq1_scaled_rows(weights[first : first + cohort, :], values,
+                                output[first : first + cohort], grid, cohort, K,
+                                format == "IQ1_M", "m")
 
     return main
 
