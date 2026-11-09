@@ -187,9 +187,12 @@ a call at each output tile or K record.
 tile is state across all K records and is stored once. NVFP4 retains separate
 16-element codebook dots and subblock scales; Q1 retains its centered I8 codes.
 Activation quantization and local encoded stages remain inside the invocation.
-The TQ2_0 variant closes one signed 256-term dot per weight record, sharing the
-same output state and encoded reuse scopes. Its Q8_K preparation and workspace
-remain explicit inside the projection.
+The TQ2_0 variant closes one 256-term unsigned-code dot per weight record and
+subtracts the Q8_K activation sum in I32. This is the exact integer identity
+`sum((q - 1) * x) = sum(q * x) - sum(x)`; the stored Q8_K group sums serve every
+output column without constructing a centered byte tile. The output state and
+encoded reuse scopes remain the same. Q8_K preparation and workspace stay
+explicit inside the projection.
 IQ4_XS uses the same stages with 32-element codebook dots, explicit low/high
 scale fields and a signed I32 group factor. Its Q8_K preparation is also counted
 inside the invocation.

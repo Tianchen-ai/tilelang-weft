@@ -194,6 +194,8 @@ heterogeneous cache information remains unknown.
 ## JIT, cache and autotuning
 
 Both lazy factories and eager annotated functions use TileLang's existing JIT.
+Scalar locals wrapped in unit-sized TileLang buffers keep one numerical value
+through native helper mutation, just as they do through serial loops and branches.
 Cache keys retain the native TIRx program, target, physical options, toolchain and
 core identity. A disk cache hit restores a native artifact; a hot call launches
 already loaded code. No Triton frontend is imported by this route.

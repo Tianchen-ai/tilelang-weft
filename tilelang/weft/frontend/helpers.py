@@ -82,8 +82,14 @@ class HelperOperations:
         for key, expected in zip(context["keys"], context["carried_types"]):
             value = self.locals[key]
             if value.type != expected:
-                if element_type(value.type) != element_type(expected) or shape_of(value.type) != shape_of(expected):
-                    self.error("helper mutation must preserve its caller buffer dtype and shape")
+                actual_shape, expected_shape = shape_of(value.type), shape_of(expected)
+                scalar_storage = all(extent == 1 for extent in (*actual_shape, *expected_shape))
+                if element_type(value.type) != element_type(expected) or (
+                    actual_shape != expected_shape and not scalar_storage
+                ):
+                    self.error(f"helper mutation of {key.name} must preserve its caller buffer dtype and shape: "
+                               f"expected {element_type(expected)} {shape_of(expected)}, "
+                               f"received {element_type(value.type)} {shape_of(value.type)}")
                 value = self.rename(value, shape_of(expected), axes_of(expected))
             carried.append(value)
         self.emit("weft_kernel.helper_return", (*normalized, *carried))

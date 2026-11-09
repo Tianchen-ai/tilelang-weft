@@ -157,7 +157,9 @@ artifact 记录实际需要的扩展，runtime 检查 worker CPU 集合；寄存
 
 ## JIT、缓存和调优
 
-lazy factory 和 eager 注解函数使用 TileLang JIT。缓存身份包含原生 TIRx、目标、
+lazy factory 和 eager 注解函数使用 TileLang JIT。TileLang 用单位大小 buffer 包装的
+标量 local 在原生 helper 的更新中仍保持一个数值，与串行循环和分支一致。
+缓存身份包含原生 TIRx、目标、
 物理选项、工具链与 core 身份。磁盘命中恢复 native artifact，热调用进入已加载代码。
 
 `@tilelang.autotune` 枚举作者/配置候选，CPU 使用 wall timer。共同私有存储保留

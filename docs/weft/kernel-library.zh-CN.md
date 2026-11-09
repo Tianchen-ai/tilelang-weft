@@ -134,8 +134,11 @@ staged 计算遍历，保留原 Level 树和自然输入 ABI。调用边界结�
 `staged_columns`、`rows` 和 `columns` 复用作用域。输出 tile 的 state 跨全部 K record
 保留，只在完成后写出。NVFP4 保留独立的 16 元素码本 dot 与子块 scale，Q1 保留
 中心化 I8 code；activation 量化和局部 encoded stage 都在本次调用内完成。
-TQ2_0 变体为每个权重 record 闭合一个 256 项有符号 dot，复用相同的输出 state 与
-编码作用域；Q8_K 准备及 workspace 仍显式保留在 projection 调用内。
+TQ2_0 变体为每个权重 record 闭合一个 256 项无符号码 dot，然后在 I32 中减去
+Q8_K activation 的分组和。这是精确整数恒等式
+`sum((q - 1) * x) = sum(q * x) - sum(x)`；已有分组和跨输出列复用，不再构造
+中心化字节 tile。输出 state 和编码作用域保持一致，Q8_K 准备与 workspace
+仍显式保留在 projection 调用内。
 IQ4_XS 在相同 stage 中保留 32 元素码本 dot、显式低/高 scale 字段与有符号 I32
 group factor；Q8_K 准备也计入本次调用。
 索引 x86 变体消费固定 GGML codebook 与范围为 [-127, 127] 的已准备 Q8_K
