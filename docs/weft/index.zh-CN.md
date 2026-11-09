@@ -151,6 +151,9 @@ python -m weft_core.cpu_cli --profile k3-a100 --cpus 8-15 application.py
 共同启动代码在 K3 上先注册 AI thread，再绑定 affinity，然后发现 JIT 目标。
 artifact 记录实际需要的扩展，runtime 检查 worker CPU 集合；寄存器和临时存储资源
 在物理编译期间分析。
+本机发现也将所选 CPU 集合共同的 L1 数据缓存几何传入既有物理配置，经过目标和
+工具链规范化后仍保留，并进入缓存身份。AOT 或调优可用显式
+`backend_options["data_cache"]` 覆盖；缓存信息缺失或不一致时保持未知。
 
 ## JIT、缓存和调优
 

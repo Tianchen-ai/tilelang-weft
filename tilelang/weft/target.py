@@ -32,21 +32,9 @@ def compilation_identity():
 
 def target(profile="native", *, toolchain=None, backend_options=None):
     from weft_core.cpu import target as cpu_target
-    from weft_core.toolchain import Toolchain
 
     descriptor = cpu_target(profile)
-    configuration = Toolchain.resolve(toolchain or {}, descriptor).to_dict()
-    values = asdict(descriptor)
-    values.pop("backend")
-    return Target(
-        {
-            "kind": "weft",
-            **values,
-            "toolchain": json.dumps(configuration, sort_keys=True),
-            "options": json.dumps(backend_options or {}, sort_keys=True),
-            "core": compilation_identity(),
-        }
-    )
+    return target_from_descriptor(descriptor, toolchain=toolchain, backend_options=backend_options)
 
 
 def descriptor(target):
@@ -59,6 +47,7 @@ def descriptor(target):
         str(target.attrs["abi"]),
         int(target.attrs["vlen_bits"]),
         str(target.attrs["matrix_extension"]),
+        json.loads(str(target.attrs["options"])).get("data_cache"),
     )
 
 
@@ -79,12 +68,16 @@ def target_from_descriptor(value, *, toolchain=None, backend_options=None):
 
     values = asdict(value)
     values.pop("backend")
+    cache_geometry = values.pop("data_cache")
+    physical = dict(backend_options or {})
+    if value.arch == "riscv64":
+        physical.setdefault("data_cache", cache_geometry)
     return Target(
         {
             "kind": "weft",
             **values,
             "toolchain": json.dumps(Toolchain.resolve(toolchain or {}, value).to_dict(), sort_keys=True),
-            "options": json.dumps(backend_options or {}, sort_keys=True),
+            "options": json.dumps(physical, sort_keys=True),
             "core": compilation_identity(),
         }
     )

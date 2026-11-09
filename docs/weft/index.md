@@ -185,6 +185,11 @@ python -m weft_core.cpu_cli --profile k3-a100 --cpus 8-15 application.py
 The shared startup code performs K3 AI-thread registration before affinity.
 Artifacts record their actual extension requirements; execution checks the worker
 CPU set. Hardware resources are analyzed during physical compilation.
+Native discovery also carries the selected CPU set's common L1 data-cache
+geometry into the existing physical options. The geometry survives target and
+toolchain normalization and participates in cache identity. Explicit
+`backend_options["data_cache"]` takes precedence for AOT or tuning; absent or
+heterogeneous cache information remains unknown.
 
 ## JIT, cache and autotuning
 

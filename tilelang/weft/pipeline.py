@@ -48,7 +48,7 @@ def compile_artifact(mod, context, *, params, runtime_only, enable_device_compil
     options = option_type(**physical)
     if options.pipeline_depth not in (1, 2, 3, 4):
         raise ValueError("pipeline_depth must be one of 1, 2, 3, 4")
-    bindings = {**asdict(options), **asdict(target)}
+    bindings = {**asdict(target), **asdict(options)}
     lowered, report = compiler.lower(canonical, bindings)
     emitted = compiler.emit(lowered)
     report["pipeline"].extend(emitted["compilation"]["pipeline"])
