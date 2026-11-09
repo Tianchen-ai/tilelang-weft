@@ -501,7 +501,7 @@ def scaled_planes_rows(weights, values, output, M, K, format, axis):
                 codes = T.alloc_local((4, 2, 16), "int8")
                 inputs = T.alloc_local((4, 2, 16), "int8")
                 for plane, group, k in T.Parallel(4, 2, 16):
-                    coordinate = T.uint8(half * 128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
+                    coordinate = half * T.uint8(128) + T.cast(plane, "uint8") * T.uint8(32) + T.cast(group, "uint8") * T.uint8(16) + T.cast(k, "uint8")
                     codes[plane, group, k] = T.cast(T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(2 if format == "Q3_K" else 4)), "int8") - T.int8(4 if format == "Q3_K" else 32)
                     inputs[plane, group, k] = activation[coordinate]
                 products = T.alloc_local((4, 2), "int32")
@@ -510,7 +510,7 @@ def scaled_planes_rows(weights, values, output, M, K, format, axis):
                 half_sum = T.alloc_local((1,), "int32")
                 T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
                 for plane, group in T.Parallel(4, 2):
-                    scale_index = T.uint8(half * 8) + T.cast(plane, "uint8") * T.uint8(2) + T.cast(group, "uint8")
+                    scale_index = half * T.uint8(8) + T.cast(plane, "uint8") * T.uint8(2) + T.cast(group, "uint8")
                     terms[plane, group] = products[plane, group] * T.cast(scales[scale_index], "int32")
                 T.reduce_sum(terms, plane_sums, dim=1)
                 T.reduce_sum(plane_sums, half_sum, dim=0)
