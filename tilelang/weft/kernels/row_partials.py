@@ -738,6 +738,37 @@ def scaled_lanes(M, K, format="Q3_K", lanes=32):
     return main
 
 
+@T.macro(noinline=True)
+def staged_rows(weights, prepared, output, M, N, K, format, batch_rows, staged_columns,
+                organization, lanes, rows, columns):
+    """Close staged numerical work independently of activation preparation."""
+    group_size = 16 if format == "Q2_K" else 32
+    with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
+        weight_stage = T.stage(T.load(weights[nc, :]))
+        with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
+            activation_stage = T.stage(T.load(prepared[mc, :]))
+            if rows > 1 or columns > 1:
+                if format in ("Q2_K", "Q4_K", "Q5_K"):
+                    affine_matrix_tiles(weight_stage, activation_stage, output,
+                                        mc, nc, K, format, rows, columns)
+                else:
+                    scaled_matrix_tiles(weight_stage, activation_stage, output,
+                                        mc, nc, K, format, rows, columns)
+            else:
+                with T.level.rows(mc, group=1) as row:
+                    values = activation_stage[row, :][0, :]
+                    destination = output[row, nc][0, :]
+                    if format == "Q2_K" and organization == "lanes":
+                        q2_lanes_rows(weight_stage, values, destination, nc, K, "n")
+                    elif format in ("Q2_K", "Q4_K", "Q5_K"):
+                        affine_group_rows(weight_stage, values, destination, nc, K,
+                                          format, group_size, 256 // group_size, "n")
+                    elif organization == "lanes":
+                        scaled_lanes_rows(weight_stage, values, destination, nc, K, format, lanes, "n")
+                    else:
+                        scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
+
+
 @tilelang.jit(target="weft")
 def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
                       extreme_policy="first", inverse_policy="reciprocal",
@@ -752,7 +783,6 @@ def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
     assert rows > 0 and columns > 0 and batch_rows % rows == staged_columns % columns == 0
     assert (rows == columns == 1) or organization == "planes"
     encoding = getattr(F, format)
-    group_size = 16 if format == "Q2_K" else 32
 
     @T.prim_func
     def main(
@@ -770,30 +800,8 @@ def staged_projection(M, N, K, format="Q6_K", batch_rows=16, staged_columns=16,
         with T.Kernel(1, cpu_num_threads=1):
             quantize_rows(source, prepared, M, K, "Q8_K", 256,
                           extreme_policy, inverse_policy, "rne", 256)
-            with T.level.tiles(N, extent=staged_columns, axis="n") as nc:
-                weight_stage = T.stage(T.load(weights[nc, :]))
-                with T.level.tiles(M, extent=batch_rows, axis="m") as mc:
-                    activation_stage = T.stage(T.load(prepared[mc, :]))
-                    if rows > 1 or columns > 1:
-                        if format in ("Q2_K", "Q4_K", "Q5_K"):
-                            affine_matrix_tiles(weight_stage, activation_stage, output,
-                                                mc, nc, K, format, rows, columns)
-                        else:
-                            scaled_matrix_tiles(weight_stage, activation_stage, output,
-                                                mc, nc, K, format, rows, columns)
-                    else:
-                        with T.level.rows(mc, group=1) as row:
-                            values = activation_stage[row, :][0, :]
-                            destination = output[row, nc][0, :]
-                            if format == "Q2_K" and organization == "lanes":
-                                q2_lanes_rows(weight_stage, values, destination, nc, K, "n")
-                            elif format in ("Q2_K", "Q4_K", "Q5_K"):
-                                affine_group_rows(weight_stage, values, destination, nc, K,
-                                                  format, group_size, 256 // group_size, "n")
-                            elif organization == "lanes":
-                                scaled_lanes_rows(weight_stage, values, destination, nc, K, format, lanes, "n")
-                            else:
-                                scaled_planes_rows(weight_stage, values, destination, nc, K, format, "n")
+            staged_rows(weights, prepared, output, M, N, K, format,
+                        batch_rows, staged_columns, organization, lanes, rows, columns)
 
     return main
 
@@ -807,10 +815,20 @@ def affine_matrix_tiles(weights, values, output, mc, nc, K, format, rows, column
             with T.level.blocks(K, extent=256) as block:
                 w, x = T.load(weights[col, block]), T.load(values[row, block])
                 coefficients = w.scales if format == "Q2_K" else w.sc
+                if format == "Q2_K":
+                    masked = T.alloc_local((columns, 16), "uint8")
+                    for c, g in T.Parallel(columns, 16):
+                        masked[c, g] = T.cast(coefficients[c, g], "uint8") & T.uint8(15)
+                    low_scales = masked
+                    group_index = T.alloc_var("uint8", init=0)
                 integer = T.state((rows, columns), "int32", init=0)
                 with T.level.subtiles(block, extent=width) as group:
                     payload = T.load(w.q, at=group, axis=1)
-                    if format == "Q5_K":
+                    if format == "Q2_K":
+                        codes = T.alloc_local((columns, width), "int8")
+                        for c, k in T.Parallel(columns, width):
+                            codes[c, k] = T.cast(payload[c, k], "int8")
+                    elif format == "Q5_K":
                         high = T.load(w.qh, at=group, axis=1)
                         codes = T.alloc_local((columns, width), "uint8")
                         for c, k in T.Parallel(columns, width):
@@ -820,10 +838,14 @@ def affine_matrix_tiles(weights, values, output, mc, nc, K, format, rows, column
                     products = T.alloc_local((rows, columns), "int32")
                     T.reduce_dot(T.load(x.q, at=group, axis=1), codes, products,
                                  over="k", acc_dtype="int32", engine="vector")
-                    metadata = T.load(coefficients, at=group, axis=1)
-                    for r, c in T.Parallel(rows, columns):
-                        factor = T.cast(metadata[c], "uint8") & T.uint8(15) if format == "Q2_K" else metadata[c]
-                        integer[r, c] += products[r, c] * T.cast(factor, "int32")
+                    if format == "Q2_K":
+                        for r, c in T.Parallel(rows, columns):
+                            integer[r, c] += products[r, c] * T.cast(low_scales[c, group_index], "int32")
+                        group_index += T.uint8(1)
+                    else:
+                        metadata = T.load(coefficients, at=group, axis=1)
+                        for r, c in T.Parallel(rows, columns):
+                            integer[r, c] += products[r, c] * T.cast(metadata[c], "int32")
                 correction = T.alloc_local((rows, columns), "int32")
                 if format == "Q2_K":
                     minima = T.alloc_local((columns, 16), "int16")
