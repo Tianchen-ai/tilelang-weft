@@ -423,6 +423,15 @@ activation quantization remains inside its invocation. `row_partials.scaled_proj
 reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
 parameter selects block integer sums or deferred lane partials in the author
 program, independently of target vector width.
+For `organization="planes"`, `planes=2/4` chooses the number of planes in each
+integer dot batch. Both retain the 128-element Level, exact scale-group sums,
+and one floating-point update per record. Two-plane batches complete their
+partials before the next batch, shortening the live vector frontier.
+`row_partials.staged_projection` exposes `engine` for its tile contractions and
+`decode_window` for the author's bounded Q3_K/Q6_K decoding scope. The row and
+column tile sizes, staged panels, integer scale groups and activation preparation
+remain explicit source choices. An 8-by-8 tile with a sixteen-element decode
+window can express an IME2 matrix program through the same factory.
 The `xxs_subgroups` factory exposes `index_dtype="uint16"/"uint32"` for the
 author's byte-offset arithmetic, separately from the target's gather instruction.
 

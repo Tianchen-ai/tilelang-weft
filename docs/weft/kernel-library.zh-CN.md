@@ -285,6 +285,16 @@ contraction 程序中消费这些码，面板准备仍计入调用耗时。
 编译器核对 alignment 和存储合同，只有合法时生成 streaming packet；其它情况保留
 普通 store。解码数值和准备工作的边界保持不变。
 
+`row_partials.scaled_projection(organization="planes", planes=2/4)`
+由作者选择每批整数 dot 的 plane 数量。两种写法保留 128 元素 Level、精确的
+scale-group 整数和，以及逐 record 的浮点更新；双 plane 批次先完成当前 partial，
+再计算下一批，缩短同时存活的向量范围。
+
+`row_partials.staged_projection` 用 `engine` 约束 tile contraction，
+用 `decode_window` 指定作者的 Q3_K/Q6_K 有界解码范围。
+行列分块、staged panel、整数 scale 分组和 activation 准备仍在源码中明确表达。
+8×8 分块配合 16 元素解码窗口，可以通过同一 factory 表达 IME2 矩阵程序。
+
 `panel_projection.projection` 的 `unroll_decode` 由作者选择是否展开有限的列解码循环。
 `pairwise=True, engine="vector"` 使用调用内的 `(pair, column, term)` I16 面板，
 并显式表达两项乘积的 I32 partial。Activation 量化、面板准备和 contraction 都保留
