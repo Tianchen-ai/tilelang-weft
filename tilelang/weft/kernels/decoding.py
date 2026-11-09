@@ -47,19 +47,19 @@ def decode_dequantize(record, result, rows, format, elements, Grid, Signs, Codeb
             value = T.cast(q[(k,) if single else (r, k)], "int8") - T.int8(1)
         elif format in ("Q5_0", "Q5_1"):
             packed = T.cast(q[(k,) if single else (r, k)], "uint8") | T.cast(high[(k,) if single else (r, k)], "uint8") << T.uint8(4)
-            value = T.cast(packed, "int32")
+            value = T.cast(packed, code_dtype)
             if format == "Q5_0":
-                value = value - 16
+                value = value - T.cast(16, code_dtype)
         elif format == "Q3_K":
-            value = T.cast(q[(k,) if single else (r, k)], "int32") - (1 - T.cast(high[(k,) if single else (r, k)], "int32")) * 4
+            value = T.cast(q[(k,) if single else (r, k)], code_dtype) - (T.cast(1, code_dtype) - T.cast(high[(k,) if single else (r, k)], code_dtype)) * T.cast(4, code_dtype)
         elif format == "Q5_K":
-            value = T.cast(q[(k,) if single else (r, k)], "int32") | T.cast(high[(k,) if single else (r, k)], "int32") << 4
+            value = T.cast(q[(k,) if single else (r, k)], code_dtype) | T.cast(high[(k,) if single else (r, k)], code_dtype) << T.cast(4, code_dtype)
         elif format == "Q6_K":
             value = (T.cast(q[(k,) if single else (r, k)], code_dtype) | T.cast(high[(k,) if single else (r, k)], code_dtype) << T.cast(4, code_dtype)) - T.cast(32, code_dtype)
         else:
-            value = T.cast(q[(k,) if single else (r, k)], "int32")
+            value = T.cast(q[(k,) if single else (r, k)], code_dtype)
             if format == "Q4_0":
-                value = value - 8
+                value = value - T.cast(8, code_dtype)
         if format == "Q2_K":
             if point is not None:
                 result[r, lane] = group_factor * T.cast(value, "float32") - group_minimum
