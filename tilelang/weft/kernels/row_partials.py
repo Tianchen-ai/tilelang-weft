@@ -1000,7 +1000,7 @@ def q6_planes(M, K, rows=1, lanes=64, planes=4, rows_per_program=None, accumulat
             for local_row in T.serial(cohort):
                 row = program * cohort + local_row
                 result = T.alloc_local((1,), "float32")
-                result[0] = q6_plane_value(weights[row, :], values, K, lanes, planes, accumulation)
+                result[0] = q6_plane_row(weights[row, :], values, K, lanes, planes, accumulation)
                 T.copy(result, output[row])
 
     return main
