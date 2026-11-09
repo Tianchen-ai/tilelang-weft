@@ -792,13 +792,13 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             # storage index does not introduce a numerical Parallel axis.
             if not axes:
                 return
-            record = getattr(self, "field_record_extents", {}).get(node.buffer)
             for dimension, (index, extent) in enumerate(zip(node.indices, node.buffer.shape)):
                 index = tirx.stmt_functor.substitute(index, definitions)
                 if not self.analyzer.can_prove_equal(index, loop.loop_var):
                     continue
-                if record is not None and dimension + 1 == len(axes) and not self.analyzer.can_prove_equal(extent, record):
-                    continue
+                # Iterating the complete stored field preserves its coordinate,
+                # including metadata with fewer elements than its source record.
+                # A Level's group projection remains a separate explicit access.
                 if self.analyzer.can_prove_equal(loop.min, 0) and self.analyzer.can_prove_equal(loop.extent, extent):
                     candidates.add(axes[dimension])
                     if isinstance(node, tirx.BufferStore):

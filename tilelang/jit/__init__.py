@@ -368,10 +368,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     def _get_frontend_target_context(self):
         if self.target is None:
             return nullcontext()
-        try:
-            target = determine_target(self.target, return_object=True)
-        except Exception:
-            return nullcontext()
+        target = determine_target(self.target, return_object=True)
         if isinstance(target, Target):
             return target
         return nullcontext()

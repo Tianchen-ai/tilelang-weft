@@ -242,6 +242,9 @@ proves that each index equals its Parallel coordinate. This includes local
 aliases and an integer cast whose value is unchanged over the loop's range.
 For example, `q[T.cast(k, "uint8")]` in a 32-element Parallel uses the same
 complete field as `q[k]`, preserving Encoding information for physical selection.
+This also applies to a complete metadata field whose stored extent is smaller
+than its source record. Iterating its declared elements keeps the field's axis;
+selecting a Level group remains an explicit group projection.
 
 `T.copy(value, output_view, annotations={"cache_hint": "streaming"})` carries the
 author's store hint through Canonical IR. The x86 backend selects non-temporal
