@@ -35,6 +35,11 @@ Level 轴投影字段，压缩字段保留 Encoding 的 record/group 关系。
 | MoE | `moe` | Top-k 路由、稳定分组、不等长 expert 范围和加权合并 |
 | 状态程序 | `state` | Welford、Top-K、selective recurrence 和调用者卷积历史 |
 
+`panel_projection.projection(format="Q2_K", panel_dtype="int8")`
+由作者在调用内面板中，将四位整数 scale 乘入两位 code。乘积范围为 `[0, 45]`，
+I8 精确保留整个整数值，并能作为有符号矩阵操作数。`engine` 约束该面板 contraction，
+I16 activation block-sum 校正明确采用向量路线。activation 量化、面板准备和校正均计入调用。
+
 例如：
 
 ```python

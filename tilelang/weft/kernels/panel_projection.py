@@ -10,7 +10,7 @@ from .decoding import ternary_digits
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                engine="auto", extreme_policy="first", inverse_policy="direct", pairwise=False,
-               unroll_decode=False):
+               unroll_decode=False, panel_dtype=None):
     """Decode each record once; retain integer groups and all preparation in-call."""
     assert format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL",
                       "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ1_0", "TQ2_0")
@@ -26,7 +26,11 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
     activation_bytes = K // partner.schema.elements * (partner.schema.storage_bits // 8)
     width = 16 if format in ("Q2_K", "Q3_K", "Q6_K") else 32
     assert not pairwise or (elements == 256 and engine == "vector")
-    panel_dtype = "int16" if pairwise or format in ("Q4_K", "Q5_K", "Q6_K") else "uint8"
+    natural_dtype = "int16" if pairwise or format in ("Q4_K", "Q5_K", "Q6_K") else "uint8"
+    if panel_dtype is None:
+        panel_dtype = natural_dtype
+    assert panel_dtype == natural_dtype or (format == "Q2_K" and not pairwise and panel_dtype == "int8")
+    correction_engine = "vector" if format == "Q2_K" and panel_dtype == "int8" else engine
     bias = {"Q4_0": 8, "Q5_0": 16, "Q8_0": 128, "IQ4_NL": 128,
             "Q3_K": 124, "TQ1_0": 1, "TQ2_0": 1}.get(format, 0)
     if pairwise:
@@ -170,7 +174,7 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
                         if k_affine:
                             block_sums = T.load(activation.bsum)
                             correction = T.alloc_local((rows, columns), "int32")
-                            T.reduce_dot(block_sums, minimum_values, correction, over="k", acc_dtype="int32", engine=engine)
+                            T.reduce_dot(block_sums, minimum_values, correction, over="k", acc_dtype="int32", engine=correction_engine)
                         elif short_affine:
                             xs = T.load(activation.s)
                         result = T.alloc_local((rows, columns), "float32")

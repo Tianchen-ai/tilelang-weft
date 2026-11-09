@@ -64,6 +64,13 @@ bound the serial work per grid instance without changing the causal KV prefix.
 Shared format declarations are defined once in `weft_core.formats.ggml` and
 adapted to TileLang by `ggml_formats`. Tables remain explicit input storage.
 
+`panel_projection.projection(format="Q2_K", panel_dtype="int8")` folds each
+four-bit integer scale into its two-bit code in the author's invocation-local
+panel. Their product is in `[0, 45]`, so I8 retains the complete integer value
+and admits signed matrix operands. `engine` constrains this panel contraction;
+the I16 activation block-sum correction explicitly uses the vector route.
+Activation quantization, panel preparation and correction remain inside the call.
+
 `codebook.iq1_s(chunk=32/64/128/256)` retains separate entry and eight-element
 payload axes. Entry scale and delta are shared across their payload; a typed
 I8X8 table View supplies the lookup. IQ2_XS/XXS likewise retain entry/sign rows
