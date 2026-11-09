@@ -123,7 +123,7 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                     with T.level.blocks(K, extent=32) as part:
                         w = T.load(wv[col, part])
                         x = T.load(xv[row, part])
-                        q, xd, wd = w.q, x.d, w.d
+                        q = w.q
                         if affine:
                             zero = w.zp
                         if generation == 2 and affine:
@@ -164,8 +164,12 @@ def ime(M, N, K, generation=1, affine=False, tile_rows=4, columns=16, engine="ma
                                 T.reduce_dot(left, right, partial, over="k", acc_dtype="int32", engine=engine)
                                 for m, n in T.Parallel(tile_rows, columns):
                                     integer[m, n] += partial[m, n]
+                        xd, wd = x.d, w.d
+                        scales = T.alloc_local((tile_rows, columns), "float32")
                         for m, n in T.Parallel(tile_rows, columns):
-                            total[m, n] += (xd[m] * T.cast(wd[n], "float32")) * T.cast(integer[m, n], "float32")
+                            scales[m, n] = xd[m] * T.cast(wd[n], "float32")
+                        for m, n in T.Parallel(tile_rows, columns):
+                            total[m, n] += scales[m, n] * T.cast(integer[m, n], "float32")
                     T.copy(total, yv[row, col])
 
     return main
