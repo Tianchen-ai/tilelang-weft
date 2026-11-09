@@ -309,8 +309,6 @@ I32 group 累加、显式 codebook 输入和逐 record 浮点 scale。`groups_pe
 约束源码展开范围，不指定硬件向量宽度；有 16 组的格式还可使用 `groups_per_step=16`。
 projection 在调用内只准备一次调用方的 Q8_K
 缓冲；`extreme_policy` 保留选定的量化并列极值规则，然后由相同的 indexed row 程序消费。
-`inverse_policy` 与其它 projection factory 一致，选择已有的直接除法或倒数乘法
-来计算该准备阶段的 scale。
 
 `indexed_lanes.staged_projection` 为 indexed record 增加外层权重列与 activation 行
 stage，复用已有 IQ1/IQ2/IQ3/IQ4 行宏，保留分组 partial、显式 codebook/sign 输入及

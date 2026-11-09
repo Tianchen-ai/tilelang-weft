@@ -736,7 +736,7 @@ def iq1_scaled_batch(weights, values, output, grid, M, K, medium, axis):
 
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first",
-               numerical_form="grouped", inverse_policy="direct"):
+               numerical_form="grouped"):
     """Prepare Q8_K once and reuse the record-local indexed partials."""
     assert format in ("IQ1_S", "IQ1_M", "IQ2_XS", "IQ2_XXS", "IQ2_S")
     assert min(M, N, K) > 0 and K % 256 == 0
@@ -769,7 +769,7 @@ def projection(M, N, K, format="IQ1_S", groups_per_step=8, extreme_policy="first
         else:
             signs = grid
         with T.Kernel(1, cpu_num_threads=1):
-            quantize_rows(source, prepared, M, K, "Q8_K", 256, extreme_policy, inverse_policy, "rne", 64)
+            quantize_rows(source, prepared, M, K, "Q8_K", 256, extreme_policy, "direct", "rne", 64)
             for row in T.serial(M):
                 if numerical_form == "scaled":
                     iq1_scaled_batch(weights, prepared[row, :], output[row, :], grid,
