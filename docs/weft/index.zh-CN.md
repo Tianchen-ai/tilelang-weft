@@ -159,6 +159,17 @@ artifact 记录实际需要的扩展，runtime 检查 worker CPU 集合；寄存
 工具链规范化后仍保留，并进入缓存身份。AOT 或调优可用显式
 `backend_options["data_cache"]` 覆盖；缓存信息缺失或不一致时保持未知。
 
+RISC-V 的 C 编译阶段可通过目标的 toolchain 配置使用 Clang CPU 调度模型：
+
+```python
+cpu = tilelang.weft.target(
+    "k3-a100", toolchain={"cflags": ["-mtune=spacemit-a100"]}
+)
+```
+
+将该目标传给 `tilelang.compile`。目标提供 ISA 与 VLEN，`-mtune` 指导对应 CPU
+的原生指令调度。工具链参数进入 JIT 缓存身份和导出的构建 metadata。
+
 ## JIT、缓存和调优
 
 lazy factory 和 eager 注解函数使用 TileLang JIT。TileLang 用单位大小 buffer 包装的

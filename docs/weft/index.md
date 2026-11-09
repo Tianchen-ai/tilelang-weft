@@ -193,6 +193,19 @@ toolchain normalization and participates in cache identity. Explicit
 `backend_options["data_cache"]` takes precedence for AOT or tuning; absent or
 heterogeneous cache information remains unknown.
 
+The RISC-V C stage also accepts Clang's CPU scheduling model through the target's
+toolchain configuration:
+
+```python
+cpu = tilelang.weft.target(
+    "k3-a100", toolchain={"cflags": ["-mtune=spacemit-a100"]}
+)
+```
+
+Pass this target to `tilelang.compile`. The target supplies ISA and VLEN;
+`-mtune` guides native instruction scheduling for the selected CPU. Toolchain
+flags participate in the JIT cache and exported build metadata.
+
 ## JIT, cache and autotuning
 
 Both lazy factories and eager annotated functions use TileLang's existing JIT.
