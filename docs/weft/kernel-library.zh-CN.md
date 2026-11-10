@@ -294,7 +294,8 @@ payload chunk 跨行 cohort 交错。调用者在 invocation 前准备持久权�
 最后才进行归约。
 
 产品仓库维护普通程序，Bench 管理 workload、外部参考、数值比较与计时范围。
-公开性能结果为 **测试中 / Under evaluation**。
+[结果工具书](https://tianchen-ai.github.io/tilelang-weft-bench/results.html)
+公布原生耗时、原始样本与源码绑定。
 
 `row_partials.q6_planes` 的 `rows_per_program` 可将多行计算显式分成独立 CPU
 program，每个 program 保留相同的 plane/lane 数值组织，完整 native grid 覆盖全部行。

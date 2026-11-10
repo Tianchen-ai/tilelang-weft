@@ -398,8 +398,9 @@ the backend. `projection.row_projection` retains F32 lane sums over F16 weights
 and the original F32 activation until the final reduction.
 
 The product owns these normal programs. Bench owns workloads, external references,
-numerical comparisons and timing boundaries. Public comparative performance is
-**Under evaluation / 测试中**.
+numerical comparisons and timing boundaries. The
+[results handbook](https://tianchen-ai.github.io/tilelang-weft-bench/results.html)
+publishes the native measurements, original samples and source bindings.
 
 The independent [TileLang–Weft Bench](https://github.com/Tianchen-ai/tilelang-weft-bench)
 binds 150 workload IDs to 553 platform cases, sharing the fixed references with
