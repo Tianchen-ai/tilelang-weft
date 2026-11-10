@@ -185,7 +185,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             for axis, size in zip(axes_of(value.type), shape_of(value.type)):
                 if axis in extents and extents[axis] not in (1, size) and size != 1:
                     self.error("pointwise operands disagree on logical axis extent")
-                extents[axis] = max(size, extents.get(axis, 1))
+                if axis not in extents or extents[axis] == 1:
+                    extents[axis] = size
         return tuple(extents.values()), tuple(extents)
 
     def binary(self, kind, left, right, *, predicate=False):
@@ -375,6 +376,14 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         if not isinstance(simplified, tirx.IntImm):
             self.error(f"this local tile requires a static extent, got {expression}")
         return int(simplified.value)
+
+    def logical_extent(self, expression):
+        simplified = self.analyzer.simplify(expression)
+        if isinstance(simplified, tirx.IntImm):
+            return int(simplified.value)
+        if isinstance(simplified, tirx.Var) and simplified.name in self.shape_symbols:
+            return self.shape_symbols[simplified.name][1]
+        self.error(f"local Value extent requires a constant or named runtime dimension, got {expression}")
 
     def iota(self, extent, axis):
         raw = self.op("iota", ty=LocalValueType(ScalarType(dt.u32), (extent,), (axis,)), attrs={"start": "0", "end": str(extent)})
@@ -598,8 +607,8 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.error(f"local buffer {buffer.name} was allocated twice")
         if buffer.scope() not in ("local", "local.var", "local.fragment", "shared"):
             self.error(f"CPU local allocation does not implement storage scope {buffer.scope()}")
-        shape = tuple(self.static(n) for n in buffer.shape)
         if buffer in self.addressed_locals:
+            shape = tuple(self.static(n) for n in buffer.shape)
             scalar = dtype(buffer.dtype)
             if scalar.bits < 8:
                 self.error("address-observable local storage requires a byte-addressable element type")
@@ -611,13 +620,18 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
             self.pointers[buffer] = pointer
             self.env[buffer.data] = pointer
             return
+        shape = tuple(self.logical_extent(n) for n in buffer.shape)
         axes = tuple(self.operation_axes[(buffer, i)] if (buffer, i) in self.operation_axes else self.axis() for i in range(len(shape)))
         if not shape:
             shape = tuple(self.static(extent) for _, extent, _ in self.parallel_domains.values())
             axes = tuple(axis for _, _, axis in self.parallel_domains.values())
         self.local_axes[buffer] = axes
         ty = LocalValueType(ScalarType(dtype(buffer.dtype)), shape, axes)
-        value = self.op("empty", tuple(self.constant(n, dt.index) for n in shape), ty)
+        extents = tuple(
+            self.cast(self.expr(expression), dt.index) if size < 0 else self.constant(size, dt.index)
+            for expression, size in zip(buffer.shape, shape)
+        ) if buffer.shape else tuple(self.constant(n, dt.index) for n in shape)
+        value = self.op("empty", extents, ty)
         # Empty storage has a shaped result even at rank zero. A scalar local
         # carries the ordinary scalar numerical type through SCF and helpers,
         # just like its eventual field or arithmetic assignment.

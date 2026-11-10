@@ -9,12 +9,12 @@ from weft_core.types import ScalarType, LocalValueType, shape_of, element_type, 
 class TileOperations:
     def region(self, argument):
         if isinstance(argument, tirx.BufferRegion):
-            return argument.buffer, tuple(r.min for r in argument.region), tuple(self.static(r.extent) for r in argument.region)
+            return argument.buffer, tuple(r.min for r in argument.region), tuple(self.logical_extent(r.extent) for r in argument.region)
         if isinstance(argument, tirx.Buffer):
-            return argument, (tirx.IntImm("int32", 0),) * len(argument.shape), tuple(self.static(n) for n in argument.shape)
+            return argument, (tirx.IntImm("int32", 0),) * len(argument.shape), tuple(self.logical_extent(n) for n in argument.shape)
         if isinstance(argument, tirx.Call) and argument.op.name == "tl.region":
             load = argument.args[0]
-            return load.buffer, tuple(load.indices), tuple(self.static(n) for n in argument.args[2:])
+            return load.buffer, tuple(load.indices), tuple(self.logical_extent(n) for n in argument.args[2:])
         if isinstance(argument, tirx.BufferLoad):
             return argument.buffer, tuple(argument.indices), (1,) * len(argument.indices)
         self.error(f"tile operand does not carry a BufferRegion: {argument}")

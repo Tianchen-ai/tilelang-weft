@@ -44,15 +44,16 @@ def matmul(
 
 
 @tilelang.jit(target="weft")
-def blocked_matmul(M, N, K, tile_m=64, tile_n=16, rows=2, columns=2, engine="auto"):
+def blocked_matmul(M, N, K, tile_m=64, tile_n=16, rows=2, columns=2, engine="auto", dynamic_k=False):
     """Keep full K reductions inside explicit row and column reuse Levels."""
     assert min(M, N, K, tile_m, tile_n, rows, columns) > 0
+    depth = T.dynamic("K") if dynamic_k else K
 
     @T.prim_func
-    def main(X: T.Tensor((M, K), "float32"), W: T.Tensor((N, K), "float32"), Y: T.Tensor((M, N), "float32")):
+    def main(X: T.Tensor((M, depth), "float32"), W: T.Tensor((N, depth), "float32"), Y: T.Tensor((M, N), "float32")):
         T.func_attr({"tir.noalias": True})
-        inputs = T.view(X, shape=(M, K), axes=("m", "k"), abi=True)
-        weights = T.view(W, shape=(N, K), axes=("n", "k"), abi=True)
+        inputs = T.view(X, shape=(M, depth), axes=("m", "k"), abi=True)
+        weights = T.view(W, shape=(N, depth), axes=("n", "k"), abi=True)
         output = T.view(Y, shape=(M, N), axes=("m", "n"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             with T.level.tiles(N, extent=tile_n, axis="n") as column_tile:
@@ -62,7 +63,10 @@ def blocked_matmul(M, N, K, tile_m=64, tile_n=16, rows=2, columns=2, engine="aut
                             left = T.load(inputs[row, :])
                             right = T.load(weights[column, :])
                             result = T.alloc_local((rows, columns), "float32")
-                            T.gemm(left, right, result, transpose_B=True, clear_accum=True, engine=engine)
+                            if dynamic_k:
+                                T.reduce_dot(left, right, result, over="k", engine=engine)
+                            else:
+                                T.gemm(left, right, result, transpose_B=True, clear_accum=True, engine=engine)
                             T.copy(result, output[row, column])
 
     return main
