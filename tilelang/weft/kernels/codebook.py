@@ -16,6 +16,36 @@ from .decoding import (
 )
 
 
+@T.macro
+def decode_metadata_windows(record, output, table, scale_table, format, width, block, wide_metadata=False):
+    index_type = "uint64" if wide_metadata else "uint32"
+    low_type = "uint32" if wide_metadata else "uint8"
+    high_type = "uint32" if wide_metadata else "uint16"
+    scale_type = "int32" if wide_metadata else "int8"
+    if format != "NVFP4":
+        block_scale = T.cast(record.d[()], "float32")
+    if format == "IQ4_XS":
+        high = T.cast(record.scales_h[()], high_type)
+    entry = T.alloc_var(index_type, init=0)
+    with T.level.subtiles(block, extent=width) as window:
+        result = T.alloc_local((width,), "float32")
+        if format == "IQ4_XS":
+            low = T.cast(record.scales_l[entry // T.cast(2, index_type)], low_type)
+            lower = low >> T.cast(entry % T.cast(2, index_type) * T.cast(4, index_type), low_type) & T.cast(15, low_type)
+            upper = T.cast(high >> T.cast(entry * T.cast(2, index_type), high_type) & T.cast(3, high_type), low_type)
+            scale = block_scale * T.cast(T.cast(lower | upper << T.cast(4, low_type), scale_type) - T.cast(32, scale_type), "float32")
+        else:
+            exponent = T.cast(record.d[entry], "uint32")
+            coefficient = T.load(scale_table, at=exponent, bounds="in_bounds")
+            scale = coefficient[()]
+        codes = T.load(record.q, at=window)
+        values = T.load(table, at=codes, bounds="in_bounds")
+        for k in T.Parallel(width):
+            result[k] = scale * T.cast(values[k], "float32")
+        T.copy(result, output[window])
+        entry += T.cast(1, index_type)
+
+
 @tilelang.jit(target="weft")
 def metadata_windows(M, K, format="NVFP4"):
     """Read scalar scale metadata once per explicit contiguous output window."""
@@ -42,28 +72,44 @@ def metadata_windows(M, K, format="NVFP4"):
             table = T.stage(T.load(codebook))
             with T.level.blocks(M * K, extent=elements) as block:
                 record = T.load(weights[block])
-                if format != "NVFP4":
-                    block_scale = T.cast(record.d[()], "float32")
-                if format == "IQ4_XS":
-                    high = T.cast(record.scales_h[()], "uint16")
-                entry = T.alloc_var("uint32", init=0)
-                with T.level.subtiles(block, extent=width) as window:
-                    result = T.alloc_local((width,), "float32")
-                    if format == "IQ4_XS":
-                        low = T.cast(record.scales_l[entry // T.uint32(2)], "uint8")
-                        lower = low >> T.cast(entry % T.uint32(2) * T.uint32(4), "uint8") & T.uint8(15)
-                        upper = T.cast(high >> T.cast(entry * T.uint32(2), "uint16") & T.uint16(3), "uint8")
-                        scale = block_scale * T.cast(T.cast(lower | upper << T.uint8(4), "int8") - T.int8(32), "float32")
-                    else:
-                        exponent = T.cast(record.d[entry], "uint32")
-                        coefficient = T.load(scale_table, at=exponent, bounds="in_bounds")
-                        scale = coefficient[()]
-                    codes = T.load(record.q, at=window)
-                    values = T.load(table, at=codes, bounds="in_bounds")
-                    for k in T.Parallel(width):
-                        result[k] = scale * T.cast(values[k], "float32")
-                    T.copy(result, output[window])
-                    entry += T.uint32(1)
+                if format == "NVFP4":
+                    decode_metadata_windows(record, output, table, scale_table, format, width, block)
+                else:
+                    decode_metadata_windows(record, output, table, Scale, format, width, block)
+
+    return main
+
+
+@tilelang.jit(target="weft")
+def metadata_row(K, format="NVFP4"):
+    """Decode one runtime-length row through its complete-record View ABI."""
+    assert format in ("IQ4_XS", "NVFP4") and K > 0
+    encoding = getattr(F, format)
+    elements, size = encoding.schema.elements, encoding.schema.storage_bits // 8
+    assert K % elements == 0
+    width = 32 if format == "IQ4_XS" else 16
+    depth = T.dynamic("K")
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((depth // elements * size,), "uint8"),
+        Codebook: T.Tensor((16,), "int8"),
+        Scale: T.Tensor((256 if format == "NVFP4" else 0,), "float32"),
+        Output: T.Tensor((depth,), "float32"),
+    ):
+        weights = T.view(Weights, shape=(depth,), encoding=encoding, axes=("k",), abi=True)
+        output = T.view(Output, shape=(depth,), axes=("k",), abi=True)
+        codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
+        if format == "NVFP4":
+            scale_table = T.view(Scale, shape=(256,), axes=("exponent",), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            table = T.stage(T.load(codebook))
+            with T.level.blocks(depth, extent=elements) as block:
+                record = T.load(weights[block])
+                if format == "NVFP4":
+                    decode_metadata_windows(record, output[block], table, scale_table, format, width, block, True)
+                else:
+                    decode_metadata_windows(record, output[block], table, Scale, format, width, block, True)
 
     return main
 

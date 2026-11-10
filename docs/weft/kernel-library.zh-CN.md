@@ -45,7 +45,7 @@ Q1/NVFP4 的 `subblock_projection.projection(organization="records")`
 累加器，prefill 更新显式输出存储；默认 `"staged"` 则在编码复用作用域内，跨 K
 保留输出 tile。两者是作者选择的不同遍历与驻留方式，均计入相同的 activation
 准备与数值工作。
-第一代布局的 `matrix.ime` 暴露 `dot_width=8/16/32`。32 元素分组直接完成一次
+第一代布局的 `matrix.ime` 暴露 `dot_width=8/16/32`，第二代暴露 `16/32`。32 元素分组直接完成一次
 record contraction，更小的分组保留显式子 Level 和跨贡献的整数 state。
 `engine` 继续约束具体 contraction，同一格式可以用适合 SIMD 或 IME 的作者分组。
 
@@ -260,6 +260,9 @@ Q3_K/Q6_K 还可通过显式 `rows`、`columns` 在 K 遍历中保留二维输�
 整数 scale 更新先于 record 浮点更新收口。这些是源码复用维度，与后端 SIMD 宽度和
 寄存器布局独立。
 
+`codebook.metadata_row(K, format=...)` 通过 typed Encoding View 解码一行运行时长度数据。
+record 的读取先于其后代窗口；输入与输出可能 alias 时仍保留原读取快照。
+应用可在现有行遍历中调用这个原生入口。
 `codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
 Level 窗口中以标量复用 IQ4_XS/NVFP4 scale metadata，再索引读取保存的表。
 `ternary_planes` 以独立的 digit/payload 轴复用 TQ1 的 32-byte、16-byte 与四 byte payload，

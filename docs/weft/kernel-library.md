@@ -243,7 +243,7 @@ default `"staged"` retains output tiles across K inside encoded reuse scopes.
 These are different author traversal and residence choices; both include the
 same activation preparation and numerical workload.
 The packed `matrix.ime` factory exposes `dot_width=8/16/32` for its first-generation
-layout. Width 32 closes one complete record contraction; smaller widths retain
+layout and `16/32` for the second generation. Width 32 closes one complete record contraction; smaller widths retain
 an explicit sub-Level and integer state across its contributions. The `engine`
 constraint remains local to each contraction, so the same format can use a SIMD
 author program or an IME program with the appropriate source grouping.
@@ -284,7 +284,11 @@ whose alignment and alias legality are checked by the target memory pass.
 
 `codebook.metadata_windows` stages the 16-element codebook and keeps IQ4_XS
 or NVFP4 scale metadata scalar in each 32/16-element Level window. The payload
-uses an indexed read of that saved table. `ternary_planes` reuses TQ1's
+uses an indexed read of that saved table. `metadata_row(K, format=...)` provides
+the same decoding for one runtime-length row through typed Encoding Views.
+The record read precedes its descendant windows, preserving its snapshot when
+input and output may alias. Applications can call that native row entry from
+their existing row traversal. `ternary_planes` reuses TQ1's
 32-byte, 16-byte and four-byte payloads across independent digit/payload axes,
 then reshapes each decoded plane into its contiguous output window. Its power
 table is an explicit staged input; the payload loads remain in the record body.
