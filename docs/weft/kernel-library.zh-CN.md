@@ -263,6 +263,8 @@ Q3_K/Q6_K 还可通过显式 `rows`、`columns` 在 K 遍历中保留二维输�
 `codebook.metadata_row(K, format=...)` 通过 typed Encoding View 解码一行运行时长度数据。
 record 的读取先于其后代窗口；输入与输出可能 alias 时仍保留原读取快照。
 应用可在现有行遍历中调用这个原生入口。
+IQ4_XS 行程序使用 U8 查表索引，查表后显式经过 I32 到 F32 的转换，在该窗口内
+构成标量 scale。这些源码类型保留与 Triton 作者程序相同的查表和数值组织。
 `codebook.metadata_windows` 将 16 元素 codebook 保存为 stage，并在各 32/16 元素
 Level 窗口中以标量复用 IQ4_XS/NVFP4 scale metadata，再索引读取保存的表。
 `ternary_planes` 以独立的 digit/payload 轴复用 TQ1 的 32-byte、16-byte 与四 byte payload，

@@ -33,15 +33,28 @@ def decode_metadata_windows(record, output, table, scale_table, format, width, b
             low = T.cast(record.scales_l[entry // T.cast(2, index_type)], low_type)
             lower = low >> T.cast(entry % T.cast(2, index_type) * T.cast(4, index_type), low_type) & T.cast(15, low_type)
             upper = T.cast(high >> T.cast(entry * T.cast(2, index_type), high_type) & T.cast(3, high_type), low_type)
-            scale = block_scale * T.cast(T.cast(lower | upper << T.cast(4, low_type), scale_type) - T.cast(32, scale_type), "float32")
+            integer_scale = T.cast(lower | upper << T.cast(4, low_type), scale_type) - T.cast(32, scale_type)
+            if not wide_metadata:
+                scale = block_scale * T.cast(integer_scale, "float32")
         else:
             exponent = T.cast(record.d[entry], "uint32")
             coefficient = T.load(scale_table, at=exponent, bounds="in_bounds")
             scale = coefficient[()]
         codes = T.load(record.q, at=window)
-        values = T.load(table, at=codes, bounds="in_bounds")
+        if wide_metadata and format == "IQ4_XS":
+            indices = T.alloc_local((width,), "uint8")
+            for k in T.Parallel(width):
+                indices[k] = T.cast(codes[k], "uint8")
+            values = T.load(table, at=indices, bounds="in_bounds")
+        else:
+            values = T.load(table, at=codes, bounds="in_bounds")
+        if format == "IQ4_XS" and wide_metadata:
+            scale = block_scale * T.cast(integer_scale, "float32")
         for k in T.Parallel(width):
-            result[k] = scale * T.cast(values[k], "float32")
+            if wide_metadata and format == "IQ4_XS":
+                result[k] = T.cast(T.cast(values[k], "int32"), "float32") * scale
+            else:
+                result[k] = scale * T.cast(values[k], "float32")
         T.copy(result, output[window])
         entry += T.cast(1, index_type)
 

@@ -288,7 +288,10 @@ uses an indexed read of that saved table. `metadata_row(K, format=...)` provides
 the same decoding for one runtime-length row through typed Encoding Views.
 The record read precedes its descendant windows, preserving its snapshot when
 input and output may alias. Applications can call that native row entry from
-their existing row traversal. `ternary_planes` reuses TQ1's
+their existing row traversal. The IQ4_XS row uses U8 lookup indices and an
+explicit I32-to-F32 conversion after lookup; scalar scale reconstruction stays
+in that window. These source types preserve the same lookup and numerical
+organization as the Triton author program. `ternary_planes` reuses TQ1's
 32-byte, 16-byte and four-byte payloads across independent digit/payload axes,
 then reshapes each decoded plane into its contiguous output window. Its power
 table is an explicit staged input; the payload loads remain in the record body.
