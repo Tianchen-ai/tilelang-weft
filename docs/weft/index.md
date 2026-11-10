@@ -260,6 +260,10 @@ complete field as `q[k]`, preserving Encoding information for physical selection
 This also applies to a complete metadata field whose stored extent is smaller
 than its source record. Iterating its declared elements keeps the field's axis;
 selecting a Level group remains an explicit group projection.
+When a Parallel expression also consumes a computed partial with an independent
+coordinate, the partial keeps that coordinate and metadata is gathered by the
+same positional index. A compressed field's record axis does not rename the
+partial merely because their extents match.
 
 `T.copy(value, output_view, annotations={"cache_hint": "streaming"})` carries the
 author's store hint through Canonical IR. The x86 backend selects non-temporal

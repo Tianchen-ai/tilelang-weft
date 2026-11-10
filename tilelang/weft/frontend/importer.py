@@ -778,6 +778,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         candidates = set()
         destinations = set()
         sources = set()
+        compressed_sources = set()
         definitions = {}
 
         def definition(node):
@@ -810,6 +811,10 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                         destinations.add(axes[dimension])
                     elif self.locals[owner].producer is None or self.locals[owner].producer.name != "weft_kernel.empty":
                         sources.add(axes[dimension])
+                        record_extent = getattr(self, "field_record_extents", {}).get(owner)
+                        if (record_extent is not None and dimension == len(node.buffer.shape) - 1
+                                and self.static(extent) < record_extent):
+                            compressed_sources.add(axes[dimension])
 
         with (
             self.analyzer.constraint_scope(loop.loop_var >= loop.min),
@@ -817,6 +822,13 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         ):
             tirx.stmt_functor.post_order_visit(loop.body, access)
         named = candidates.intersection(self.named_axes.values())
+        # A compressed field retains its record axis, while a computed partial
+        # can have a different coordinate of the same extent. Preserve that
+        # partial coordinate and express the metadata access as a gather.
+        if len(named) == 1 and named <= compressed_sources:
+            computed = sources - compressed_sources
+            if len(computed) == 1:
+                return next(iter(computed))
         if len(named) == 1:
             return next(iter(named))
         # A newly written positional tile can retain the coordinate of its

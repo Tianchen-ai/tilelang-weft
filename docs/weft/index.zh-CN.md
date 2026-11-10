@@ -89,6 +89,9 @@ TIRx 分析器能证明局部 tile 的每个索引等于对应 Parallel 坐标�
 `q[T.cast(k, "uint8")]` 与 `q[k]` 消费同一完整字段，Encoding 信息继续用于物理选择。
 完整 metadata 字段即使元素数少于原 record，也遵循同一规则：遍历其声明的全部元素保留
 字段轴；按 Level 选择某个分组仍是显式 group projection。
+同一 Parallel 表达式同时消费具有独立坐标的计算 partial 时，保留 partial 的坐标，
+metadata 按相同位置索引 gather。不能只因元素数相同，就用压缩字段的 record 轴
+重命名计算 partial。
 
 `T.stage(value)` 形成供后代只读复用的快照；`T.state(shape, dtype, init=...)`
 建立数值状态。Level 保存独立的 state 初始化、stage 初始化及 body；初始化能读取

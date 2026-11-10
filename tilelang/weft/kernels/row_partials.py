@@ -366,9 +366,11 @@ def k_groups(M, K, format="Q4_K", rows=1, lanes=16):
 
 
 @tilelang.jit(target="weft")
-def affine_groups(M, K, format="Q5_K"):
+def affine_groups(M, K, format="Q5_K", organization="groups"):
     """Use named sublevels for scaled record groups and a separate minimum sum."""
     assert format in ("Q2_K", "Q4_K", "Q5_K") and M > 0 and K > 0 and K % 256 == 0
+    assert organization in ("groups", "record")
+    assert organization != "record" or format in ("Q4_K", "Q5_K")
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
     group_size = 16 if format == "Q2_K" else 32
@@ -385,7 +387,10 @@ def affine_groups(M, K, format="Q5_K"):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            affine_group_rows(weights, values, output, M, K, format, group_size, groups, "m")
+            if organization == "record":
+                affine_record_rows(weights, values, output, M, K, format, "m")
+            else:
+                affine_group_rows(weights, values, output, M, K, format, group_size, groups, "m")
 
     return main
 
@@ -443,12 +448,54 @@ def affine_group_rows(weights, values, output, M, K, format, group_size, groups,
         T.copy(result, output[row])
 
 
+@T.macro
+def affine_record_rows(weights, values, output, M, K, format, axis):
+    """Keep eight independent scale-group partials within one record domain."""
+    code_type = "uint4" if format == "Q4_K" else "uint6"
+    with T.level.rows(M, group=1, axis=axis) as row:
+        total = T.alloc_var("float32", init=0)
+        with T.level.blocks(K, extent=256) as block:
+            w, x = T.load(weights[row, block][0, :]), T.load(values[block])
+            low, activation = w.q, x.q
+            if format == "Q5_K":
+                high = w.qh
+            scales, minima, sums = w.sc, w.m, x.bsum
+            codes = T.alloc_local((8, 32), code_type)
+            inputs = T.alloc_local((8, 32), "int8")
+            for g, k in T.Parallel(8, 32):
+                coordinate = T.cast(g, "uint8") * T.uint8(32) + T.cast(k, "uint8")
+                if format == "Q5_K":
+                    code = T.cast(low[coordinate], "uint8") | (T.cast(high[coordinate], "uint8") << T.uint8(4))
+                    codes[g, k] = T.cast(code, "uint6")
+                else:
+                    codes[g, k] = low[coordinate]
+                inputs[g, k] = activation[coordinate]
+            products = T.alloc_local((8,), "int32")
+            T.reduce_dot(inputs, codes, products, over="k", acc_dtype="int32", engine="vector")
+            scaled = T.alloc_local((8,), "int32")
+            corrections = T.alloc_local((8,), "int32")
+            for g in T.Parallel(8):
+                coordinate = T.cast(g, "uint32")
+                scaled[g] = products[g] * T.cast(scales[coordinate], "int32")
+                pair = T.cast(sums[coordinate * T.uint32(2)], "int32") + T.cast(sums[coordinate * T.uint32(2) + T.uint32(1)], "int32")
+                corrections[g] = pair * T.cast(minima[coordinate], "int32")
+            integer, minimum = T.alloc_local((), "int32"), T.alloc_local((), "int32")
+            T.reduce_sum(scaled, integer, dim=0)
+            T.reduce_sum(corrections, minimum, dim=0)
+            total -= (x.ds[()] * T.cast(w.dmin[()], "float32")) * T.cast(minimum[()], "float32")
+            total += (x.ds[()] * T.cast(w.d[()], "float32")) * T.cast(integer[()], "float32")
+        result = T.alloc_local((1,), "float32")
+        result[0] = total
+        T.copy(result, output[row])
+
+
 @tilelang.jit(target="weft")
 def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_policy="reciprocal",
                      organization="lanes"):
     """Quantize in-call and close each affine scale group's integer dot."""
     assert format in ("Q2_K", "Q4_K", "Q5_K") and min(M, N, K) > 0 and K % 256 == 0
-    assert organization in ("lanes", "groups")
+    assert organization in ("lanes", "groups", "record")
+    assert organization != "record" or format in ("Q4_K", "Q5_K")
     encoding = getattr(F, format)
     group_size = 16 if format == "Q2_K" else 32
     groups = 256 // group_size
@@ -475,6 +522,8 @@ def scale_projection(M, N, K, format="Q4_K", extreme_policy="first", inverse_pol
                         result = T.alloc_local((), "float32")
                         result[()] = q2_lanes_row(weights[n, :], values[m, :], K)
                         T.copy(result, output[m, n])
+                elif organization == "record":
+                    affine_record_rows(weights, values[m, :], output[m, :], N, K, format, "n")
                 else:
                     affine_group_rows(weights, values[m, :], output[m, :], N, K, format, group_size, groups, "n")
 

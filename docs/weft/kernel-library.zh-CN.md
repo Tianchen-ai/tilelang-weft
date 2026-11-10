@@ -135,8 +135,12 @@ IQ3_XXS 逐行程序显式选择 payload、metadata 和标量 scale 字段，并
 以非内联逐行调用复用同一 block-scaled 宏；`lanes`、`planes` 仍为显式作者维度。
 
 RISC-V 的 `row_partials.affine_groups` 以 Level 子块表达 Q2_K/Q4_K/Q5_K
-的 scale group，并在独立整数支路中计算 minimum 修正；`scaled_groups` 为 Q3_K
-和 Q6_K 使用 16 项子块。每组从原 record 快照读取 payload 与标量 metadata，
+的 scale group，并在独立整数支路中计算 minimum 修正。
+Q4_K/Q5_K 也可指定 `organization="record"`，显式形成同一 record 中八个独立的
+32 元素整数 dot，应用整数 scale 并归约后，再执行原有浮点更新。payload 保留有限
+无符号码类型，minimum 修正先 widen 再相加 activation 分组和。
+`scale_projection` 在调用内准备 activation 后复用同一 record 宏。
+`scaled_groups` 为 Q3_K 和 Q6_K 使用 16 项子块。每组从原 record 快照读取 payload 与标量 metadata，
 完成 I32 partial 和整数 scale 更新，再执行 record 的浮点累加。
 仿射 `scale_projection` 可通过 `organization="groups"` 为 Q2_K 复用逐组闭合的
 整数 dot，Q8_K 准备仍在调用内完成；默认 `"lanes"` 保留另一种有界 I16 lane 累加。

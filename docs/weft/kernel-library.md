@@ -173,6 +173,12 @@ without adding Python calls or changing the complete grid measurement.
 
 For RISC-V, `row_partials.affine_groups` expresses Q2_K/Q4_K/Q5_K scale groups
 as Level subtiles, keeping the minimum correction in a separate integer branch.
+For Q4_K/Q5_K, `organization="record"` explicitly forms eight independent
+32-element integer dots in one record domain, then applies their integer scales
+and reduces them before the original floating update. Payloads retain their
+finite unsigned code types; the minimum correction widens before adding paired
+activation sums. `scale_projection` reuses this same record macro after in-call
+activation preparation.
 `scaled_groups` uses 16-term subtiles for Q3_K and Q6_K. Each group reads payload
 and scalar metadata from the original record snapshot, performs its I32 partial,
 and applies its integer scale before the record's floating-point update.
