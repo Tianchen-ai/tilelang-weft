@@ -46,6 +46,19 @@ through TileLang. More than one factory may implement the same mathematical
 family with different author layouts; that is distinct from a compiler selecting
 local instructions for one program.
 
+`panel_dense.projection(unroll_k=1/2/4/8)` exposes finite source unrolling of
+the ordered outer-product loop. Panel construction remains inside the call;
+`rows` and `columns` select the output cohort. Each accumulator sees K terms in
+the same order, including when multiple source iterations are unrolled.
+
+For prepared GGML Q8_0 activation codes in `[-127, 127]`,
+`subblock_partials.subblocks(sign_transfer=True)` and its complete `projection`
+use the byte-sign realization also used by GGML x86: transfer each Q1 sign to
+the I8 activation, multiply by U1 ones, and accumulate four terms into I32.
+The I8 negation retains its declared wrapping semantics. The default expresses
+centered weight multiplication. Both share the same record scales, row macro
+and preparation protocol.
+
 `linear.blocked_matmul` closes each complete K contraction inside explicit
 `tile_m`/`tile_n` Levels and `rows`/`columns` output cohorts. It uses ordinary
 `T.gemm` with the weight's storage order retained. `linear.matmul` separately

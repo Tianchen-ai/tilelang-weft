@@ -309,7 +309,7 @@ def block32(M, K, format="Q5_0", records=2, partials=8, rows_per_program=None, r
 
 
 @T.macro
-def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows, elements, lookup, lanes, axis):
+def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows, elements, lookup, lanes, axis, sign_transfer=False):
     if lookup:
         codebook = T.view(Codebook, shape=(16,), axes=("code",), abi=True)
         table = T.load(codebook)
@@ -330,7 +330,7 @@ def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows,
             for part in T.unroll(elements // 32):
                 x = T.load(values[block][part * 32 : (part + 1) * 32])
                 activation, ds = x.q, x.d
-                codes = T.alloc_local((rows, 32), "uint8" if lookup else "int8")
+                codes = T.alloc_local((rows, 32), "uint8" if lookup else "uint1" if sign_transfer else "int8")
                 inputs = T.alloc_local((rows, 32), "int8")
                 products = T.alloc_local((rows, lanes), "int32")
                 if lookup:
@@ -344,8 +344,12 @@ def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows,
                         inputs[r, k] = activation[k]
                     else:
                         positive = q[r, T.uint8(part * 32) + T.cast(k, "uint8")]
-                        codes[r, k] = T.cast(positive, "int8") * T.int8(2) - T.int8(1)
-                        inputs[r, k] = activation[k]
+                        if sign_transfer:
+                            codes[r, k] = 1
+                            inputs[r, k] = T.if_then_else(positive != 0, activation[k], -activation[k])
+                        else:
+                            codes[r, k] = T.cast(positive, "int8") * T.int8(2) - T.int8(1)
+                            inputs[r, k] = activation[k]
                 T.mac_groups(codes, inputs, products, n=4, into="int32", over="k")
                 for r in T.unroll(rows):
                     if lookup:
@@ -370,9 +374,10 @@ def subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows,
 
 
 @tilelang.jit(target="weft")
-def subblocks(M, K, format="Q1_0", rows=1):
+def subblocks(M, K, format="Q1_0", rows=1, sign_transfer=False):
     """Reuse one weight record across Q8_0 records, with two independent sums."""
     assert format in ("Q1_0", "NVFP4") and K > 0 and K % 128 == 0
+    assert not sign_transfer or format == "Q1_0"
     encoding = getattr(F, format)
     elements = encoding.schema.elements
     record_bytes = encoding.schema.storage_bits // 8
@@ -392,7 +397,7 @@ def subblocks(M, K, format="Q1_0", rows=1):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_0, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows, elements, lookup, lanes, "m")
+            subblocks_rows(weights, values, output, Codebook, Scale, M, K, format, rows, elements, lookup, lanes, "m", sign_transfer)
 
     return main
 
@@ -820,10 +825,11 @@ def ternary(M, K, format="TQ1_0", rows=1, records=2):
 
 @tilelang.jit(target="weft")
 def projection(M, N, K, format="Q1_0", columns=1, records=1, partials=1,
-               extreme_policy="first", inverse_policy="direct"):
+               extreme_policy="first", inverse_policy="direct", sign_transfer=False):
     """Retain the normal packed dot's lane sums through a complete projection."""
     record32 = format in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "MXFP4")
     assert record32 or format in ("Q1_0", "NVFP4", "TQ1_0", "TQ2_0", "IQ4_XS")
+    assert not sign_transfer or format == "Q1_0"
     assert M > 0 and N > 0 and N % columns == 0
     assert (partials in (8, 16) if format == "IQ4_XS" else
             partials in (1, 8) and (partials == 1 or record32))
@@ -868,7 +874,7 @@ def projection(M, N, K, format="Q1_0", columns=1, records=1, partials=1,
                                    N, K, partials, records, "n")
                 elif short:
                     subblocks_rows(weights, prepared[m, :], output[m, :], Codebook, Scale,
-                                   N, K, format, columns, elements, format == "NVFP4", 8, "n")
+                                   N, K, format, columns, elements, format == "NVFP4", 8, "n", sign_transfer)
                 else:
                     ternary_rows(weights, prepared[m, :], output[m, :], Powers,
                                  N, K, format, columns, records, "n")

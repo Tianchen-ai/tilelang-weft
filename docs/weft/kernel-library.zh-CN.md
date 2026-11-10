@@ -63,6 +63,16 @@ kernel(a, b, c)
 静态分块描述作者程序。运行时标量、Tensor shape/stride 绑定、编译缓存和输出分配继续
 使用 TileLang。相同数学类别可以有不同作者布局；编译器则为同一程序选择局部机器实现。
 
+`panel_dense.projection(unroll_k=1/2/4/8)` 公开有界的源码 outer-product 循环展开。
+Panel 准备仍在调用内，`rows`、`columns` 选择输出 cohort；展开后每个累加器仍按相同
+K 顺序接收乘积。
+
+对于 GGML 正常准备、code 范围为 `[-127, 127]` 的 Q8_0 activation，
+`subblock_partials.subblocks(sign_transfer=True)` 及完整 `projection` 使用 GGML x86
+同样的字节符号转移：把 Q1 符号转到 I8 activation，以 U1 的一相乘，再将四项累加到
+I32。I8 取负保留源码声明的回绕语义；默认写法表达中心化权重乘法。两种组织共用
+record scale、逐行宏与准备协议。
+
 `linear.blocked_matmul` 在显式 `tile_m`/`tile_n` Level 和 `rows`/`columns` 输出 cohort
 内完成整个 K 的缩并，以普通 `T.gemm` 保留权重的存储顺序。`linear.matmul` 则单独表达
 分块 K 循环及各输出程序的 grid。

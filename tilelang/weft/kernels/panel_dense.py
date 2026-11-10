@@ -16,7 +16,7 @@ def transpose_panel(source, destination, rows, columns, step, round_f16):
 
 @T.macro
 def product(weights, activation, output, weight_panel, activation_panel,
-            M, N, K, rows, columns, block_k, round_f16):
+            M, N, K, rows, columns, block_k, round_f16, unroll_k=1):
     first = T.alloc_local((1,), "bool")
     first[0] = True
     with T.level.blocks(K, extent=block_k) as block:
@@ -26,11 +26,13 @@ def product(weights, activation, output, weight_panel, activation_panel,
             transpose_panel(weights[col, block], weight_panel, columns, block_k, 8, False)
             with T.level.rows(M, group=rows) as row:
                 total = T.state((rows, columns), "float32", init=0)
-                for k in T.serial(block_k):
-                    left = T.load(activation_panel[k, row])
-                    right = T.load(weight_panel[k, :])
-                    for r, c in T.Parallel(rows, columns):
-                        total[r, c] += left[r] * right[c]
+                for start in T.serial(block_k // unroll_k):
+                    for offset in T.unroll(unroll_k):
+                        k = start * unroll_k + offset
+                        left = T.load(activation_panel[k, row])
+                        right = T.load(weight_panel[k, :])
+                        for r, c in T.Parallel(rows, columns):
+                            total[r, c] += left[r] * right[c]
                 if not first[0]:
                     previous = T.load(output[row, col])
                     for r, c in T.Parallel(rows, columns):
@@ -41,11 +43,12 @@ def product(weights, activation, output, weight_panel, activation_panel,
 
 @tilelang.jit(target="weft")
 def projection(M, N, K, rows=8, columns=32, block_k=256,
-               weight_dtype="float16", round_f16=True):
+               weight_dtype="float16", round_f16=True, unroll_k=1):
     """Include both invocation-local transposes and optional F16 activation rounding."""
     assert weight_dtype in ("float16", "float32", "bfloat16")
     assert M > 0 and N > 0 and K > 0
     assert M % rows == N % columns == K % block_k == 0 and block_k % 16 == 0
+    assert unroll_k in (1, 2, 4, 8) and block_k % unroll_k == 0
 
     @T.prim_func
     def main(
@@ -64,6 +67,6 @@ def projection(M, N, K, rows=8, columns=32, block_k=256,
         activation_panel = T.view(PackedActivation, shape=(block_k, M), axes=("bk", "m"), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
             product(weights, activation, output, weight_panel, activation_panel,
-                    M, N, K, rows, columns, block_k, round_f16)
+                    M, N, K, rows, columns, block_k, round_f16, unroll_k)
 
     return main
