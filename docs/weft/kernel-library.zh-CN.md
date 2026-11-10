@@ -121,6 +121,9 @@ scale/correction 支路。`composition.packed_projection` 的显式解码到 wor
 
 `row_partials` 提供 x86 的作者级延迟归约与分组整数计算。单行 Q6_K 的
 `scale_groups` 限定作者同时暴露的 scale group 数量，不选择 ISA。
+IQ3_XXS 逐行程序显式选择 payload、metadata 和标量 scale 字段，并将 `[1, 31]`
+的组 scale 保留为 I16，直到 I32 乘积和校正支路使用时再 widen；dot 与完整 decode
+投影共用这一宏。
 `q6_planes` 也接受多行输出。显式串行行循环为每行保留相同的 plane/lane partial
 及逐 record 缩放，不把所有输出行同时暴露为驻留值。
 共同的 `q6_plane_value` 宏通过 `accumulation="block"` 在每个 record 的 F32 更新前

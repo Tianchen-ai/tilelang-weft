@@ -85,12 +85,13 @@ def block32(M, K, format="Q4_0", activation="Q8_0", rows=1, lanes=8):
 @T.macro
 def indexed_xxs_record(w, x, total, rows, parity, grid):
     """Expose metadata groups, codebook entries and sign payload reuse."""
-    q, metadata, d, activation, sums, ds = w.q, w.metadata, w.d, x.q, x.bsum, x.ds
-    scales = T.alloc_local((rows, 8), "int32")
+    q, metadata, d = T.load(w.q), T.load(w.metadata), T.load(w.d)
+    activation, sums, ds = x.q, x.bsum, x.ds
+    scales = T.alloc_local((rows, 8), "int16")
     indices = T.alloc_local((rows, 8, 8, 4), "uint32")
     sign_rows = T.alloc_local((rows, 8, 4), "uint8")
     for r, group in T.Parallel(rows, 8):
-        scales[r, group] = T.cast(metadata[r, group] >> T.uint32(28), "int32") * 2 + 1
+        scales[r, group] = T.cast(metadata[r, group] >> T.uint32(28), "int16") * T.int16(2) + T.int16(1)
     for r, group, entry, payload in T.Parallel(rows, 8, 8, 4):
         index = T.cast(q[r, T.cast(group, "uint32") * T.uint32(8) + T.cast(entry, "uint32")], "uint32")
         indices[r, group, entry, payload] = index * T.uint32(4) + T.cast(payload, "uint32")
@@ -115,12 +116,12 @@ def indexed_xxs_record(w, x, total, rows, parity, grid):
     T.mac_groups(codes, inputs, products, n=4, into="int32", over="payload")
     scaled = T.alloc_local((rows, 8, 8), "int32")
     for r, group, entry in T.Parallel(rows, 8, 8):
-        scaled[r, group, entry] = products[r, group, entry, 0] * scales[r, group]
+        scaled[r, group, entry] = products[r, group, entry, 0] * T.cast(scales[r, group], "int32")
     grouped = T.reshape(scaled, (rows, 4, 16))
     integer = T.alloc_local((rows, 16), "int32")
     T.reduce_sum(grouped, integer, dim=1)
     for r, lane in T.Parallel(rows, 16):
-        correction = T.cast(sums[lane], "int32") * 128 * scales[r, T.cast(lane, "uint32") // T.uint32(2)]
+        correction = T.cast(sums[lane], "int32") * 128 * T.cast(scales[r, T.cast(lane, "uint32") // T.uint32(2)], "int32")
         total[r, lane] += T.cast(integer[r, lane] - correction, "float32") * (T.cast(d[r], "float32") * ds[()])
 
 
@@ -138,10 +139,11 @@ def indexed_subgroups_rows(weights, values, output, grid, M, K, format, rows, wi
         total = T.state((rows, 16), "float32", init=0)
         result = T.alloc_local((rows,), "float32")
         with T.level.blocks(K, extent=256) as block:
-            w, x = T.load(weights[row, block]), T.load(values[block])
             if format == "IQ3_XXS":
+                w, x = weights[row, block], T.load(values[block])
                 indexed_xxs_record(w, x, total, rows, parity, grid)
             else:
+                w, x = T.load(weights[row, block]), T.load(values[block])
                 activation, d, ds = x.q, w.d, x.ds
                 quantized = w.q
                 high, signs, scales = w.qh, w.signs, w.scales

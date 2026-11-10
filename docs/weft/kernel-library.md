@@ -144,6 +144,9 @@ Persistent interleave requires a separate preparation kernel, demonstrated by
 `row_partials` provides source-selected deferred row reductions and grouped
 integer products for x86. `scale_groups` in the single-row Q6_K factory bounds
 the author's simultaneously exposed scale groups; it does not select an ISA.
+Its IQ3_XXS row program selects payload, metadata and scalar scale fields before
+their consumers, and retains the `[1, 31]` group scale in I16 until its I32
+product/correction use. The dot and complete decode projection share this macro.
 `q6_planes` also accepts multiple output rows. Its serial row loop retains the
 same plane/lane partials and per-record scaling for each row, without exposing
 all rows as simultaneously resident values.
