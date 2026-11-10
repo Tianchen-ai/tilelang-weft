@@ -120,9 +120,10 @@ def dequantize(M, K, format="Q4_0", rows=4, chunk=32, records=1, cache_hint="nor
 
 
 @tilelang.jit(target="weft")
-def field_windows(M, K, format="Q4_K", chunk=None):
+def field_windows(M, K, format="Q4_K", chunk=None, code_dtype="int8"):
     """Decode one scale group at a time from its original record snapshot."""
     assert format in ("Q1_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ2_0")
+    assert code_dtype in ("int8", "int16", "int32")
     encoding = getattr(F, format)
     elements = encoding.schema.elements
     group_width = (elements if format in ("Q1_0", "TQ2_0") else
@@ -143,13 +144,13 @@ def field_windows(M, K, format="Q4_K", chunk=None):
                 if elements == width:
                     result = T.alloc_local((1, width), "float32")
                     decode_dequantize(record, result, 1, format, elements, 0, 0, 0, 0, 0, 0,
-                                      width=width, single=True, code_dtype="int8")
+                                      width=width, single=True, code_dtype=code_dtype)
                     T.copy(result[0, :], output[block])
                 else:
                     with T.level.subtiles(block, extent=width) as window:
                         result = T.alloc_local((1, width), "float32")
                         decode_dequantize(record, result, 1, format, elements, 0, 0, 0, 0, 0, 0,
-                                          width=width, single=True, point=window, code_dtype="int8")
+                                          width=width, single=True, point=window, code_dtype=code_dtype)
                         T.copy(result[0, :], output[window])
 
     return main
