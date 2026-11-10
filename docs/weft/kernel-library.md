@@ -61,8 +61,13 @@ and preparation protocol.
 
 `linear.blocked_matmul` closes each complete K contraction inside explicit
 `tile_m`/`tile_n` Levels and `rows`/`columns` output cohorts. It uses ordinary
-`T.gemm` with the weight's storage order retained. `linear.matmul` separately
-exposes a tiled K loop and a grid of independent output programs.
+`T.gemm` with the weight's storage order retained for static K. With
+`dynamic_k=True`, a named runtime K flows through
+the ABI Views and complete local Values into `T.reduce_dot(..., over="k")`.
+The output tile stays bounded while the shared target compiler traverses K;
+the same compiled kernel can accept different runtime reduction lengths.
+`linear.matmul` separately exposes a tiled K loop and a grid of independent
+output programs.
 `projection.staged_f16_projection` converts activation to the caller's F16
 workspace inside the call, stages a weight-column cohort and an activation-row
 cohort, then uses ordinary full-K `T.gemm` for each output tile. The source

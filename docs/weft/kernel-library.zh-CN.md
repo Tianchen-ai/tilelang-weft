@@ -74,8 +74,11 @@ I32。I8 取负保留源码声明的回绕语义；默认写法表达中心化�
 record scale、逐行宏与准备协议。
 
 `linear.blocked_matmul` 在显式 `tile_m`/`tile_n` Level 和 `rows`/`columns` 输出 cohort
-内完成整个 K 的缩并，以普通 `T.gemm` 保留权重的存储顺序。`linear.matmul` 则单独表达
-分块 K 循环及各输出程序的 grid。
+内完成整个 K 的缩并，静态 K 使用普通 `T.gemm` 并保留权重的存储顺序。
+`dynamic_k=True` 将具名运行时 K 经 ABI View 和完整局部 Value 传给
+`T.reduce_dot(..., over="k")`；输出 tile 保持有界，由共同目标编译器遍历 K，
+同一编译 kernel 可以接受不同的运行时归约长度。`linear.matmul` 则单独表达分块 K
+循环及各输出程序的 grid。
 
 `attention.rope(head_major=True)` 按 head 遍历连续的 pair 范围；默认先遍历 pair tile，
 再跨 head cohort 复用 staged 系数。`attention.rope_runtime(pair_tile=32)` 保留动态的
