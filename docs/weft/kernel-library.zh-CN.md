@@ -78,7 +78,9 @@ record scale、逐行宏与准备协议。
 分块 K 循环及各输出程序的 grid。
 
 `attention.rope(head_major=True)` 按 head 遍历连续的 pair 范围；默认先遍历 pair tile，
-再跨 head cohort 复用 staged 系数。两种组织复用同一 rotary 宏。
+再跨 head cohort 复用 staged 系数。`attention.rope_runtime(pair_tile=32)` 保留动态的
+token、head 和 pair 长度，在一个 CPU program 中遍历。两种形式都在可原地写入的输出
+store 之前保留两个输入快照。
 `causal_attention` 以 typed View 保存 query stage，以 state 保留 online numerator。
 
 token/head cohort 参数限定每个 grid 实例的串行工作，不改变有效 causal KV 前缀。
@@ -375,7 +377,10 @@ stage，复用已有 IQ1/IQ2/IQ3/IQ4 行宏，保留分组 partial、显式 code
 分组；Q8_K 量化仍在调用内。stage 保存自然编码布局，无需调用外的持久权重准备。
 
 `indexed_lanes.scaled_entries` 在 64 元素 Level 窗口中明确表达 IQ2_S/IQ3_S 的
-entry、payload 轴，先完成整数 scale group，再应用 record 的浮点缩放。IQ4_XS
+entry、payload 轴，先完成整数 scale group，再应用 record 的浮点缩放。
+lookup 地址及 packed metadata 运算可通过 `index_dtype="uint16"` 或 `"uint32"` 指定宽度；
+编码存储、sign、I32 partial 与 F32 record 更新保持声明的类型。IQ2_S 在窗口遍历前读取
+record 的 F16 scale，在同一读取快照中保留 Encoding 的自然对齐。IQ4_XS
 使用 staged 的 16 项码本与 32 元素子块，显式更新逐组缩放结果。字段投影直接消费
 已有 Level point，让共享编译器同时看见 record 读取与码本快照的作用域。
 
@@ -385,6 +390,9 @@ factory 和 `indexed_lanes.entry_projection`。相同的 entry/payload Level、�
 `row_partials.scaled_projection` 为 Q3_K/Q6_K 复用 `scaled_planes_rows` 或
 `scaled_lanes_rows`；`organization` 在作者程序中选择逐 block 的整数和或延迟归约的
 lane partial，与目标向量宽度独立。
+`organization="planes"` 以及直接调用的 `row_partials.scaled_planes` 通过 `planes=2/4`
+选择每批整数 dot 的平面数；128 元素 Level、精确整数分组及每个 record 的一次浮点更新不变。
+两平面批次在下一批开始前完成 partial，缩短同时存活的向量范围。
 `xxs_subgroups` 的 `index_dtype="uint16"/"uint32"` 指定作者的字节偏移算术，
 与目标 gather 指令的索引选择分开。
 

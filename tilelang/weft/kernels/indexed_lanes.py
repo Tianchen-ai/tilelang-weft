@@ -18,7 +18,9 @@ def lookup_pair(table, first, second, output):
 
 
 @T.macro
-def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, entries, payload, axis):
+def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, entries, payload, axis,
+                        index_dtype="uint16"):
+    index_type = T.uint32 if index_dtype == "uint32" else T.uint16
     if format == "IQ4_XS":
         codebook = T.stage(T.load(grid))
     with T.level.rows(M, group=1, axis=axis) as row:
@@ -33,6 +35,8 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
             else:
                 high, signs, scales = w.qh, w.signs, w.scales
             activation, ds = x.q, x.ds
+            if format == "IQ2_S":
+                record_scale = T.cast(d[()], "float32")
             window_index = T.alloc_var("uint16", init=0)
             if format == "IQ4_XS":
                 with T.level.subtiles(block, extent=32) as window:
@@ -52,21 +56,21 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                 with T.level.subtiles(block, extent=256 if format == "IQ2_XS" else 64) as window:
                     if format == "IQ2_S":
                         upper_offset = window_index * T.uint16(2)
-                        upper_word = T.cast(high[upper_offset], "uint16") | (T.cast(high[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
-                        scale_word = T.cast(scales[upper_offset], "uint16") | (T.cast(scales[upper_offset + T.uint16(1)], "uint16") << T.uint16(8))
-                    indices = T.alloc_local((groups, entries, payload), "uint16")
+                        upper_word = T.cast(high[upper_offset], index_dtype) | (T.cast(high[upper_offset + T.uint16(1)], index_dtype) << index_type(8))
+                        scale_word = T.cast(scales[upper_offset], index_dtype) | (T.cast(scales[upper_offset + T.uint16(1)], index_dtype) << index_type(8))
+                    indices = T.alloc_local((groups, entries, payload), index_dtype)
                     inputs = T.alloc_local((groups, entries, payload), "int8")
                     codes = T.alloc_local((groups, entries, payload), "int8")
                     for g, e, p in T.Parallel(groups, entries, payload):
                         entry = window_index * T.uint16(64 // payload) + T.cast(g * entries + e, "uint16")
                         if format == "IQ2_S":
-                            upper = (upper_word >> T.cast((g * entries + e) * 2, "uint16")) & T.uint16(3)
+                            upper = (upper_word >> T.cast((g * entries + e) * 2, index_dtype)) & index_type(3)
                         elif format == "IQ2_XS":
                             upper = T.uint16(0)
                         else:
                             upper = T.cast(high[entry], "uint16")
-                        index = (T.cast(q[entry], "uint16") & T.uint16(511)) if format == "IQ2_XS" else T.cast(q[entry], "uint16") | (upper << T.uint16(8))
-                        indices[g, e, p] = index * T.uint16(payload) + T.cast(p, "uint16")
+                        index = (T.cast(q[entry], index_dtype) & index_type(511)) if format == "IQ2_XS" else T.cast(q[entry], index_dtype) | (T.cast(upper, index_dtype) << index_type(8))
+                        indices[g, e, p] = T.cast(index, index_dtype) * index_type(payload) + T.cast(p, index_dtype)
                     selected = T.load(grid.values, at=indices, bounds="in_bounds")
                     for g, e, p in T.Parallel(groups, entries, payload):
                         coordinate = window_index * T.uint16(64) + T.cast((g * entries + e) * payload + p, "uint16")
@@ -88,27 +92,29 @@ def scaled_entries_rows(weights, values, output, grid, M, K, format, groups, ent
                     for g in T.Parallel(groups):
                         group = window_index * T.uint16(groups) + T.cast(g, "uint16")
                         if format == "IQ2_S":
-                            coefficient = (scale_word >> T.cast(g * 4, "uint16")) & T.uint16(15)
+                            coefficient = (scale_word >> T.cast(g * 4, index_dtype)) & index_type(15)
                         elif format == "IQ2_XS":
                             coefficient = (T.cast(scales[group // T.uint16(2)], "uint16") >> (group % T.uint16(2) * T.uint16(4))) & T.uint16(15)
                         else:
                             coefficient = T.cast(scales[group], "uint16")
-                        factor = T.cast(coefficient * T.uint16(2) + T.uint16(1), "int32")
+                        factor = T.cast(coefficient * index_type(2) + index_type(1), "int32")
                         scaled[g] = products[g] * factor
                     partial = T.alloc_local((), "int32")
                     T.reduce_sum(scaled, partial, dim=0)
                     integer += partial[()]
                     window_index += T.uint16(1)
-                total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
+                factor = record_scale if format == "IQ2_S" else T.cast(d[()], "float32")
+                total += (factor * ds[()]) * T.cast(integer, "float32")
         result = T.alloc_local((1,), "float32")
         result[0] = total * (0.125 if format in ("IQ2_S", "IQ2_XS") else 1.0)
         T.copy(result, output[row])
 
 
 @tilelang.jit(target="weft")
-def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
+def scaled_entries(M, K, format="IQ3_S", rows_per_program=None, index_dtype="uint16"):
     """Contract each codebook scale group before applying its integer scale."""
     assert format in ("IQ2_S", "IQ2_XS", "IQ3_S", "IQ4_XS") and M > 0 and K > 0 and K % 256 == 0
+    assert index_dtype in ("uint16", "uint32")
     cohort = M if rows_per_program is None else rows_per_program
     assert cohort > 0 and M % cohort == 0
     encoding = getattr(F, format)
@@ -138,7 +144,7 @@ def scaled_entries(M, K, format="IQ3_S", rows_per_program=None):
             first = program * cohort
             scaled_entries_rows(weights[first : first + cohort, :], values,
                                 output[first : first + cohort], grid,
-                                cohort, K, format, groups, entries, payload, "m")
+                                cohort, K, format, groups, entries, payload, "m", index_dtype)
 
     return main
 

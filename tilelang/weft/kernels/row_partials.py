@@ -567,23 +567,23 @@ def scaled_planes_rows(weights, values, output, M, K, format, axis, planes=4):
                     scales[g] = T.cast((T.cast(scale_low[g], "uint8") | (T.cast(scale_high[g], "uint8") << T.uint8(4))) - T.uint8(32), "int8")
             else:
                 scales = w.scales
-            record_scale = T.cast(d[()], "float32") * ds[()]
             integer = T.alloc_var("int32", init=0)
             half = T.alloc_var("uint8", init=0)
             with T.level.subtiles(block, extent=128) as _half_block:
                 for window in T.unroll(4 // planes):
                     integer += scaled_plane_terms(low, high, activation, scales, half, window, format, planes)
                 half += T.uint8(1)
-            total += record_scale * T.cast(integer, "float32")
+            total += (T.cast(d[()], "float32") * ds[()]) * T.cast(integer, "float32")
         result = T.alloc_local((1,), "float32")
         result[0] = total
         T.copy(result, output[row])
 
 
 @tilelang.jit(target="weft")
-def scaled_planes(M, K, format="Q3_K"):
+def scaled_planes(M, K, format="Q3_K", planes=4):
     """Finish signed sixteen-element dots before the record's floating update."""
     assert format in ("Q3_K", "Q6_K") and M > 0 and K > 0 and K % 256 == 0
+    assert planes in (2, 4)
     encoding = getattr(F, format)
     record_bytes = encoding.schema.storage_bits // 8
 
@@ -598,7 +598,7 @@ def scaled_planes(M, K, format="Q3_K"):
         values = T.view(Activation, shape=(K,), encoding=F.Q8_K, axes=("k",), abi=True)
         output = T.view(Output, shape=(M,), axes=("m",), abi=True)
         with T.Kernel(1, cpu_num_threads=1):
-            scaled_planes_rows(weights, values, output, M, K, format, "m")
+            scaled_planes_rows(weights, values, output, M, K, format, "m", planes)
 
     return main
 

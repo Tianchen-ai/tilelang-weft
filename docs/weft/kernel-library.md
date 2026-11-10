@@ -70,7 +70,10 @@ parameters separately expose those reuse scopes and the output tile dimensions.
 
 `attention.rope(head_major=True)` traverses each head's contiguous pair range;
 the default traverses pair tiles first and stages coefficients across the head
-cohort. Both use the same rotary macro. `causal_attention` stages a typed query
+cohort. `attention.rope_runtime(pair_tile=32)` keeps token, head and pair extents
+dynamic, traversing them in one CPU program. Both forms retain both input
+snapshots before the in-place-capable output stores.
+`causal_attention` stages a typed query
 View and carries its online numerator as state. Its token/head cohort parameters
 bound the serial work per grid instance without changing the causal KV prefix.
 
@@ -453,8 +456,12 @@ same integer partials as their row-dot programs. Source parameters choose
 column cohorts and record windows; target passes choose local instructions.
 
 `indexed_lanes.scaled_entries` expresses IQ2_S/IQ3_S entry and payload axes
-inside a 64-element Level window. It applies integer scale groups before the
-record's floating scale. IQ4_XS uses a staged 16-entry codebook and a 32-element
+inside a 64-element Level window. Its `index_dtype="uint16"` or `"uint32"`
+selects the lookup address and packed metadata arithmetic width. Encoded
+storage, signs, I32 partials and the F32 record update keep their declared types.
+It applies integer scale groups before the record's floating scale. IQ2_S reads
+the record's F16 scale before its window traversal, preserving the Encoding's
+natural alignment at the same read snapshot. IQ4_XS uses a staged 16-entry codebook and a 32-element
 subtile with an explicit scale update. Field projection consumes the existing
 Level point, keeping both the record read and the codebook snapshot visible to
 the shared compiler.
@@ -475,7 +482,8 @@ activation quantization remains inside its invocation. `row_partials.scaled_proj
 reuses `scaled_planes_rows` or `scaled_lanes_rows` for Q3_K/Q6_K. Its `organization`
 parameter selects block integer sums or deferred lane partials in the author
 program, independently of target vector width.
-For `organization="planes"`, `planes=2/4` chooses the number of planes in each
+For `organization="planes"`, or `row_partials.scaled_planes` directly,
+`planes=2/4` chooses the number of planes in each
 integer dot batch. Both retain the 128-element Level, exact scale-group sums,
 and one floating-point update per record. Two-plane batches complete their
 partials before the next batch, shortening the live vector frontier.

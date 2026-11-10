@@ -120,14 +120,14 @@ def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pai
         Y: T.Tensor((M, H, 2 * P), "float32"),
     ):
         T.func_attr({"weft.alias_groups": {"X": "activation", "Y": "activation", "Cos": "coefficients", "Sin": "coefficients"}})
-        cosine_view = T.view(Cos, shape=(M, P), axes=("m", "k"))
-        sine_view = T.view(Sin, shape=(M, P), axes=("m", "k"))
+        cosine_view = T.view(Cos, shape=(M, P), axes=("m", "k"), abi=True)
+        sine_view = T.view(Sin, shape=(M, P), axes=("m", "k"), abi=True)
         if interleaved:
-            inputs = T.view(X, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"))
-            outputs = T.view(Y, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"))
+            inputs = T.view(X, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"), abi=True)
+            outputs = T.view(Y, shape=(M, H, P, 2), axes=("m", "h", "k", "pair"), abi=True)
         else:
-            inputs = T.view(X, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"))
-            outputs = T.view(Y, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"))
+            inputs = T.view(X, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"), abi=True)
+            outputs = T.view(Y, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"), abi=True)
         with T.Kernel(T.ceildiv(M, rows_per_program), T.ceildiv(H, heads_per_program), cpu_num_threads=cpu_num_threads) as (tile, cohort):
             for token in T.serial(rows_per_program):
                 row = token if rows_per_program >= M else tile * rows_per_program + token
@@ -151,6 +151,33 @@ def rope(M, H, P, interleaved=False, cpu_num_threads=0, heads_per_program=1, pai
     return main
 
 
+@tilelang.jit(target="weft")
+def rope_runtime(pair_tile=32, cpu_num_threads=1):
+    """Reuse one shape-polymorphic rotary program for dense CPU tensors."""
+    M, H, P = T.dynamic("T, H, P")
+
+    @T.prim_func
+    def main(
+        X: T.Tensor((M, H, 2 * P), "float32"),
+        Cos: T.Tensor((M, P), "float32"),
+        Sin: T.Tensor((M, P), "float32"),
+        Y: T.Tensor((M, H, 2 * P), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"X": "activation", "Y": "activation", "Cos": "coefficients", "Sin": "coefficients"}})
+        inputs = T.view(X, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"), abi=True)
+        outputs = T.view(Y, shape=(M, H, 2, P), axes=("m", "h", "pair", "k"), abi=True)
+        cosine_view = T.view(Cos, shape=(M, P), axes=("m", "k"), abi=True)
+        sine_view = T.view(Sin, shape=(M, P), axes=("m", "k"), abi=True)
+        with T.Kernel(1, cpu_num_threads=cpu_num_threads):
+            for row in T.serial(M):
+                for head in T.serial(H):
+                    with T.level.blocks(P, extent=pair_tile) as part:
+                        cosine, sine = T.load(cosine_view[row, part]), T.load(sine_view[row, part])
+                        rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, False)
+
+    return main
+
+
 @T.macro
 def rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, interleaved):
     if interleaved:
@@ -163,8 +190,9 @@ def rope_apply(inputs, outputs, row, head, part, cosine, sine, pair_tile, interl
     left, right = T.alloc_local((pair_tile,), "float32"), T.alloc_local((pair_tile,), "float32")
     for k in T.Parallel(pair_tile):
         left[k] = a[k] * cosine[k] - b[k] * sine[k]
-        right[k] = a[k] * sine[k] + b[k] * cosine[k]
     T.copy(left, first_output)
+    for k in T.Parallel(pair_tile):
+        right[k] = a[k] * sine[k] + b[k] * cosine[k]
     T.copy(right, second_output)
 
 
