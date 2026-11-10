@@ -88,6 +88,7 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
         self.addressed_locals = set()
         self.abi_views = {}
         self.shape_symbols = {}
+        self.shape_multiples = {}
 
         def address_use(node):
             if isinstance(node, tirx.Call) and node.op.name == "tl.access_ptr" and node.args and isinstance(node.args[0], tirx.BufferLoad):
@@ -1009,6 +1010,14 @@ class Importer(ModelOperations, TileOperations, AtomicOperations, HelperOperatio
                     self.error("ABI View extents must be positive constants or named runtime dimensions", node)
             axes = tuple(self.named_axis(str(axis)) for axis in node.annotations["axes"])
             abi_declarations[source] = (node, ViewType(encoding, tuple(shape), axes))
+            # The shared View ABI rejects incomplete serialized records. Carry
+            # that declared divisibility into Levels over the runtime extent,
+            # just as the Triton frontend does for its typed View parameters.
+            if shape and shape[-1] < 0 and encoding.kind != "dense":
+                dimension = self.analyzer.simplify(node.args[-1])
+                self.shape_multiples[dimension.name] = math.lcm(
+                    self.shape_multiples.get(dimension.name, 1), schema.elements
+                )
 
         tirx.stmt_functor.post_order_visit(function.body, abi_view)
         axis_requests = {}

@@ -75,6 +75,9 @@ record scale、逐行宏与准备协议。
 
 `linear.blocked_matmul` 在显式 `tile_m`/`tile_n` Level 和 `rows`/`columns` 输出 cohort
 内完成整个 K 的缩并，静态 K 使用普通 `T.gemm` 并保留权重的存储顺序。
+序列化 ABI View 的运行时长度保留共享 native binder 检查的完整 record 约束。
+当 Level 的分块整除 record 长度时，该层及其可整除子层都是 exact 域；证明来自
+Encoding 与 ABI，不来自编译 factory 时提供的示例尺寸。
 `dynamic_k=True` 将具名运行时 K 经 ABI View 和完整局部 Value 传给
 `T.reduce_dot(..., over="k")`；输出 tile 保持有界，由共同目标编译器遍历 K，
 同一编译 kernel 可以接受不同的运行时归约长度。`linear.matmul` 则单独表达分块 K

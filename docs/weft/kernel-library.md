@@ -66,6 +66,10 @@ and preparation protocol.
 the ABI Views and complete local Values into `T.reduce_dot(..., over="k")`.
 The output tile stays bounded while the shared target compiler traverses K;
 the same compiled kernel can accept different runtime reduction lengths.
+Runtime lengths in serialized ABI Views retain the complete-record constraint
+checked by the shared native binder. Levels whose partition divides that record
+extent are exact, including descendant subtiles. This proof comes from the
+Encoding and ABI, rather than from the example shape used to compile the factory.
 `linear.matmul` separately exposes a tiled K loop and a grid of independent
 output programs.
 `projection.staged_f16_projection` converts activation to the caller's F16

@@ -615,7 +615,14 @@ class ModelOperations:
         serial = self.next_domain
         self.next_domain += 1
         static = self.analyzer.simplify(extent_expr)
-        tail = "exact" if isinstance(static, tirx.IntImm) and int(static.value) % partition == 0 else "tail"
+        multiple = (
+            int(static.value)
+            if isinstance(static, tirx.IntImm)
+            else self.shape_multiples.get(static.name, 1)
+            if isinstance(static, tirx.Var)
+            else 1
+        )
+        tail = "exact" if multiple % partition == 0 else "tail"
         axis = self.named_axis(name)
         ancestor = self.active_domain.type
         while ancestor.domain_id:
