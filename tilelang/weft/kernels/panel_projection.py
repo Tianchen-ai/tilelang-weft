@@ -196,6 +196,120 @@ def projection(M, N, K, format="Q2_K", rows=16, columns=16,
 
 
 @tilelang.jit(target="weft")
+def record_projection(M, N, K, format="Q2_K", rows=16, columns=16,
+                      records=2, engine="auto"):
+    """Keep one output tile across ordered records; prepare every panel in-call."""
+    assert format in ("Q2_K", "Q6_K")
+    assert records == 2
+    assert M > 0 and N > 0 and K > 0 and M % rows == N % columns == K % (records * 256) == 0
+    encoding = getattr(F, format)
+    weight_bytes = K // 256 * (encoding.schema.storage_bits // 8)
+    panel_dtype = "uint8" if format == "Q2_K" else "int16"
+    affine = format == "Q2_K"
+
+    @T.prim_func
+    def main(
+        Weights: T.Tensor((N, weight_bytes), "uint8"),
+        Activation: T.Tensor((M, K), "float32"),
+        Quantized: T.Tensor((M, K // 256 * 292), "uint8"),
+        Output: T.Tensor((M, N), "float32"),
+        Panel: T.Tensor((records, columns, 256), panel_dtype),
+        PackedActivation: T.Tensor((records, M, 256), "int8"),
+        WeightScales: T.Tensor((records, columns), "float32"),
+        Minima: T.Tensor((records, columns, 16) if affine else (0, columns, 16), "int16"),
+        MinimumScales: T.Tensor((records, columns) if affine else (0, columns), "float32"),
+    ):
+        T.func_attr({"weft.alias_groups": {"Weights": "input", "Activation": "input",
+                     "Quantized": "quantized", "Output": "output", "Panel": "weights",
+                     "PackedActivation": "activation", "WeightScales": "scale",
+                     "Minima": "minima", "MinimumScales": "minimum_scale"}})
+        weights = T.view(Weights, shape=(N, K), encoding=encoding, axes=("n", "k"), abi=True)
+        source = T.view(Activation, shape=(M, K), axes=("m", "k"), abi=True)
+        prepared = T.view(Quantized, shape=(M, K), encoding=F.Q8_K, axes=("m", "k"), abi=True)
+        output = T.view(Output, shape=(M, N), axes=("m", "n"), abi=True)
+        panel = T.view(Panel, shape=(records, columns, 256), axes=("record", "n", "k"), abi=True)
+        packed_activation = T.view(PackedActivation, shape=(records, M, 256), axes=("record", "m", "k"), abi=True)
+        scales = T.view(WeightScales, shape=(records, columns), axes=("record", "n"), abi=True)
+        if affine:
+            minima = T.view(Minima, shape=(records, columns, 16), axes=("record", "n", "k"), abi=True)
+            minimum_scales = T.view(MinimumScales, shape=(records, columns), axes=("record", "n"), abi=True)
+        with T.Kernel(1, cpu_num_threads=1):
+            quantize_rows(source, prepared, M, K, "Q8_K", 256, "first", "direct", "rne", 64)
+            first = T.alloc_var("bool", init=True)
+            with T.level.blocks(K, extent=records * 256) as block:
+                for record in T.serial(records):
+                    for m in T.serial(M):
+                        T.copy(T.load(prepared[m, block][record * 256 : (record + 1) * 256].q), packed_activation[record, m, :])
+                with T.level.cols(N, group=columns) as col:
+                    for record in T.serial(records):
+                        for c in T.serial(columns):
+                            w = T.load(weights[col, block][c, record * 256 : (record + 1) * 256])
+                            q = w.q if affine else w.ql
+                            metadata = w.scales
+                            if not affine:
+                                high = w.qh
+                            codes = T.alloc_local((256,), panel_dtype)
+                            for k in T.Parallel(256):
+                                if affine:
+                                    codes[k] = T.cast(T.cast(q[k], "int16") * T.cast(metadata[T.cast(k, "uint32") // T.uint32(16)] & T.uint8(15), "int16"), panel_dtype)
+                                else:
+                                    code = (T.cast(q[k], "int16") | T.cast(high[k], "int16") << T.int16(4)) - T.int16(32)
+                                    codes[k] = code * T.cast(metadata[T.cast(k, "uint32") // T.uint32(16)], "int16")
+                            T.copy(codes, panel[record, c, :])
+                            T.copy(w.d, scales[record, c])
+                            if affine:
+                                minimum = T.alloc_local((16,), "int16")
+                                for g in T.Parallel(16):
+                                    minimum[g] = T.cast(metadata[g] >> T.uint8(4), "int16")
+                                T.copy(minimum, minima[record, c, :])
+                                T.copy(w.dmin, minimum_scales[record, c])
+                    weights0, weights1 = T.load(panel[0, :, :]), T.load(panel[1, :, :])
+                    scales0, scales1 = T.load(scales[0, :]), T.load(scales[1, :])
+                    if affine:
+                        minima0, minima1 = T.load(minima[0, :, :]), T.load(minima[1, :, :])
+                        minimum_scales0, minimum_scales1 = T.load(minimum_scales[0, :]), T.load(minimum_scales[1, :])
+                    with T.level.rows(M, group=rows) as row:
+                        total = T.state((rows, columns), "float32", init=0)
+                        if not first:
+                            previous = T.load(output[row, col])
+                            T.copy(previous, total)
+                        for record in T.unroll(records):
+                            x = T.load(packed_activation[record, row, :])
+                            values = T.alloc_local((columns, 256), panel_dtype)
+                            wd = T.alloc_local((columns,), "float32")
+                            if record == 0:
+                                T.copy(weights0, values)
+                                T.copy(scales0, wd)
+                            else:
+                                T.copy(weights1, values)
+                                T.copy(scales1, wd)
+                            product = T.alloc_local((rows, columns), "int32")
+                            T.reduce_dot(x, values, product, over="k", acc_dtype="int32", engine=engine)
+                            xd = T.load(prepared[row, block][:, record * 256 : (record + 1) * 256].ds)
+                            if affine:
+                                sums = T.load(prepared[row, block][:, record * 256 : (record + 1) * 256].bsum)
+                                minimum = T.alloc_local((columns, 16), "int16")
+                                dmin = T.alloc_local((columns,), "float32")
+                                if record == 0:
+                                    T.copy(minima0, minimum)
+                                    T.copy(minimum_scales0, dmin)
+                                else:
+                                    T.copy(minima1, minimum)
+                                    T.copy(minimum_scales1, dmin)
+                                correction = T.alloc_local((rows, columns), "int32")
+                                T.reduce_dot(sums, minimum, correction, over="k", acc_dtype="int32", engine=engine)
+                            for r, c in T.Parallel(rows, columns):
+                                value = T.cast(product[r, c], "float32") * (xd[r] * wd[c])
+                                if affine:
+                                    value -= T.cast(correction[r, c], "float32") * (xd[r] * dmin[c])
+                                total[r, c] += value
+                        T.copy(total, output[row, col])
+                first = False
+
+    return main
+
+
+@tilelang.jit(target="weft")
 def staged_affine(M, N, K, format="Q4_K", staged_columns=64, block_k=256,
                   batch_rows=16, columns=16, rows=1, partials=8):
     """Reuse an encoded weight stage across rows without a decoded panel."""

@@ -422,6 +422,15 @@ uses an invocation-local `(pair, column, term)` I16 panel and typed two-term
 I32 partials. Activation quantization, panel preparation and contraction remain
 inside the call; both choices use the ordinary frontend and shared core.
 
+`panel_projection.record_projection` retains an output tile across two ordered
+Q2_K or Q6_K records. Its explicit invocation workspaces hold both integer
+panels and their scale/minimum metadata. Separate snapshots of each populated
+panel are read before the activation-row Level, so matrix packing can be reused
+by its row consumers. The tile's F32 state preserves record order and is stored
+once per two-record window. Quantization, decoding and panel construction remain
+inside the complete invocation. The compiler selects the physical packing,
+AMX operations and resource placement from these ordinary Values and uses.
+
 `panel_projection.staged_affine` retains encoded Q4_K/Q5_K weights across an
 explicit activation-row cohort. Its `staged_columns`, `block_k`, `batch_rows`,
 `rows` and `columns` parameters define the author's reuse boundaries. Q8_K

@@ -327,6 +327,13 @@ scale-group 整数和，以及逐 record 的浮点更新；双 plane 批次先�
 并显式表达两项乘积的 I32 partial。Activation 量化、面板准备和 contraction 都保留
 在调用内；两种选择均经过普通前端与共享 core。
 
+`panel_projection.record_projection` 为 Q2_K、Q6_K 在两个有序 record 之间保留
+一个输出 tile。显式调用内 workspace 保存两份整数面板及其 scale/minimum metadata。
+填充完成后，各面板的独立读取快照位于 activation 行 Level 之前，使矩阵 packing
+能够被各行消费者复用。tile 的 F32 state 按 record 原顺序更新，每两个 record
+才写回一次。量化、解码与面板构造均保留在完整调用内。编译器根据这些普通 Value
+及其消费者选择物理 packing、AMX 操作和资源放置。
+
 `panel_projection.staged_affine` 在显式 activation 行 cohort 中复用 encoded
 Q4_K/Q5_K 权重。`staged_columns`、`block_k`、`batch_rows`、`rows` 和 `columns`
 规定作者的复用范围。Q8_K activation 准备仍在调用内；完整 K 的输出 tile 从零累加，
