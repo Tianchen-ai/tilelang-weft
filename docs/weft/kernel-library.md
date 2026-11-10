@@ -213,6 +213,11 @@ Its multi-output affine tiles retain one I32 sum per output across the record's
 record as its payload, preserving their Encoding group relation without a
 second coefficient read or a separate coefficient stage. The minimum correction
 remains a separate dot against Q8_K sums.
+For an explicit `engine="matrix"`, these affine tiles convert their Q2/Q4/Q5
+payloads to signed I8 before contraction with Q8_K. The payload ranges
+`0..3`, `0..15` and `0..31` fit I8 exactly. This author conversion supplies a
+common I8 matrix operand without narrowing the activation or changing the
+integer scale groups; the source Encoding and stored weight bytes stay intact.
 `short_projection.staged_projection` puts its entire staged compute traversal
 in one non-inlined macro call after preparation, retaining the same Level tree
 and natural input ABI. The call closes preparation temporaries without adding

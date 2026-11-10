@@ -886,9 +886,13 @@ def affine_matrix_tiles(weights, values, output, mc, nc, K, format, rows, column
                     payload = T.load(w.q, at=group, axis=1)
                     if format == "Q5_K":
                         high = T.load(w.qh, at=group, axis=1)
-                        codes = T.alloc_local((columns, width), "uint8")
+                        codes = T.alloc_local((columns, width), "int8" if engine == "matrix" else "uint8")
                         for c, k in T.Parallel(columns, width):
                             codes[c, k] = T.cast(payload[c, k], "uint8") | (T.cast(high[c, k], "uint8") << T.uint8(4))
+                    elif engine == "matrix":
+                        codes = T.alloc_local((columns, width), "int8")
+                        for c, k in T.Parallel(columns, width):
+                            codes[c, k] = T.cast(payload[c, k], "int8")
                     else:
                         codes = payload
                     products = T.alloc_local((rows, columns), "int32")

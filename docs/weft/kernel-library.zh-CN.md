@@ -244,6 +244,10 @@ factory 均公开已有 activation extreme/inverse 策略，复用行程序时�
 `row_partials.staged_projection` 在有界的权重列和 activation 行 stage 中复用同一组
 affine 或 signed 分组行宏，覆盖五种 K 格式，无需解码面板或持久重排。
 `batch_rows` 与 `staged_columns` 限定作者的复用范围，Q8_K 准备仍保留在完整 projection 内。
+显式指定 `engine="matrix"` 时，affine tile 先将 Q2/Q4/Q5 的 payload 转为有符号
+I8，再与 Q8_K contraction。三种码值的范围分别为 `0..3`、`0..15`、`0..31`，
+均可由 I8 精确表示。这项作者转换提供统一的 I8 矩阵操作数，保留 activation 位宽、
+整数 scale 分组、源 Encoding 和存储中的权重字节。
 
 Q3_K/Q6_K 还可通过显式 `rows`、`columns` 在 K 遍历中保留二维输出 tile。
 解码后的 64 元素权重窗口服务 activation 行 cohort 的各次 16 元素 contraction；
