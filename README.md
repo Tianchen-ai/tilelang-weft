@@ -70,11 +70,12 @@ The [catalog](tilelang/weft/kernels/catalog.py) links names to their actual auth
 ## Install and run
 
 Download matching `weft_core` and `tilelang` wheels from the
-[project release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2),
-then install them in a Python environment:
+[project release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/weft-parity),
+then resolve dependencies and install those exact release wheels:
 
 ```sh
 python -m pip install ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 python examples/weft/01_pointwise.py
 python examples/weft/02_tiles.py
 python examples/weft/03_dynamic.py
@@ -109,16 +110,19 @@ separate timing columns.
 
 | Platform | JIT + numerical checks | Matched refs | Faster than ref | Median native speedup |
 |---|---:|---:|---:|---:|
-| SG2044 | 133/133 | 132 | 11 | 0.0580× |
-| K1 | 137/137 | 136 | 9 | 0.1143× |
-| K3 A100 | 136/136 | 135 | 10 | 0.1074× |
-| x86 | 147/147 | 140 | 11 | 0.0375× |
-| **Total** | **553/553** | **543** | **41** | — |
+| SG2044 | 133/133 | 132 | 106 | 1.3598× |
+| K1 | 137/137 | 136 | 104 | 1.3176× |
+| K3 A100 | 136/136 | 135 | 128 | 1.6569× |
+| x86 | 147/147 | 140 | 130 | 1.2917× |
+| **Total** | **553/553** | **543** | **468** | — |
 
-The plot contains all 543 matched native comparisons and all 553 numerical-check
-outcomes. Speedup is reference time divided by TileLang time. Normalization and
-activation quantization include faster implementations; packed dot and complete
-projection account for substantial performance gaps in the current author programs.
+![Per-case performance inheritance from Triton](docs/weft/assets/parity.png)
+
+All 553 cases have a matched Triton native control and meet the per-case
+**TileLang time ≤ Triton time × 1.03** requirement. Candidates and controls run in
+alternating order on shared inputs. The external-reference plot contains all
+543 matched native comparisons; its speedup is reference time divided by
+TileLang time. Original samples and source bindings accompany the result table.
 Reproduce these experiments with the released TileLang–Weft and TileLang–Weft Bench
 wheels and the documented full-suite commands.
 

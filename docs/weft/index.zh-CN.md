@@ -9,11 +9,12 @@ TileLang–Weft 将共同 Weft CPU 编译器嵌入 TileLang v0.1.15。
 
 ## 安装与构建
 
-从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2)
+从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/weft-parity)
 下载与宿主架构、Python ABI 匹配的 wheel，在 Python 环境安装：
 
 ```sh
 python -m pip install ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 python -c 'import tilelang, weft_core; print(tilelang.__version__, weft_core.__version__)'
 ```
 
@@ -21,11 +22,21 @@ core wheel 提供原生 compiler、runtime 及 Clang 23/OpenMP 资源。
 LLVM/MLIR ABI 封装在 core 内；TileLang 保留匹配的 TVM/TVM-FFI。
 CPU Tensor 直接借用底层存储，`out_idx` 输出遵循 TileLang 的普通分配约定。
 
+| 宿主 wheel | core Python ABI | glibc | libstdc++ 符号版本 |
+|---|---|---|---|
+| Linux x86-64 | CPython 3.10 | 2.34+ | GLIBCXX 3.4.30+ |
+| Linux RISC-V LP64D | CPython 3.11、3.12、3.14 | 2.38+ | GLIBCXX 3.4.30+ |
+
+TileLang wheel 在各宿主架构使用 CPython 稳定 ABI；core wheel 匹配具体解释器。
+这些要求来自发行包内的原生库。kernel 的指令要求由目标探测及所选程序的 artifact
+metadata 确定。
+
 先安装适合宿主平台的 CPU PyTorch。RISC-V Release 同时提供相应 Python ABI
 的原生 TVM-FFI 依赖 wheel。将匹配的文件下载到同一目录，安装时使用：
 
 ```sh
 python -m pip install --find-links . ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 ```
 
 RISC-V 上通过 PyTorch 的 DLPack 协议交互，不强制安装可选的预构建
@@ -220,6 +231,11 @@ saturation=False)` 保留显式窄化。`output[part].q` 等字段 View 支持 t
 Python 热调用分别列出。
 
 ![原生算子性能与目标机 JIT 覆盖](assets/performance.png)
+
+![逐项继承 Triton 原生性能](assets/parity.png)
+
+553 份选定原生产物均有匹配的 Triton 对照，逐项满足 3% 耗时要求。
+两者使用同一批输入交替测量；外部库比较保留独立的参考观测。
 
 [算子结果](https://tianchen-ai.github.io/tilelang-weft-bench/results.zh-CN.html)公开完整
 CSV、候选与参考的原始样本、硬件决定和源码分析。复现前可通过 Bench catalog 查看

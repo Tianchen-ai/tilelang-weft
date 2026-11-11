@@ -3,7 +3,9 @@
 [中文](README.zh-CN.md) · [Handbook](../../docs/weft/index.md)
 
 Run with installed TileLang–Weft and matching `weft-core` wheels.
-Every example compiles native TileLang source and checks CPU results.
+The Python examples compile native TileLang programs and check CPU results.
+Example 07 exports a checked GGML role package; its C++ consumer checks the
+native results and replacement counts against GGML.
 
 | File | What it shows |
 |---|---|
@@ -14,10 +16,12 @@ Every example compiles native TileLang source and checks CPU results.
 | `05_derived_layout.py` | Explicit persistent preparation and derived interleave consumption |
 | `06_autotune_export.py` and `native/affine.cpp` | CPU tuning, native export and a standalone C++ consumer |
 | `07_llama_package.py` and `native/ggml_rows.cpp` | Dynamic packed-row ABI, GGML role binding, reference checks and observed replacement calls |
+| `13_packed_dot.py` | Q4_0/Q8_0 Encoding records passed to the ordinary packed-dot JIT factory |
 
 ```sh
 python examples/weft/01_pointwise.py
 python examples/weft/04_encoding_levels.py
+python examples/weft/13_packed_dot.py
 python examples/weft/06_autotune_export.py --output /tmp/tilelang-affine
 ```
 
@@ -35,6 +39,4 @@ It links the native runtime and system C++ libraries.
 
 Normal reusable author programs live in `tilelang.weft.kernels`.
 Comparison and timing belong to the independent Bench project.
-`13_packed_dot.py` constructs Q4_0/Q8_0 records and executes the same ordinary
-packed factory selected by TileLang–Weft Bench.
 Complete GGML build/run commands are in the [deployment handbook](../../docs/weft/native-deployment.md).

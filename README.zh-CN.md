@@ -48,11 +48,12 @@ JIT、缓存和调优服务；core 负责物理布局、局部指令、流水与
 
 ## 使用
 
-从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2)
+从[项目 Release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/weft-parity)
 下载与宿主架构和 Python ABI 匹配的 `weft-core` 和 `tilelang` wheel 后：
 
 ```sh
 python -m pip install ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 python examples/weft/01_pointwise.py
 python examples/weft/02_tiles.py
 python examples/weft/03_dynamic.py
@@ -94,15 +95,17 @@ Python 导出、C++ 编译和原生调用。
 
 | 平台 | JIT 与数值检查 | 匹配参考 | 快于参考 | 原生倍率中位数 |
 |---|---:|---:|---:|---:|
-| SG2044 | 133/133 | 132 | 11 | 0.0580× |
-| K1 | 137/137 | 136 | 9 | 0.1143× |
-| K3 A100 | 136/136 | 135 | 10 | 0.1074× |
-| x86 | 147/147 | 140 | 11 | 0.0375× |
-| **合计** | **553/553** | **543** | **41** | — |
+| SG2044 | 133/133 | 132 | 106 | 1.3598× |
+| K1 | 137/137 | 136 | 104 | 1.3176× |
+| K3 A100 | 136/136 | 135 | 128 | 1.6569× |
+| x86 | 147/147 | 140 | 130 | 1.2917× |
+| **合计** | **553/553** | **543** | **468** | — |
 
-图中包含全部 543 项匹配原生比较及 553 项数值检查结果。倍率为参考耗时除以
-TileLang 耗时。归一化和 activation 量化已有快于参考的实现；当前作者程序中的
-packed dot 与完整 projection 仍有显著性能差距。使用已发行的 TileLang–Weft、
+![逐项继承 Triton 原生性能](docs/weft/assets/parity.png)
+
+553 项均有匹配的 Triton 原生对照，逐项满足 **TileLang 耗时 ≤ Triton 耗时 × 1.03**。
+候选与对照使用同一批输入交替测量。外部参考图包含全部 543 项匹配原生比较，倍率为
+参考耗时除以 TileLang 耗时；结果表附带原始样本及源码绑定。使用已发行的 TileLang–Weft、
 TileLang–Weft Bench wheel 和工具书中的完整套件命令即可复现实验。
 
 [双语 Bench 工具书](https://tianchen-ai.github.io/tilelang-weft-bench/) 提供配套

@@ -22,10 +22,11 @@ The package version is `0.1.15+weft.2`; the import remains `tilelang`.
 ## Installation and builds
 
 Download the matching host/Python wheels from the
-[release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/v0.1.15-weft.2), then install them:
+[release](https://github.com/Tianchen-ai/tilelang-weft/releases/tag/weft-parity), then install them:
 
 ```sh
 python -m pip install ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 python -c 'import tilelang, weft_core; print(tilelang.__version__, weft_core.__version__)'
 ```
 
@@ -34,12 +35,23 @@ Its LLVM/MLIR ABI is private; TileLang keeps its matching TVM/TVM-FFI dependency
 CPU tensors are borrowed directly. Explicit `out_idx` outputs follow TileLang's
 ordinary allocation convention.
 
+| Host wheel | Core Python ABI | glibc | libstdc++ symbol level |
+|---|---|---|---|
+| Linux x86-64 | CPython 3.10 | 2.34+ | GLIBCXX 3.4.30+ |
+| Linux RISC-V LP64D | CPython 3.11, 3.12, 3.14 | 2.38+ | GLIBCXX 3.4.30+ |
+
+The TileLang wheel uses the CPython stable ABI on each host architecture;
+the core wheel matches the interpreter. These requirements come from the native
+libraries shipped in the release. Kernel ISA requirements follow target discovery
+and the selected program's artifact metadata.
+
 Install a CPU PyTorch build for the host platform first. The RISC-V release also
 provides native TVM-FFI dependency wheels for the supported Python ABIs. Download
 the matching files into one directory and use `--find-links .` during installation:
 
 ```sh
 python -m pip install --find-links . ./weft_core-*.whl ./tilelang-*.whl
+python -m pip install --force-reinstall --no-deps ./weft_core-*.whl ./tilelang-*.whl
 ```
 
 On RISC-V, TVM-FFI uses PyTorch's DLPack protocol without requiring the optional
@@ -287,6 +299,12 @@ execution machine. Native workloads, grid, cold JIT, cache restoration and Pytho
 hot calls have separate columns.
 
 ![Native operator performance and target-native JIT coverage](assets/performance.png)
+
+![Per-case performance inheritance from Triton](assets/parity.png)
+
+The 553 selected native artifacts have matched Triton controls and meet the
+per-case 3% latency requirement. Both run in alternating order with the same
+inputs. The external-library comparison retains its own reference observations.
 
 The [operator results](https://tianchen-ai.github.io/tilelang-weft-bench/results.html)
 publish the full CSV, original candidate/reference samples, hardware decisions

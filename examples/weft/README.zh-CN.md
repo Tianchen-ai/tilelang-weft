@@ -3,7 +3,8 @@
 [English](README.md) · [工具书](../../docs/weft/index.zh-CN.md)
 
 安装 TileLang–Weft 与匹配 `weft-core` wheel 后运行。
-每个示例编译原生 TileLang 源码，并检查 CPU 结果。
+Python 示例编译原生 TileLang 程序并检查 CPU 结果。示例 07 导出符合 GGML
+角色合同的 package；其 C++ 消费者对照 GGML 检查原生结果和替换计数。
 
 | 文件 | 展示内容 |
 |---|---|
@@ -14,10 +15,12 @@
 | `05_derived_layout.py` | 显式持久 preparation 与 derived interleave 消费者 |
 | `06_autotune_export.py`、`native/affine.cpp` | CPU 调优、原生导出与独立 C++ 调用 |
 | `07_llama_package.py`、`native/ggml_rows.cpp` | 动态 packed-row ABI、GGML 角色绑定、参考检查与实际替换计数 |
+| `13_packed_dot.py` | 构造 Q4_0/Q8_0 Encoding records，调用普通 packed-dot JIT factory |
 
 ```sh
 python examples/weft/01_pointwise.py
 python examples/weft/04_encoding_levels.py
+python examples/weft/13_packed_dot.py
 python examples/weft/06_autotune_export.py --output /tmp/tilelang-affine
 ```
 
@@ -34,4 +37,4 @@ c++ -std=c++17 examples/weft/native/affine.cpp -I/tmp/tilelang-affine \
 native runtime 与系统 C++ 库。
 
 普通可复用作者程序位于 `tilelang.weft.kernels`；参考比较与计时放在独立 Bench 项目。
-`13_packed_dot.py` 构造 Q4_0/Q8_0 records，调用 TileLang–Weft Bench 选择的同一个普通 packed factory。
+完整 GGML 构建与运行命令见[部署工具书](../../docs/weft/native-deployment.zh-CN.md)。
